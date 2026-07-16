@@ -7,9 +7,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "httpx>=0.27.0",
     "aiofiles>=23.0.0",
-    "asyncio-mqtt>=0.16.0",
     "psutil>=5.9.0",
-    "netifaces>=0.11.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +21,11 @@ web = [
     "uvicorn>=0.24.0",
     "websockets>=12.0",
 ]
+all = [
+    "fusion-multi-nodes[test,web]",
+    "click>=8.1.0",
+    "netifaces>=0.11.0",
+]
 
 [project.scripts]
 fusion-multi-node = "fusion_multi_nodes.cli:main"
@@ -30,6 +33,27 @@ fusion-multi-node = "fusion_multi_nodes.cli:main"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "network: tests that require network access",
+]
+
+[tool.coverage.run]
+source = ["fusion_multi_nodes"]
+omit = ["*/cli.py"]
+branch = true
+relative_files = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "def main",
+]
 
 [tool.setuptools.packages.find]
 include = ["fusion_multi_nodes*"]
