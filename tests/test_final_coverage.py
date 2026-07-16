@@ -379,3 +379,107 @@ class TestNetworkTopologyFinal:
         # 回环延迟应为 0.01ms
         latency = asyncio.run(detector._measure_latency("lo0"))
         assert latency == 0.01
+
+    def test_measure_interface_speed_loopback(self):
+        """测试接口速度测量。"""
+        from fusion_multi_nodes.utils import NetworkTopologyDetector
+        detector = NetworkTopologyDetector()
+        speed = asyncio.run(detector._measure_interface_speed("lo0"))
+        assert speed > 0
+
+    def test_get_primary_interface_with_interfaces(self):
+        """测试获取主接口。"""
+        from fusion_multi_nodes.utils import NetworkTopologyDetector, LinkType, LinkInfo
+        detector = NetworkTopologyDetector()
+        detector._interfaces["eth0"] = LinkInfo(
+            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000, latency_ms=0.5,
+            interface="eth0", is_rdma=False, is_active=True, priority=4)
+        assert detector.get_primary_interface() == "eth0"
+        assert detector.get_link_speed() == 1000.0
+        assert detector.get_link_type() == LinkType.ETHERNET_1G
+
+
+# ── MCP Gateway 额外覆盖 ──
+
+class TestMCPGatewayExtra:
+    def test_mcp_tool_call_count(self):
+        """测试工具调用计数。"""
+        tool = MCPTool(name="counter", description="test", parameters={})
+        assert tool.call_count == 0
+
+    def test_mcp_request_defaults(self):
+        """测试 MCPRequest 默认值。"""
+        from fusion_multi_nodes.mcp_gateway import MCPRequest
+        req = MCPRequest(request_id="r1", tool_name="t1", arguments={}, source="test")
+        assert req.status == "pending"
+        assert req.assigned_node == ""
+        assert req.token_count == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_tool_call_with_selector_string(self):
+        """测试节点选择器返回字符串。"""
+        gateway = MCPClusterGateway()
+        gateway.set_node_selector(lambda t: "10.0.0.1")
+        tool = MCPTool(name="sel_test", description="test", parameters={})
+        gateway.register_tool(tool)
+        result = await gateway.handle_tool_call("sel_test", {}, source="test")
+        # 远程不可达，应返回错误
+        assert "error" in result
+
+
+# ── Observability 额外覆盖 ──
+
+class TestObservabilityExtra:
+    def test_get_metrics_with_filters(self):
+        """测试指标过滤。"""
+        obs = ClusterObservability()
+        for i in range(5):
+            obs.record_metric(f"node_{i}", "cpu", float(i * 10))
+        # 按时间过滤
+        later = obs.get_metrics("cpu", since=time.time() + 1)
+        assert len(later) == 0
+        # 按限制数量
+        limited = obs.get_metrics("cpu", limit=2)
+        assert len(limited) <= 2
+        # 最新指标不存在
+        latest = obs.get_latest_metric("nonexistent")
+        assert latest is None
+
+    def test_get_logs_with_filters(self):
+        """测试日志过滤。"""
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(time.time(), "n1", "INFO", "mod1", "msg1"))
+        obs.add_log(LogEntry(time.time(), "n2", "ERROR", "mod2", "msg2"))
+        # 按节点过滤
+        n1_logs = obs.get_logs(node_id="n1")
+        assert len(n1_logs) == 1
+        # 按级别过滤
+        error_logs = obs.get_logs(level="ERROR")
+        assert len(error_logs) == 1
+        # 按时间过滤
+        future_logs = obs.get_logs(since=time.time() + 1)
+        assert len(future_logs) == 0
+        # 按限制数量
+        limited = obs.get_logs(limit=1)
+        assert len(limited) <= 1
+
+
+# ── KV Cache 额外覆盖 —─
+
+class TestKVSharingExtra:
+    def test_evict_when_cache_empty(self):
+        """测试空缓存时的淘汰行为。"""
+        manager = KVSharingManager(max_local_cache_mb=0.0)
+        # 直接调用 _evict，缓存为空时应 break
+        manager._evict(1000)
+        assert manager._local_size_bytes == 0
+
+    def test_kv_shard_last_access(self):
+        """测试 KVShard 的 last_access 更新。"""
+        import time
+        shard = KVShard(shard_id="s1", model_name="m", layer_index=0,
+                        node_id="n1", token_count=100, size_bytes=1024,
+                        created_at=time.time())
+        assert shard.last_access == 0.0
+        shard.last_access = time.time()
+        assert shard.last_access > 0
