@@ -15,6 +15,9 @@
 │     └──────────────┴──────────────┴──────────────┘           │
 │                           ↓                                  │
 │              Distributed MLX (mlx.distributed)                │
-│         Thunderbolt RDMA / Ethernet / P2P Bridge              │
-└──────────────────────────────────────────────────────────────┘
+ │         Thunderbolt RDMA / Ethernet / P2P Bridge              │
+ └──────────────────────────────────────────────────────────────┘
 """
+
+__version__ = "0.1.0"
+__app_name__ = "Fusion-Multi-Node"
