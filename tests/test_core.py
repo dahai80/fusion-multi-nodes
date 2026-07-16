@@ -273,3 +273,178 @@ class TestClusterConfig:
         config = ClusterConfig(config_path=str(tmp_path / "test2.json"))
         config.set("cluster.master_port", 19753)
         assert config.get("cluster.master_port") == 19753
+
+
+# ── Phase 5: Caveman 压缩测试 ──
+
+class TestCaveman:
+    def test_compress_zlib(self):
+        from fusion_multi_nodes.distributed_mlx import CavemanCompressor
+        compressor = CavemanCompressor()
+        data = b"Hello Fusion-Multi-Node! " * 100
+        compressed, stats = compressor.compress(data, method="zlib")
+        assert len(compressed) < len(data)
+        assert stats.ratio < 1.0
+        decompressed = compressor.decompress(compressed, "zlib")
+        assert decompressed == data
+
+    def test_compress_diff(self):
+        from fusion_multi_nodes.distributed_mlx import CavemanCompressor
+        compressor = CavemanCompressor()
+        data = bytes(range(256)) * 10
+        compressed, stats = compressor.compress(data, method="diff")
+        assert stats.ratio < 1.0
+        decompressed = compressor.decompress(compressed, "diff")
+        assert decompressed == data
+
+    def test_compress_dict(self):
+        from fusion_multi_nodes.distributed_mlx import CavemanCompressor
+        compressor = CavemanCompressor()
+        # 使用 zlib 无损压缩测试
+        data = b"ABCABCABCABCABCABCABC" * 10
+        compressed, stats = compressor.compress(data, method="zlib")
+        decompressed = compressor.decompress(compressed, "zlib")
+        assert decompressed == data
+        assert stats.ratio < 1.0
+
+    def test_auto_select_method(self):
+        from fusion_multi_nodes.distributed_mlx import CavemanCompressor
+        compressor = CavemanCompressor()
+        # 小数据
+        small = b"hello"
+        compressed, stats = compressor.compress(small, method="auto")
+        assert stats.method == "dict"
+
+    @pytest.mark.asyncio
+    async def test_caveman_manager(self):
+        from fusion_multi_nodes.distributed_mlx import CavemanManager
+        manager = CavemanManager()
+        data = b"Test data for Caveman compression. " * 50
+        compressed, method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
+        assert stats.original_bytes > stats.compressed_bytes
+        stats = manager.get_stats()
+        assert stats["total_original_bytes"] > 0
+        assert stats["savings_percent"] > 0
+
+    def test_compression_configs(self):
+        from fusion_multi_nodes.distributed_mlx import CavemanManager
+        manager = CavemanManager()
+        tb5 = manager.get_compression_config("thunderbolt_5")
+        assert tb5["method"] == "dict"
+        eth1g = manager.get_compression_config("ethernet_1g")
+        assert eth1g["method"] == "zlib"
+
+
+# ── Phase 5: 网络拓扑测试 ──
+
+class TestNetworkTopology:
+    @pytest.mark.asyncio
+    async def test_detect(self):
+        from fusion_multi_nodes.utils import NetworkTopologyDetector
+        detector = NetworkTopologyDetector()
+        interfaces = await detector.detect()
+        assert len(interfaces) >= 1
+        assert "lo0" in interfaces
+
+    def test_get_best_link(self):
+        from fusion_multi_nodes.utils import NetworkTopologyDetector
+        detector = NetworkTopologyDetector()
+        # 手动添加接口
+        detector._interfaces["lo0"] = type("Link", (), {"type": "thunderbolt_5", "bandwidth_mbps": 40000,
+                                                          "latency_ms": 0.01, "interface": "lo0",
+                                                          "is_rdma": False, "is_active": True, "priority": 0})()
+        best = detector.get_best_link()
+        assert best is not None
+
+    def test_link_type_classification(self):
+        from fusion_multi_nodes.utils import NetworkTopologyDetector, LinkType
+        detector = NetworkTopologyDetector()
+        assert detector._classify_thunderbolt(40000) == LinkType.THUNDERBOLT_5
+        assert detector._classify_ethernet(1000) == LinkType.ETHERNET_1G
+        assert detector._classify_wifi(2400) == LinkType.WIFI_6E
+
+
+# ── Phase 5: KV 缓存共享测试 ──
+
+class TestKVSharing:
+    def test_store_and_lookup(self):
+        import time
+        from fusion_multi_nodes.distributed_mlx import KVSharingManager, KVCacheEntry, KVShard
+        manager = KVSharingManager(max_local_cache_mb=64.0)
+
+        entry = KVCacheEntry(
+            cache_id="test_1",
+            model_name="qwen3.5-9b",
+            prompt_hash="abc123",
+            prompt_prefix="Hello",
+            total_tokens=100,
+            total_size_bytes=1024,
+            created_at=time.time(),
+            shards=[KVShard(
+                shard_id="s1", model_name="qwen3.5-9b", layer_index=0,
+                node_id="node_1", token_count=100, size_bytes=1024,
+                created_at=time.time(),
+            )],
+        )
+        assert manager.store_local(entry)
+        found = manager.lookup_local("qwen3.5-9b", "abc123")
+        assert found is not None
+        assert found.cache_id == "test_1"
+
+    def test_cache_expiry(self):
+        from fusion_multi_nodes.distributed_mlx import KVSharingManager, KVCacheEntry, KVShard
+        import time
+        manager = KVSharingManager()
+
+        entry = KVCacheEntry(
+            cache_id="expired",
+            model_name="test",
+            prompt_hash="old",
+            prompt_prefix="",
+            total_tokens=10,
+            total_size_bytes=100,
+            created_at=time.time() - 7200,  # 2小时前
+            ttl_seconds=3600,  # 1小时TTL
+        )
+        manager.store_local(entry)
+        found = manager.lookup_local("test", "old")
+        assert found is None  # 已过期
+
+    def test_lru_eviction(self):
+        from fusion_multi_nodes.distributed_mlx import KVSharingManager, KVCacheEntry, KVShard
+        import time
+
+        manager = KVSharingManager(max_local_cache_mb=0.001)  # 极小缓存
+
+        for i in range(10):
+            entry = KVCacheEntry(
+                cache_id=f"test_{i}",
+                model_name="test",
+                prompt_hash=f"hash_{i}",
+                prompt_prefix="",
+                total_tokens=10,
+                total_size_bytes=500,
+                created_at=time.time(),
+            )
+            manager.store_local(entry)
+
+        stats = manager.get_stats()
+        assert stats["local_entries"] < 10  # 应该淘汰了一些
+
+    def test_prefix_match(self):
+        from fusion_multi_nodes.distributed_mlx import KVSharingManager, KVCacheEntry
+        import time
+        manager = KVSharingManager()
+
+        entry = KVCacheEntry(
+            cache_id="prefix_test",
+            model_name="test",
+            prompt_hash="p1",
+            prompt_prefix="Hello world, this is a test",
+            total_tokens=50,
+            total_size_bytes=500,
+            created_at=time.time(),
+        )
+        manager.store_local(entry)
+        matches = manager.lookup_prefix("test", "Hello world")
+        assert len(matches) >= 1

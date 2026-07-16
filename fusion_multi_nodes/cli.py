@@ -15,10 +15,10 @@ from . import __version__, __app_name__
 from .config import ClusterConfig
 from .master import ClusterMaster, NodeInfo, NodeStatus, ParallelMode, ClusterTask, TaskStatus
 from .agent import NodeAgent
-from .distributed_mlx import DistributedMLXBridge, DistMode
+from .distributed_mlx import DistributedMLXBridge, DistMode, CavemanManager, KVSharingManager
 from .mcp_gateway import MCPClusterGateway
 from .observability import ClusterObservability
-from .utils import setup_logger, get_data_dir
+from .utils import setup_logger, get_data_dir, NetworkTopologyDetector
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +329,123 @@ def _get_master() -> ClusterMaster:
             port=_config.get("cluster.master_port", 9753),
         )
     return _master
+
+
+# ── 网络拓扑命令 ──
+
+@cli.group()
+def network():
+    """网络拓扑检测与链路优化。"""
+    pass
+
+
+@network.command("detect")
+def network_detect():
+    """检测本机网络拓扑和链路类型。"""
+    asyncio.run(_async_network_detect())
+
+
+async def _async_network_detect():
+    click.echo()
+    click.echo("🌐 网络拓扑检测")
+    click.echo()
+
+    detector = NetworkTopologyDetector()
+    interfaces = await detector.detect()
+
+    if not interfaces:
+        click.echo("  未检测到网络接口")
+        return
+
+    click.echo(f"{'接口':<12} {'类型':<20} {'带宽':<12} {'延迟':<10} {'RDMA':<8}")
+    click.echo("-" * 65)
+
+    for name, link in sorted(interfaces.items(), key=lambda x: x[1].priority):
+        rdma = "✅" if link.is_rdma else "❌"
+        click.echo(f"{name:<12} {link.type.value:<20} {link.bandwidth_mbps:.0f}Mbps{'':<4} "
+                  f"{link.latency_ms:<10.2f}ms {rdma:<8}")
+
+    click.echo()
+    best = detector.get_best_link()
+    if best:
+        click.echo(f"✅ 最优链路: {best.interface} ({best.type.value})")
+        click.echo(f"   推荐压缩策略: {detector.get_recommended_compression()}")
+    if detector.is_thunderbolt_available():
+        click.echo("⚡ Thunderbolt 高速链路可用，推荐 RDMA 传输")
+
+
+# ── Caveman 压缩命令 ──
+
+@cli.group()
+def caveman():
+    """Caveman Token 压缩管理。"""
+    pass
+
+
+@caveman.command("test")
+@click.argument("data", default="The quick brown fox jumps over the lazy dog. " * 10)
+def caveman_test(data: str):
+    """测试 Caveman 压缩效果。"""
+    asyncio.run(_async_caveman_test(data))
+
+
+async def _async_caveman_test(data: str):
+    click.echo()
+    click.echo("🔧 Caveman 压缩测试")
+    click.echo()
+
+    raw_bytes = data.encode("utf-8")
+    manager = CavemanManager()
+
+    for method in ["zlib", "diff", "dict"]:
+        compressed, used_method, stats = await manager.compress_tensor(raw_bytes, link_type="ethernet_1g")
+        click.echo(f"  {method:<10} 原始: {stats.original_bytes:>8} bytes → "
+                  f"压缩: {stats.compressed_bytes:>8} bytes "
+                  f"({stats.ratio*100:.1f}%) 耗时: {stats.time_ms:.1f}ms")
+
+    click.echo()
+    overall = manager.get_stats()
+    click.echo(f"  总体压缩率: {overall['overall_ratio']*100:.1f}%")
+    click.echo(f"  节省带宽:   {overall['savings_percent']:.1f}%")
+
+
+# ── KV 缓存命令 ──
+
+@cli.group()
+def kv():
+    """KV 缓存共享管理。"""
+    pass
+
+
+@kv.command("stats")
+def kv_stats():
+    """查看 KV 缓存统计。"""
+    master = _get_master()
+    stats = master.get_stats()
+    click.echo()
+    click.echo("📦 KV 缓存统计")
+    click.echo(f"  缓存条目: {stats.get('kv_cache_entries', 0)}")
+
+
+@kv.command("warm")
+@click.option("--prompt", "-p", multiple=True, help="预热 prompt")
+@click.option("--nodes", "-n", multiple=True, help="目标节点")
+def kv_warm(prompt: list, nodes: list):
+    """预热 KV 缓存。"""
+    asyncio.run(_async_kv_warm(list(prompt), list(nodes)))
+
+
+async def _async_kv_warm(prompts: list, nodes: list):
+    if not prompts:
+        click.echo("请指定 --prompt")
+        return
+    if not nodes:
+        nodes = list(_get_master().get_online_nodes())
+        nodes = [n.node_id for n in nodes]
+
+    manager = KVSharingManager()
+    results = await manager.warm_cache("default", prompts, nodes)
+    click.echo(f"预热完成: {results['success']} 成功, {results['failed']} 失败")
 
 
 def main():
