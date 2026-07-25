@@ -1,0 +1,336 @@
+"""Observability coverage tests."""
+
+import asyncio
+import time
+from unittest.mock import patch
+
+import pytest
+from unittest.mock import patch, MagicMock
+
+from fusion_multi_node.observability.observability import (
+    Alert,
+    ClusterObservability,
+    LogEntry,
+    MetricPoint,
+    _build_node_summary,
+)
+
+
+class TestMetricPoint:
+    def test_basic(self):
+        mp = MetricPoint(timestamp=100.0, node_id="n1", metric_name="cpu", value=0.8)
+        assert mp.metric_name == "cpu"
+        assert mp.value == 0.8
+        assert mp.tags == {}
+
+    def test_with_tags(self):
+        mp = MetricPoint(timestamp=100.0, node_id="n1", metric_name="mem", value=0.5, tags={"role": "worker"})
+        assert mp.tags["role"] == "worker"
+
+
+class TestAlert:
+    def test_basic(self):
+        a = Alert(alert_id="a1", severity="warning", title="high cpu", message="cpu > 90%")
+        assert a.alert_id == "a1"
+        assert a.severity == "warning"
+        assert a.resolved is False
+
+    def test_with_node(self):
+        a = Alert(alert_id="a2", severity="critical", title="offline", message="node down", node_id="n1")
+        assert a.node_id == "n1"
+
+
+class TestLogEntry:
+    def test_basic(self):
+        entry = LogEntry(timestamp=100.0, node_id="n1", level="INFO", module="master", message="started")
+        assert entry.level == "INFO"
+        assert entry.module == "master"
+
+    def test_with_task(self):
+        entry = LogEntry(timestamp=100.0, node_id="n1", level="ERROR", module="agent", message="fail", task_id="t1")
+        assert entry.task_id == "t1"
+
+
+class TestClusterObservabilityInit:
+    def test_init(self):
+        obs = ClusterObservability()
+        assert obs.metrics == []
+        assert obs.alerts == []
+        assert obs.logs == []
+
+    def test_init_custom_retention(self):
+        obs = ClusterObservability(retention_hours=48.0)
+        assert obs.retention_seconds == 48.0 * 3600
+
+
+class TestClusterObservabilityMetrics:
+    def test_record_metric(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.8)
+        assert len(obs.metrics) == 1
+        assert obs.metrics[0].value == 0.8
+
+    def test_record_metric_with_tags(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.8, tags={"role": "worker"})
+        assert obs.metrics[0].tags == {"role": "worker"}
+
+    def test_max_metrics_truncation(self):
+        obs = ClusterObservability()
+        obs._max_metrics = 5
+        for i in range(10):
+            obs.record_metric("n1", "cpu", float(i))
+        assert len(obs.metrics) == 5
+
+    def test_get_metrics(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.5)
+        obs.record_metric("n1", "mem", 0.6)
+        obs.record_metric("n2", "cpu", 0.7)
+        assert len(obs.get_metrics("cpu")) == 2
+
+    def test_get_metrics_by_node(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.5)
+        obs.record_metric("n2", "cpu", 0.7)
+        result = obs.get_metrics("cpu", node_id="n1")
+        assert len(result) == 1
+        assert result[0].node_id == "n1"
+
+    def test_get_metrics_since(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.5)
+        import time
+        time.sleep(0.01)
+        obs.record_metric("n1", "cpu", 0.7)
+        mid_ts = obs.metrics[0].timestamp + 0.005
+        recent = obs.get_metrics("cpu", since=mid_ts)
+        assert len(recent) == 1
+
+    def test_get_metrics_limit(self):
+        obs = ClusterObservability()
+        for i in range(20):
+            obs.record_metric("n1", "cpu", float(i))
+        result = obs.get_metrics("cpu", limit=5)
+        assert len(result) == 5
+
+    def test_get_latest_metric(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.5)
+        obs.record_metric("n1", "cpu", 0.9)
+        assert obs.get_latest_metric("cpu").value == 0.9
+
+    def test_get_latest_metric_by_node(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "cpu", 0.5)
+        obs.record_metric("n2", "cpu", 0.9)
+        assert obs.get_latest_metric("cpu", node_id="n1").value == 0.5
+
+    def test_get_latest_metric_missing(self):
+        obs = ClusterObservability()
+        assert obs.get_latest_metric("nonexistent") is None
+
+
+class TestClusterObservabilityLogs:
+    def test_add_log(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="master", message="started"))
+        assert len(obs.logs) == 1
+
+    def test_add_log_error_creates_alert(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="agent", message="fail"))
+        assert len(obs.alerts) == 1
+        assert obs.alerts[0].severity == "warning"
+
+    def test_add_log_critical_creates_alert(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="CRITICAL", module="agent", message="fatal"))
+        assert len(obs.alerts) == 1
+        assert obs.alerts[0].severity == "critical"
+
+    def test_max_logs_truncation(self):
+        obs = ClusterObservability()
+        obs._max_logs = 3
+        for i in range(5):
+            obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m", message=f"msg{i}"))
+        assert len(obs.logs) == 3
+
+    def test_get_logs(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="a"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="m2", message="b"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="INFO", module="m3", message="c"))
+        assert len(obs.get_logs()) == 3
+
+    def test_get_logs_by_level(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="a"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="m2", message="b"))
+        errors = obs.get_logs(level="ERROR")
+        assert len(errors) == 1
+
+    def test_get_logs_by_node(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="a"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="INFO", module="m2", message="b"))
+        assert len(obs.get_logs(node_id="n1")) == 1
+
+    def test_get_logs_since(self):
+        obs = ClusterObservability()
+        obs.add_log(LogEntry(timestamp=100.0, node_id="n1", level="INFO", module="m1", message="old"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m2", message="new"))
+        recent = obs.get_logs(since=200.0)
+        assert len(recent) == 1
+
+    def test_get_logs_limit(self):
+        obs = ClusterObservability()
+        for i in range(20):
+            obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m", message=f"msg{i}"))
+        result = obs.get_logs(limit=5)
+        assert len(result) == 5
+
+
+class TestClusterObservabilityAlerts:
+    def test_create_alert(self):
+        obs = ClusterObservability()
+        alert = obs.create_alert(severity="warning", title="high cpu", message="cpu > 90%", node_id="n1")
+        assert alert.severity == "warning"
+        assert not alert.resolved
+
+    def test_create_alert_calls_handler(self):
+        obs = ClusterObservability()
+        received = []
+        obs.on_alert(lambda a: received.append(a))
+        obs.create_alert(severity="warning", title="test", message="test")
+        assert len(received) == 1
+
+    def test_create_alert_handler_exception(self):
+        obs = ClusterObservability()
+        def bad_handler(a):
+            raise RuntimeError("handler failed")
+        obs.on_alert(bad_handler)
+        alert = obs.create_alert(severity="warning", title="test", message="test")
+        assert alert is not None
+
+    def test_resolve_alert(self):
+        obs = ClusterObservability()
+        alert = obs.create_alert(severity="warning", title="test", message="test")
+        assert obs.resolve_alert(alert.alert_id) is True
+        assert alert.resolved is True
+
+    def test_resolve_alert_missing(self):
+        obs = ClusterObservability()
+        assert obs.resolve_alert("nope") is False
+
+    def test_get_active_alerts(self):
+        obs = ClusterObservability()
+        obs.create_alert(severity="warning", title="a1", message="m1")
+        a2 = obs.create_alert(severity="critical", title="a2", message="m2")
+        obs.resolve_alert(a2.alert_id)
+        active = obs.get_active_alerts()
+        assert len(active) == 1
+
+    def test_get_active_alerts_by_severity(self):
+        obs = ClusterObservability()
+        obs.create_alert(severity="warning", title="a1", message="m1")
+        obs.create_alert(severity="critical", title="a2", message="m2")
+        critical = obs.get_active_alerts(severity="critical")
+        assert len(critical) == 1
+
+
+class TestClusterObservabilityAlertRules:
+    @pytest.mark.asyncio
+    async def test_check_alert_rules_offline_node(self):
+        obs = ClusterObservability()
+        nodes = {"n1": {"status": "offline", "hostname": "node1"}}
+        alerts = await obs.check_alert_rules(nodes)
+        assert len(alerts) >= 1
+        assert any("离线" in a.title for a in alerts)
+
+    @pytest.mark.asyncio
+    async def test_check_alert_rules_low_memory(self):
+        obs = ClusterObservability()
+        nodes = {"n1": {"status": "online", "available_memory_gb": 1.0, "total_memory_gb": 100.0}}
+        alerts = await obs.check_alert_rules(nodes)
+        assert len(alerts) >= 1
+        assert any("内存" in a.title for a in alerts)
+
+    @pytest.mark.asyncio
+    async def test_check_alert_rules_healthy(self):
+        obs = ClusterObservability()
+        nodes = {"n1": {"status": "online", "available_memory_gb": 50.0, "total_memory_gb": 64.0}}
+        alerts = await obs.check_alert_rules(nodes)
+        assert len(alerts) == 0
+
+    @pytest.mark.asyncio
+    async def test_check_alert_rules_zero_total_memory(self):
+        obs = ClusterObservability()
+        nodes = {"n1": {"status": "online", "available_memory_gb": 0, "total_memory_gb": 0}}
+        alerts = await obs.check_alert_rules(nodes)
+        assert len(alerts) == 0
+
+
+class TestClusterObservabilityReport:
+    def test_get_cluster_report(self):
+        obs = ClusterObservability()
+        obs.record_metric("n1", "latency_ms", 10.0)
+        obs.record_metric("n1", "tokens_per_sec", 100.0)
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="ok"))
+        obs.create_alert(severity="warning", title="test", message="test")
+        report = obs.get_cluster_report()
+        assert "metrics_collected" in report
+        assert "active_alerts" in report
+        assert "node_summary" in report
+        assert "n1" in report["node_summary"]
+
+
+class TestBuildNodeSummary:
+    def test_with_data(self):
+        metrics = {
+            "latency_ms": [10.0, 20.0, 30.0],
+            "tokens_per_sec": [100.0, 200.0],
+        }
+        result = _build_node_summary(metrics)
+        assert result["avg_latency_ms"] == 20.0
+        assert result["avg_tps"] == 150.0
+
+    def test_empty(self):
+        result = _build_node_summary({})
+        assert result["avg_latency_ms"] == 0
+        assert result["avg_tps"] == 0
+
+    def test_partial_data(self):
+        metrics = {"latency_ms": [5.0]}
+        result = _build_node_summary(metrics)
+        assert result["avg_latency_ms"] == 5.0
+        assert result["avg_tps"] == 0
+
+
+class TestClusterObservabilityLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_stop(self):
+        obs = ClusterObservability()
+        await obs.start()
+        assert obs._running is True
+        await obs.stop()
+        assert obs._running is False
+
+    @pytest.mark.asyncio
+    async def test_cleanup_loop(self):
+        obs = ClusterObservability(retention_hours=0.00001)
+        obs._running = True
+        obs.record_metric("n1", "cpu", 0.5)
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="ok"))
+        old_sleep = asyncio.sleep
+        async def fast_sleep(delay):
+            await old_sleep(0.01)
+        with patch("asyncio.sleep", fast_sleep):
+            task = asyncio.create_task(obs._cleanup_loop())
+            await old_sleep(0.1)
+            obs._running = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

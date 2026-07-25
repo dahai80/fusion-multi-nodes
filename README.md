@@ -5,35 +5,38 @@
 </div>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/MLX-Distributed-orange" alt="MLX">
-  <img src="https://img.shields.io/badge/status-beta-yellow" alt="Beta">
-  <img src="https://img.shields.io/badge/tests-172%20passed-brightgreen" alt="Tests">
-  <img src="https://img.shields.io/badge/coverage-79%25-yellow" alt="Coverage">
+  <img src="https://img.shields.io/badge/tests-585%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/coverage-96%25-brightgreen" alt="Coverage">
 </p>
 
 ---
 
 ## 📋 Overview
 
-**Fusion-Multi-Node** is the cluster scheduling core for the [Fusion-MLX](https://github.com/dahai80) ecosystem. It enables pooling multiple Apple Silicon Macs (M4/M5 Studio/Max) into a distributed inference cluster supporting two parallel modes:
+**Fusion-Multi-Node** is the cluster scheduling core for the [Fusion-MLX](https://github.com/dahai80) ecosystem. It enables pooling multiple Apple Silicon Macs (M4/M5 Studio/Max) into a distributed inference cluster.
 
-- **Pipeline Parallelism** — Split large models (70B+) across multiple Macs, each handling a subset of layers
-- **Data Parallelism** — Load the same model on multiple Macs, distribute batch requests for higher throughput
+### Two Distributed Modes
 
-Built on `mlx.distributed`, compatible with Thunderbolt 5 RDMA and Ethernet. All five core modules are fully implemented:
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| **Pipeline Parallelism** | Split large models (70B+) across multiple Macs, each handling a subset of layers | Run超大本地模型 |
+| **Data Parallelism** | Load the same model on multiple Macs, distribute batch requests for higher throughput | High-throughput batch inference |
+
+### Seven Core Modules
 
 | Module | Responsibility | Coverage |
 |--------|---------------|----------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance | 90% |
-| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery | 49% |
-| **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, service registration/browsing | Sprint1 |
-| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker | Sprint1 |
-| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing | 93% |
-| **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration | 87% |
-| **Cluster Observability** | Metrics, logs, alerts, cluster health dashboard | 92% |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance | 95% |
+| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery | 90% |
+| **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, service registration/browsing | 86% |
+| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker | 95% |
+| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing | 97% |
+| **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration | 100% |
+| **Cluster Observability** | Metrics, logs, alerts, cluster health dashboard | 100% |
 
 ### Architecture
 
@@ -84,38 +87,38 @@ Built on `mlx.distributed`, compatible with Thunderbolt 5 RDMA and Ethernet. All
 ### Installation
 
 ```bash
-# Clone
 git clone https://github.com/dahai80/fusion-multi-node.git
-cd fusion-multi-nodes
+cd fusion-multi-node
 
-# Install with pip
-pip install -e .
-
-# Install with all dependencies
-pip install -e ".[all]"
-
-# Run tests
-pip install -e ".[test]"
-pytest tests/ -v
+pip install -e .            # Core install
+pip install -e ".[all]"     # All optional deps
+pip install -e ".[test]"    # Test deps
 ```
 
-### Start Cluster Master
+### Start Cluster
 
 ```bash
+# Start Cluster Master
 fusion-multi-node cluster start --mode master
-```
 
-### Start Node Agent
-
-```bash
+# Start Node Agent (on each Mac)
 fusion-multi-node cluster start --mode agent
-```
 
-### Check Cluster Status
-
-```bash
+# Check status
 fusion-multi-node cluster status
 fusion-multi-node node list
+```
+
+### CLI Quick Reference
+
+```bash
+fusion-multi-node cluster start/stop/status    # Cluster management
+fusion-multi-node node list/info/discover      # Node management
+fusion-multi-node task submit/list/cancel      # Task management
+fusion-multi-node config list/get/set          # Configuration
+fusion-multi-node network detect               # Network topology
+fusion-multi-node caveman test                 # Caveman compression
+fusion-multi-node kv stats/warm                # KV cache management
 ```
 
 ---
@@ -137,7 +140,7 @@ fusion-multi-node node list
 | `cluster start --mode agent` | Start Node Agent (port 9755) |
 | `cluster start --mode both` | Start both Master and Agent |
 | `cluster stop` | Stop all cluster services |
-| `cluster status` | Show cluster summary (nodes, tasks, memory) |
+| `cluster status` | Show cluster summary |
 
 ### Node Management
 
@@ -145,23 +148,26 @@ fusion-multi-node node list
 |---------|-------------|
 | `node list` | List all registered nodes |
 | `node list --online` | Show only online nodes |
-| `node info <node_id>` | Show detailed node information |
+| `node info <node_id>` | Show detailed node info |
+| `node start --role master` | Start as master node |
+| `node start --role agent` | Start as agent node |
+| `node discover` | mDNS discover LAN nodes |
 
 ### Task Management
 
 | Command | Description |
 |---------|-------------|
-| `task submit --name <name> --mode pipeline --model <model>` | Submit pipeline parallel task |
-| `task submit --name <name> --mode data --model <model>` | Submit data parallel task |
-| `task list` | List all tasks with status |
-| `task cancel <task_id>` | Cancel a running task |
+| `task submit -n <name> -m <model> --mode pipeline` | Submit pipeline task |
+| `task submit -n <name> -m <model> --mode data` | Submit data-parallel task |
+| `task list` | List all tasks |
+| `task cancel <task_id>` | Cancel a task |
 
 ### Configuration
 
 | Command | Description |
 |---------|-------------|
 | `config list` | Show all configuration |
-| `config get <key>` | Get a config value (e.g. `cluster.master_port`) |
+| `config get <key>` | Get a config value |
 | `config set <key> <value>` | Set a config value |
 
 ### Network & Compression
@@ -169,9 +175,9 @@ fusion-multi-node node list
 | Command | Description |
 |---------|-------------|
 | `network detect` | Detect network topology and link types |
-| `caveman test [data]` | Test Caveman compression with sample data |
+| `caveman test [data]` | Test Caveman compression |
 | `kv stats` | Show KV cache statistics |
-| `kv warm --prompt <text> --nodes <id>` | Warm KV cache with prompts |
+| `kv warm --prompt <text> --nodes <id>` | Warm KV cache |
 
 ---
 
@@ -179,42 +185,27 @@ fusion-multi-node node list
 
 ### 1. Cluster Master (`fusion_multi_node.master`)
 
-**File**: `master/cluster_master.py` | **Coverage**: 90%
-
-The Cluster Master is the single source of truth for the cluster. It manages node registration, health checks, task scheduling, and KV cache sharing.
+The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache.
 
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
 
 master = ClusterMaster(host="0.0.0.0", port=9753)
 
-# Node registers itself
 node = NodeInfo(node_id="node_1", hostname="mac-studio-1", ip_address="10.0.0.1",
-                port=9755, total_memory_gb=64.0, available_memory_gb=48.0,
-                cpu_cores=16, gpu_cores=64)
+                port=9755, total_memory_gb=64.0, available_memory_gb=48.0)
 master.register_node(node)
 
-# Task scheduling
 task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA)
-master.assign_task(task)  # Auto-selects best node
-
-# Lifecycle
-master.complete_task("task_1")  # Or migrate_task() for failover
+master.assign_task(task)
+master.complete_task("task_1")
 ```
 
-**Key capabilities**:
-- **Node discovery**: LAN P2P scanning, Thunderbolt bridge detection
-- **Resource scheduler**: Score-based node selection (available memory, load, latency)
-- **Pipeline parallelism**: Split large models across nodes
-- **Data parallelism**: Load balance batch inference across nodes
-- **KV cache pool**: Cross-node KV cache sharing and reuse
-- **Fault tolerance**: Task timeout, migration, auto-failover
+**Key capabilities**: Score-based node selection, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT), migration, KV cache pool, heartbeat timeout.
 
 ### 2. Node Agent (`fusion_multi_node.agent`)
 
-**File**: `agent/node_agent.py` | **Coverage**: 49%
-
-The Node Agent runs on every Mac in the cluster, reporting hardware metrics and executing tasks.
+Runs on every Mac — hardware metrics, heartbeat, task execution via fusion-mlx API.
 
 ```python
 from fusion_multi_node.agent import NodeAgent, AgentConfig
@@ -223,24 +214,9 @@ config = AgentConfig(node_id="my_mac", master_host="10.0.0.1")
 agent = NodeAgent(config)
 await agent.start()
 
-# Hardware info
 info = agent.collect_hardware_info()
-# Returns: {node_id, hostname, total_memory_gb, cpu_cores, gpu_cores, mlx_version, ...}
-
-# Execute inference task
-result = await agent.execute_task({
-    "task_id": "t1", "type": "inference",
-    "model": "qwen3.5-9b",
-    "params": {"prompt": "Hello, world!"}
-})
+result = await agent.execute_task({"task_id": "t1", "type": "inference", "model": "qwen3.5-9b"})
 ```
-
-**Key capabilities**:
-- **Hardware collection**: Memory, CPU, GPU, MLX version, Apple Silicon detection
-- **Heartbeat**: Periodic health reporting to Master
-- **Task execution**: Inference, embedding, plugin tasks via fusion-mlx API
-- **Fault reporting**: Automatic crash/OOM/network failure reporting
-- **mDNS auto-discovery**: Browse LAN to auto-discover Master node
 
 ### 3. mDNS Discovery (`fusion_multi_node.discovery`)
 
@@ -249,144 +225,86 @@ Zero-config Bonjour/mDNS node discovery. Master registers; Agents browse.
 ```python
 from fusion_multi_node.discovery import MDNSDiscovery
 
-# Master: register mDNS service
 mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=9753, properties={"role": "master", "arch": "arm64"})
+mdns.register(port=9753, properties={"role": "master"})
 
-# Agent: discover Master
-mdns = MDNSDiscovery(node_id="agent-1")
 master = await mdns.find_master_async(timeout=5.0)
-
-# Cleanup
 mdns.unregister()
 ```
 
 ### 4. FMP Protocol (`fusion_multi_node.protocol`)
 
-Fusion Message Protocol - three-layer binary communication with AES-GCM encryption.
+Three-layer binary protocol with AES-GCM encryption and circuit breaker.
 
 ```python
 from fusion_multi_node.protocol import (
     FMPMessage, PayloadType, FMPCrypto,
-    FMPConnectionManager, FMPRouter,
-    CircuitBreaker,
+    FMPConnectionManager, FMPRouter, CircuitBreaker,
 )
 
-# Create & serialize message (Link + Business + Control layers)
 msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
-data = msg.serialize()  # Binary: [MAGIC][VER][FLAGS][LEN][JSON]
+data = msg.serialize()
 msg2 = FMPMessage.deserialize(data)
 
-# AES-GCM encryption
 key = FMPCrypto.generate_key()
 crypto = FMPCrypto(key=key)
-crypto.encrypt_message(msg)   # payload encrypted
-crypto.decrypt_message(msg)   # payload decrypted
+crypto.encrypt_message(msg)
+crypto.decrypt_message(msg)
 
-# hop_count control (max 3 hops)
-msg.link.forward("relay-node")
-
-# Circuit breaker (CLOSED -> OPEN -> HALF_OPEN)
 cb = CircuitBreaker(name="node1", failure_threshold=5)
 if cb.allow_request():
     cb.record_success()
-
-# TCP connection manager + message router
-mgr = FMPConnectionManager(local_node_id="master", crypto=crypto)
-router = FMPRouter(local_node_id="master", connection_manager=mgr)
 ```
 
-**Three-layer protocol stack**: LinkLayer (routing, hop_count), BusinessLayer (payload, rounds), ControlLayer (heartbeat, ACK, flow control).
-**Key**: hop_count (physical forwarding) and MAX_ROUNDS (logical dialog) are independent dimensions.
+**Three layers**: LinkLayer (routing, hop_count), BusinessLayer (payload, rounds), ControlLayer (heartbeat, ACK, flow control).
 
 ### 5. Distributed MLX Bridge (`fusion_multi_node.distributed_mlx`)
 
-**File**: `distributed_mlx/distributed_bridge.py` | **Coverage**: 93% (Caveman)
-
 Three sub-modules for distributed inference:
 
-**a) Model Sharding & Pipeline**
 ```python
-from fusion_multi_node.distributed_mlx import DistributedMLXBridge
+from fusion_multi_node.distributed_mlx import DistributedMLXBridge, CavemanManager, KVSharingManager
 
+# Model sharding & pipeline
 bridge = DistributedMLXBridge()
 shards = await bridge.shard_model("llama-70b", num_shards=4)
-# 4 shards, each with ~8 layers
+result = await bridge.pipeline_inference("llama-70b", "What is AI?", ["n1", "n2", "n3", "n4"])
 
-# Pipeline inference across nodes
-result = await bridge.pipeline_inference(
-    "llama-70b", "What is AI?", ["node_1", "node_2", "node_3", "node_4"]
-)
-```
-
-**b) Caveman Token Compression**
-```python
-from fusion_multi_node.distributed_mlx import CavemanManager
-
+# Caveman compression (40-60% bandwidth savings)
 manager = CavemanManager()
 compressed, method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
-# Methods: zlib (general), diff (repeated patterns), dict (dictionary-based)
-# Overhead: 40-60% bandwidth reduction
-```
 
-**c) KV Cache Sharing**
-```python
-from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry
-
+# KV cache sharing
 kv = KVSharingManager(max_local_cache_mb=4096.0)
-entry = KVCacheEntry(cache_id="c1", model_name="qwen", prompt_hash="abc123",
-                     prompt_prefix="What is", total_tokens=100, total_size_bytes=1024,
-                     created_at=time.time())
 kv.store_local(entry)
 found = kv.lookup_local("qwen", "abc123")
 ```
 
 ### 6. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
 
-**File**: `mcp_gateway/mcp_gateway.py` | **Coverage**: 87%
-
-The MCP Gateway provides a unified Model Context Protocol entry point for Claude Desktop and Claude Code, aggregating tools from all cluster nodes.
+Unified MCP endpoint for Claude Desktop/Code, aggregating tools from all nodes.
 
 ```python
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 
 gateway = MCPClusterGateway(host="0.0.0.0", port=9756)
-
-# Register a tool
-tool = MCPTool(
-    name="code_review",
-    description="Review code changes using distributed MLX",
-    parameters={"type": "object", "properties": {"code": {"type": "string"}}},
-    required_memory_gb=4.0,
-)
+tool = MCPTool(name="code_review", description="Review code",
+               parameters={"type": "object", "properties": {"code": {"type": "string"}}})
 gateway.register_tool(tool)
-
-# Claude calls this tool
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
 ```
 
 ### 7. Cluster Observability (`fusion_multi_node.observability`)
 
-**File**: `observability/observability.py` | **Coverage**: 92%
-
-Comprehensive monitoring with metrics, logs, and alerts.
+Metrics, logs, alerts with retention and auto-cleanup.
 
 ```python
 from fusion_multi_node.observability import ClusterObservability, LogEntry
 
 obs = ClusterObservability(retention_hours=24.0)
-
-# Metrics
 obs.record_metric("node_1", "memory_used_gb", 16.0, tags={"gpu": "m4_ultra"})
-obs.record_metric("node_1", "tokens_per_sec", 52.3)
-
-# Logs
 obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "Task completed"))
-
-# Alerts
 alert = obs.create_alert("warning", "High memory", "node_1 at 90% utilization")
-
-# Check alert rules
 await obs.check_alert_rules(nodes)
 ```
 
@@ -399,10 +317,10 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```json
 {
   "cluster": {
+    "master_host": "0.0.0.0",
     "master_port": 9753,
     "discovery_port": 9754,
     "agent_port": 9755,
-    "mcp_port": 9756,
     "heartbeat_timeout": 15.0,
     "heartbeat_interval": 5.0
   },
@@ -413,7 +331,6 @@ Default config at `~/.fusion/multi-node/config.json`:
   },
   "mlx": {
     "fusion_mlx_port": 8000,
-    "fusion_kb_port": 11434,
     "fusion_desk_port": 9000
   },
   "mcp": {
@@ -421,57 +338,58 @@ Default config at `~/.fusion/multi-node/config.json`:
     "tool_timeout": 60.0
   },
   "observability": {
-    "retention_hours": 24.0,
-    "alert_enabled": true
+    "retention_hours": 24.0
   }
 }
 ```
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Testing
 
 ```bash
-# Install test dependencies
-pip install -e ".[test,all]"
+pip install -e ".[test]"
 
-# Run all tests
+# Run all tests (585 tests)
 pytest tests/ -v
 
-# With coverage
+# With coverage (96.1%)
 pytest tests/ --cov=fusion_multi_node --cov-report=html
 
-# Run specific test file
-pytest tests/test_core.py -v
+# Run specific module
+pytest tests/test_cluster_master.py -v
+pytest tests/test_protocol.py -v
 ```
+
+---
+
+## 📊 Key Constants
+
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| Master port | 9753 | Cluster Master service port |
+| Discovery port | 9754 | mDNS discovery port |
+| Agent port | 9755 | Node Agent port |
+| MCP port | 9756 | MCP Gateway port |
+| Heartbeat timeout | 15.0s | Stale node threshold |
+| Task timeout | 300.0s | Default task timeout |
+| KV cache TTL | 3600.0s | Default KV cache expiry |
+| Token budget | 10,000,000 | MCP gateway token limit |
 
 ---
 
 ## 🛣️ Roadmap
 
-### Phase 1 ✅ Core Infrastructure
-- [x] Cluster Master — node discovery, scheduler, task lifecycle
-- [x] Node Agent — hardware reporting, heartbeat, task execution
-
-### Phase 2 ✅ Distributed MLX
-- [x] Model sharding (pipeline parallelism)
-- [x] Data parallel inference
-- [x] Weight synchronization across nodes
-
-### Phase 3 ✅ MCP Integration
-- [x] Unified MCP endpoint for Claude
-- [x] Tool registration and routing
-- [x] Token budget management
-
-### Phase 4 ✅ Observability & CLI
-- [x] Metrics, logs, alerts
-- [x] Cluster reports
-- [x] Full CLI (15+ commands)
-
-### Phase 5 ✅ Advanced Optimizations
-- [x] Caveman token compression (3 methods)
-- [x] Thunderbolt RDMA detection
-- [x] KV cache sharing (local LRU + remote)
+### v0.1.0 ✅ (Current)
+- [x] Cluster Master — node discovery, scheduler, task lifecycle, fault tolerance
+- [x] Node Agent — hardware reporting, heartbeat, task execution, mDNS auto-discovery
+- [x] mDNS Discovery — Bonjour zero-config service registration and browsing
+- [x] FMP Protocol — three-layer binary protocol, AES-GCM encryption, circuit breaker
+- [x] Distributed MLX — model sharding, pipeline/data parallelism, Caveman compression, KV cache sharing
+- [x] MCP Gateway — unified MCP endpoint for Claude integration
+- [x] Observability — metrics, logs, alerts, cluster reports
+- [x] CLI — 15+ commands for cluster/node/task/config/network/caveman/kv management
+- [x] 96.1% test coverage (585 tests)
 
 ### Future
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
@@ -486,9 +404,9 @@ pytest tests/test_core.py -v
 
 - **100% local offline** — Zero external network dependencies
 - **Node authentication** — All agents must register with Master
-- **Sandbox isolation** — Each node runs in its own sandbox
+- **AES-GCM encryption** — FMP protocol encrypted communication
+- **Circuit breaker** — Automatic fault isolation for failing nodes
 - **No telemetry** — No analytics, no phoning home
-- **File access whitelist** — Controlled via SecurityPolicy
 
 ---
 
@@ -500,253 +418,17 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please ensure:
+Contributions welcome! Please ensure:
 
 1. Tests pass: `pytest tests/ -v`
-2. Coverage maintained: `pytest --cov=fusion_multi_node`
-3. Code style follows PEP 8
-
----
-
-## Architecture Influences
-
-| Pattern | Source |
-|---------|--------|
-| Tool Registry + type coercion | [Squish](https://github.com/nicepkg/squish) |
-| Lazy import via `__getattr__` | [Squish](https://github.com/nicepkg/squish) |
-| MCP protocol | [LibreChat](https://github.com/danny-avila/LibreChat) |
+2. Coverage ≥ 90%: `pytest --cov=fusion_multi_node`
+3. 4-space indentation, no docstrings (self-documenting names)
+4. All classes use `logging.getLogger(__name__)`
 
 ---
 
 <p align="center">
   <strong>Fusion-Multi-Node — Pool Macs, Unify Inference, Scale Locally.</strong>
-</p>
-<p align="center">
-  <sub>Built with ❤️ by Fusion-MLX Team</sub>
-</p>
-
----
-
-<br>
-
-<div align="center">
-  <h1>🔗 Fusion-Multi-Node</h1>
-  <p><strong>分布式 Apple Silicon MLX 集群调度核心</strong></p>
-  <p><em>将多台 Mac 组成统一 AI 集群 — 流水线并行、数据并行、MCP 网关</em></p>
-</div>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
-  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="许可证">
-  <img src="https://img.shields.io/badge/MLX-分布式-orange" alt="MLX">
-  <img src="https://img.shields.io/badge/状态-beta-yellow" alt="Beta">
-  <img src="https://img.shields.io/badge/测试-172%20通过-brightgreen" alt="测试">
-  <img src="https://img.shields.io/badge/覆盖率-79%25-yellow" alt="覆盖率">
-</p>
-
----
-
-## 📋 产品简介
-
-**Fusion-Multi-Node** 是 Fusion-MLX 生态的集群调度核心层，解决多台 Apple Silicon Mac（M4/M5 Studio/Max）组成分布式推理集群的问题。
-
-### 两种分布式模式
-
-| 模式 | 说明 | 场景 |
-|------|------|------|
-| **流水线并行** | 大模型分层拆分到多 Mac | 跑 70B+ 超大本地模型 |
-| **数据并行** | 多节点完整加载同款模型 | 批量代码生成、高吞吐推理 |
-
-### 五大核心模块
-
-| 模块 | 职责 | 覆盖率 |
-|------|------|--------|
-| **Cluster Master** | 节点发现、资源调度、任务生命周期、KV 缓存池、容灾 | 90% |
-| **Node Agent** | 每台 Mac 守护进程、硬件上报、任务执行、故障上报 | 49% |
-| **Distributed MLX Bridge** | 流水线/数据并行、模型分片、Caveman 压缩、KV 缓存共享 | 93% |
-| **MCP 集群网关** | 统一 MCP 入口、工具路由、Claude Desktop/Code 集成 | 87% |
-| **集群可观测** | 指标、日志、告警、集群健康面板 | 92% |
-
-### 架构
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    Claude Code / API / fusion-desk UI         │
-│                           ↓                                  │
-│              fusion-multi-node Cluster Master                 │
-│     (自动发现、调度器、KV 池、容错)                            │
-│                           ↓                                  │
-│     ┌──────────────┬──────────────┬──────────────┐           │
-│     │  Node Agent   │  Node Agent  │  Node Agent  │           │
-│     │  (Mac M4)     │  (Mac M4)    │  (Mac M4)    │           │
-│     │  fusion-desk  │  fusion-desk │  fusion-desk │           │
-│     │  fusion-mlx   │  fusion-mlx  │  fusion-mlx  │           │
-│     └──────────────┴──────────────┴──────────────┘           │
-│                           ↓                                  │
-│              Distributed MLX (mlx.distributed)                │
-│         Thunderbolt RDMA / 以太网 / P2P 桥接                  │
-└──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🚀 快速开始
-
-### 安装
-
-```bash
-git clone https://github.com/dahai80/fusion-multi-node.git
-cd fusion-multi-nodes
-pip install -e ".[all]"
-```
-
-### 启动集群
-
-```bash
-# 启动主调度节点
-fusion-multi-node cluster start --mode master
-
-# 启动节点代理（每台 Mac 都需要）
-fusion-multi-node cluster start --mode agent
-
-# 查看集群状态
-fusion-multi-node cluster status
-fusion-multi-node node list
-```
-
-### CLI 命令速查
-
-```bash
-fusion-multi-node cluster start/stop/status    # 集群管理
-fusion-multi-node node list/info               # 节点管理
-fusion-multi-node task submit/list/cancel      # 任务管理
-fusion-multi-node config list/get/set          # 配置管理
-fusion-multi-node network detect               # 网络拓扑检测
-fusion-multi-node caveman test                 # Caveman 压缩测试
-fusion-multi-node kv stats/warm                # KV 缓存管理
-```
-
----
-
-## 🏗️ 模块详解
-
-### 1. Cluster Master — 主调度节点
-
-**文件**: `master/cluster_master.py` | **覆盖率**: 90%
-
-```python
-from fusion_multi_node.master import ClusterMaster, NodeInfo, ClusterTask, ParallelMode
-
-master = ClusterMaster(host="0.0.0.0", port=9753)
-
-# 节点注册
-node = NodeInfo(node_id="mac1", hostname="mac-studio-1", ip_address="10.0.0.1",
-                port=9755, total_memory_gb=64.0, available_memory_gb=48.0)
-master.register_node(node)
-
-# 任务调度
-task = ClusterTask(task_id="t1", name="推理任务", mode=ParallelMode.DATA)
-master.assign_task(task)  # 自动选择最优节点
-```
-
-### 2. Node Agent — 节点代理
-
-**文件**: `agent/node_agent.py` | **覆盖率**: 49%
-
-```python
-from fusion_multi_node.agent import NodeAgent, AgentConfig
-
-agent = NodeAgent(AgentConfig(node_id="mac1", master_host="10.0.0.1"))
-await agent.start()
-
-# 收集硬件信息
-info = agent.collect_hardware_info()
-# {node_id, hostname, total_memory_gb, cpu_cores, gpu_cores, mlx_version, ...}
-```
-
-### 3. Distributed MLX — 分布式推理
-
-**文件**: `distributed_mlx/` | **覆盖率**: 93%
-
-```python
-# 模型分片
-bridge = DistributedMLXBridge()
-shards = await bridge.shard_model("llama-70b", num_shards=4)
-
-# Token 压缩
-manager = CavemanManager()
-compressed, method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
-# 节省 40-60% 带宽
-
-# KV 缓存共享
-kv = KVSharingManager(max_local_cache_mb=4096.0)
-kv.store_local(entry)
-found = kv.lookup_local("qwen", "abc123")
-```
-
-### 4. MCP 集群网关
-
-**文件**: `mcp_gateway/mcp_gateway.py` | **覆盖率**: 87%
-
-```python
-gateway = MCPClusterGateway(host="0.0.0.0", port=9756)
-
-tool = MCPTool(name="code_review", description="代码审查",
-               parameters={"type": "object", "properties": {"code": {"type": "string"}}})
-gateway.register_tool(tool)
-
-# Claude 调用
-result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
-```
-
-### 5. 集群可观测
-
-**文件**: `observability/observability.py` | **覆盖率**: 92%
-
-```python
-obs = ClusterObservability(retention_hours=24.0)
-obs.record_metric("node_1", "memory_used_gb", 16.0)
-obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "任务完成"))
-alert = obs.create_alert("warning", "内存过高", "node_1 使用率 90%")
-```
-
----
-
-## 🔧 配置
-
-默认配置 `~/.fusion/multi-node/config.json`:
-
-```json
-{
-  "cluster": { "master_port": 9753, "agent_port": 9755, "heartbeat_timeout": 15.0 },
-  "parallel": { "default_mode": "pipeline", "caveman_compress": true },
-  "mlx": { "fusion_mlx_port": 8000, "fusion_kb_port": 11434 },
-  "mcp": { "token_budget": 10000000 },
-  "observability": { "retention_hours": 24.0 }
-}
-```
-
----
-
-## 🧪 测试
-
-```bash
-pip install -e ".[test,all]"
-pytest tests/ -v
-pytest tests/ --cov=fusion_multi_node --cov-report=html
-```
-
----
-
-## 📄 开源协议
-
-MIT License
-
----
-
-<p align="center">
-  <strong>Fusion-Multi-Node — 汇聚多台 Mac，统一推理，本地扩展。</strong>
 </p>
 <p align="center">
   <sub>Built with ❤️ by Fusion-MLX Team</sub>
