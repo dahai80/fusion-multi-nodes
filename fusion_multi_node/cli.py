@@ -22,7 +22,6 @@ from .utils import setup_logger, get_data_dir, NetworkTopologyDetector
 
 logger = logging.getLogger(__name__)
 
-# 全局实例
 _config = ClusterConfig()
 _master: Optional[ClusterMaster] = None
 _agent: Optional[NodeAgent] = None
@@ -33,10 +32,7 @@ _observability: Optional[ClusterObservability] = None
 @click.option("--verbose", "-v", is_flag=True, help="详细输出")
 @click.version_option(version=__version__, prog_name=__app_name__)
 def cli(verbose: bool):
-    """Fusion-Multi-Node — 分布式 Apple Silicon MLX 集群调度核心。
-
-    将多台 Mac 组成分布式推理集群，支持流水线并行和数据并行。
-    """
+    """Fusion-Multi-Node — 分布式 Apple Silicon MLX 集群调度核心。"""
     level = logging.DEBUG if verbose else logging.INFO
     setup_logger(level=level, verbose=verbose)
 
@@ -110,6 +106,91 @@ def node_info(node_id: str):
     click.echo(f"  标签:        {', '.join(node.tags) if node.tags else '无'}")
 
 
+@node.command("start")
+@click.option("--role", type=click.Choice(["master", "agent"]), required=True, help="节点角色")
+@click.option("--host", default="0.0.0.0", help="监听地址")
+@click.option("--port", default=0, help="监听端口 (0=默认)")
+@click.option("--master-host", default="localhost", help="Master 地址 (agent)")
+@click.option("--master-port", default=9753, help="Master 端口 (agent)")
+@click.option("--transport", type=click.Choice(["http", "fmp"]), default="http",
+              help="通信协议: http 或 fmp")
+@click.option("--no-mdns", is_flag=True, help="禁用 mDNS 发现")
+@click.option("--auto-discover", is_flag=True, help="Agent 自动发现 Master")
+def node_start(role: str, host: str, port: int, master_host: str, master_port: int,
+               transport: str, no_mdns: bool, auto_discover: bool):
+    """启动节点服务。"""
+    asyncio.run(_async_node_start(role, host, port, master_host, master_port,
+                                   transport, no_mdns, auto_discover))
+
+
+async def _async_node_start(role: str, host: str, port: int, master_host: str,
+                            master_port: int, transport: str, no_mdns: bool,
+                            auto_discover: bool):
+    global _master, _agent
+
+    click.echo(f"🚀 启动 {role} 节点 (transport={transport})")
+
+    if role == "master":
+        actual_port = port or 9753
+        _master = ClusterMaster(host=host, port=actual_port)
+        with_mdns = not no_mdns
+        await _master.start(with_server=True, with_mdns=with_mdns)
+        click.echo(f"✅ Master 已启动: {host}:{actual_port} (mDNS={'ON' if with_mdns else 'OFF'})")
+    else:
+        from .agent import AgentConfig
+        actual_port = port or 9755
+        config = AgentConfig(
+            master_host=master_host,
+            master_port=master_port,
+            agent_port=actual_port,
+        )
+        _agent = NodeAgent(config)
+        await _agent.start(with_server=True, auto_discover=auto_discover)
+        click.echo(f"✅ Agent 已启动: {_agent.config.node_id} (auto_discover={auto_discover})")
+
+    click.echo("按 Ctrl+C 停止...")
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        if _master:
+            await _master.stop()
+        if _agent:
+            await _agent.stop()
+        click.echo("⏹️  已停止")
+
+
+@node.command("discover")
+@click.option("--timeout", default=5.0, help="发现超时(秒)")
+def node_discover(timeout: float):
+    """通过 mDNS 发现局域网内节点。"""
+    asyncio.run(_async_node_discover(timeout))
+
+
+async def _async_node_discover(timeout: float):
+    from .discovery import MDNSDiscovery
+
+    click.echo(f"🔍 mDNS 发现中... (超时: {timeout}s)")
+    mdns = MDNSDiscovery()
+    nodes = await mdns.browse_async(timeout=timeout)
+
+    if not nodes:
+        click.echo("未发现任何节点")
+        return
+
+    click.echo()
+    click.echo(f"{'名称':<24} {'IP':<16} {'端口':<8} {'角色':<10} {'属性'}")
+    click.echo("-" * 80)
+
+    for n in nodes:
+        role = n.properties.get("role", "unknown")
+        props_str = " ".join(f"{k}={v}" for k, v in n.properties.items() if k != "role")
+        click.echo(f"{n.name:<24} {n.host:<16} {n.port:<8} {role:<10} {props_str}")
+
+    click.echo()
+    click.echo(f"发现 {len(nodes)} 个节点")
+
+
 # ── 集群管理 ──
 
 @cli.group()
@@ -120,12 +201,13 @@ def cluster():
 
 @cluster.command("start")
 @click.option("--mode", type=click.Choice(["master", "agent", "both"]), default="master")
-def cluster_start(mode: str):
+@click.option("--transport", type=click.Choice(["http", "fmp"]), default="http")
+def cluster_start(mode: str, transport: str):
     """启动集群服务。"""
-    asyncio.run(_async_cluster_start(mode))
+    asyncio.run(_async_cluster_start(mode, transport))
 
 
-async def _async_cluster_start(mode: str):
+async def _async_cluster_start(mode: str, transport: str = "http"):
     global _master, _agent, _observability
 
     if mode in ("master", "both"):
@@ -134,7 +216,7 @@ async def _async_cluster_start(mode: str):
             port=_config.get("cluster.master_port", 9753),
         )
         await _master.start()
-        click.echo(f"✅ Cluster Master 已启动 (端口 {_master.port})")
+        click.echo(f"✅ Cluster Master 已启动 (端口 {_master.port}, transport={transport})")
 
     if mode in ("agent", "both"):
         agent_config = _config.to_node_agent_config()
@@ -309,7 +391,6 @@ def config_get(key: str):
 @click.argument("value")
 def config_set(key: str, value: str):
     """设置配置项。"""
-    # 尝试解析值类型
     try:
         parsed = json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -318,10 +399,7 @@ def config_set(key: str, value: str):
     click.echo(f"已设置 {key} = {json.dumps(parsed, ensure_ascii=False)}")
 
 
-# ── 工具函数 ──
-
 def _get_master() -> ClusterMaster:
-    """获取或创建 Cluster Master 实例。"""
     global _master
     if _master is None:
         _master = ClusterMaster(
@@ -449,7 +527,6 @@ async def _async_kv_warm(prompts: list, nodes: list):
 
 
 def main():
-    """Fusion-Multi-Node 主入口。"""
     cli()
 
 

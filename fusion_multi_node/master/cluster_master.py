@@ -307,19 +307,54 @@ class ClusterMaster:
 
     # ── 生命周期 ──
 
-    async def start(self) -> None:
+    async def start(self, with_server: bool = True, with_mdns: bool = True) -> None:
         """启动集群主节点服务。"""
         self._running = True
         logger.info(f"Cluster Master 启动: {self.host}:{self.port}")
         logger.info(f"节点发现端口: {self.discovery_port}")
 
-        # 启动后台健康检查
         asyncio.create_task(self._health_check_loop())
+
+        if with_mdns:
+            self._start_mdns()
+
+        if with_server:
+            from fusion_multi_node.server import MasterServer
+            server = MasterServer(master=self)
+            await server.start(host=self.host, port=self.port)
 
     async def stop(self) -> None:
         """停止集群主节点。"""
         self._running = False
+        self._stop_mdns()
         logger.info("Cluster Master 已停止")
+
+    def _start_mdns(self) -> None:
+        """启动 mDNS 服务注册。"""
+        try:
+            from fusion_multi_node.discovery import MDNSDiscovery
+            self._mdns = MDNSDiscovery(node_id=f"fusion-master")
+            ok = self._mdns.register(
+                port=self.port,
+                properties={
+                    "role": "master",
+                    "discovery_port": str(self.discovery_port),
+                    "host": self.host,
+                },
+            )
+            if ok:
+                logger.info("mDNS 服务注册成功")
+            else:
+                logger.warning("mDNS 服务注册失败，节点发现不可用")
+        except Exception as e:
+            logger.warning(f"mDNS 启动异常: {e}")
+            self._mdns = None
+
+    def _stop_mdns(self) -> None:
+        """停止 mDNS 服务注册。"""
+        if hasattr(self, "_mdns") and self._mdns:
+            self._mdns.unregister()
+            self._mdns = None
 
     async def _health_check_loop(self) -> None:
         """后台健康检查循环。"""

@@ -28,7 +28,9 @@ Built on `mlx.distributed`, compatible with Thunderbolt 5 RDMA and Ethernet. All
 | Module | Responsibility | Coverage |
 |--------|---------------|----------|
 | **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance | 90% |
-| **Node Agent** | Per-machine daemon, hardware reporting, task execution, fault reporting | 49% |
+| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery | 49% |
+| **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, service registration/browsing | Sprint1 |
+| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker | Sprint1 |
 | **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing | 93% |
 | **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration | 87% |
 | **Cluster Observability** | Metrics, logs, alerts, cluster health dashboard | 92% |
@@ -238,8 +240,66 @@ result = await agent.execute_task({
 - **Heartbeat**: Periodic health reporting to Master
 - **Task execution**: Inference, embedding, plugin tasks via fusion-mlx API
 - **Fault reporting**: Automatic crash/OOM/network failure reporting
+- **mDNS auto-discovery**: Browse LAN to auto-discover Master node
 
-### 3. Distributed MLX Bridge (`fusion_multi_node.distributed_mlx`)
+### 3. mDNS Discovery (`fusion_multi_node.discovery`)
+
+Zero-config Bonjour/mDNS node discovery. Master registers; Agents browse.
+
+```python
+from fusion_multi_node.discovery import MDNSDiscovery
+
+# Master: register mDNS service
+mdns = MDNSDiscovery(node_id="fusion-master")
+mdns.register(port=9753, properties={"role": "master", "arch": "arm64"})
+
+# Agent: discover Master
+mdns = MDNSDiscovery(node_id="agent-1")
+master = await mdns.find_master_async(timeout=5.0)
+
+# Cleanup
+mdns.unregister()
+```
+
+### 4. FMP Protocol (`fusion_multi_node.protocol`)
+
+Fusion Message Protocol - three-layer binary communication with AES-GCM encryption.
+
+```python
+from fusion_multi_node.protocol import (
+    FMPMessage, PayloadType, FMPCrypto,
+    FMPConnectionManager, FMPRouter,
+    CircuitBreaker,
+)
+
+# Create & serialize message (Link + Business + Control layers)
+msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
+data = msg.serialize()  # Binary: [MAGIC][VER][FLAGS][LEN][JSON]
+msg2 = FMPMessage.deserialize(data)
+
+# AES-GCM encryption
+key = FMPCrypto.generate_key()
+crypto = FMPCrypto(key=key)
+crypto.encrypt_message(msg)   # payload encrypted
+crypto.decrypt_message(msg)   # payload decrypted
+
+# hop_count control (max 3 hops)
+msg.link.forward("relay-node")
+
+# Circuit breaker (CLOSED -> OPEN -> HALF_OPEN)
+cb = CircuitBreaker(name="node1", failure_threshold=5)
+if cb.allow_request():
+    cb.record_success()
+
+# TCP connection manager + message router
+mgr = FMPConnectionManager(local_node_id="master", crypto=crypto)
+router = FMPRouter(local_node_id="master", connection_manager=mgr)
+```
+
+**Three-layer protocol stack**: LinkLayer (routing, hop_count), BusinessLayer (payload, rounds), ControlLayer (heartbeat, ACK, flow control).
+**Key**: hop_count (physical forwarding) and MAX_ROUNDS (logical dialog) are independent dimensions.
+
+### 5. Distributed MLX Bridge (`fusion_multi_node.distributed_mlx`)
 
 **File**: `distributed_mlx/distributed_bridge.py` | **Coverage**: 93% (Caveman)
 
@@ -281,7 +341,7 @@ kv.store_local(entry)
 found = kv.lookup_local("qwen", "abc123")
 ```
 
-### 4. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
+### 6. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
 
 **File**: `mcp_gateway/mcp_gateway.py` | **Coverage**: 87%
 
@@ -305,7 +365,7 @@ gateway.register_tool(tool)
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
 ```
 
-### 5. Cluster Observability (`fusion_multi_node.observability`)
+### 7. Cluster Observability (`fusion_multi_node.observability`)
 
 **File**: `observability/observability.py` | **Coverage**: 92%
 

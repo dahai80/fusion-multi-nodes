@@ -159,7 +159,11 @@ class NodeAgent:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
-                    json=info,
+                    json={
+                        "node_id": self.config.node_id,
+                        "available_memory_gb": info["available_memory_gb"],
+                        "active_tasks": 1 if self._current_task else 0,
+                    },
                 )
                 return resp.status_code == 200
         except Exception as e:
@@ -174,7 +178,21 @@ class NodeAgent:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
                     f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/register",
-                    json=info,
+                    json={
+                        "node_id": info["node_id"],
+                        "hostname": info["hostname"],
+                        "ip_address": info["ip_address"],
+                        "port": info["port"],
+                        "arch": info["arch"],
+                        "total_memory_gb": info["total_memory_gb"],
+                        "available_memory_gb": info["available_memory_gb"],
+                        "cpu_cores": info["cpu_cores"],
+                        "gpu_cores": info["gpu_cores"],
+                        "mlx_version": info.get("mlx_version", ""),
+                        "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
+                        "active_tasks": 0,
+                        "max_tasks": 4,
+                    },
                 )
                 return resp.status_code == 200
         except Exception as e:
@@ -306,10 +324,13 @@ class NodeAgent:
 
     # ── 生命周期 ──
 
-    async def start(self) -> None:
+    async def start(self, with_server: bool = True, auto_discover: bool = False) -> None:
         """启动节点代理。"""
         self._running = True
         logger.info(f"Node Agent 启动: {self.config.node_id}")
+
+        if auto_discover:
+            await self._discover_master()
 
         # 首次注册
         await self.report_hardware()
@@ -318,6 +339,11 @@ class NodeAgent:
         asyncio.create_task(self._heartbeat_loop())
         # 硬件上报循环
         asyncio.create_task(self._hardware_report_loop())
+
+        if with_server:
+            from fusion_multi_node.server import AgentServer
+            server = AgentServer(agent=self)
+            await server.start(host="0.0.0.0", port=self.config.agent_port)
 
     async def stop(self) -> None:
         """停止节点代理。"""
@@ -340,3 +366,22 @@ class NodeAgent:
             logger.debug(f"硬件状态: {info['available_memory_gb']:.1f}GB 可用, "
                         f"CPU {info['cpu_percent']}%, "
                         f"MLX: {info['fusion_mlx_running']}")
+
+    async def _discover_master(self) -> bool:
+        """通过 mDNS 自动发现 Master 节点。"""
+        try:
+            from fusion_multi_node.discovery import MDNSDiscovery
+            mdns = MDNSDiscovery(node_id=self.config.node_id)
+            logger.info("mDNS 搜索 Master 节点...")
+            master_info = await mdns.find_master_async(timeout=8.0)
+            if master_info:
+                self.config.master_host = master_info.host
+                self.config.master_port = master_info.port
+                logger.info(f"mDNS 发现 Master: {master_info.host}:{master_info.port}")
+                return True
+            else:
+                logger.warning("mDNS 未发现 Master，使用配置中的地址")
+                return False
+        except Exception as e:
+            logger.warning(f"mDNS 发现异常: {e}，使用配置中的地址")
+            return False

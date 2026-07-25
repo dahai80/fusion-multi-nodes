@@ -7,6 +7,8 @@ dependencies = [
     "click>=8.1.0",
     "httpx>=0.27.0",
     "psutil>=5.9.0",
+    "zeroconf>=0.130.0",
+    "cryptography>=44.0.0",
 ]
 
 [project.optional-dependencies]
@@ -20,11 +22,8 @@ web = [
     "uvicorn>=0.24.0",
     "websockets>=12.0",
 ]
-mdns = [
-    "zeroconf>=0.130.0",
-]
 all = [
-    "fusion-multi-node[test,web,mdns]",
+    "fusion-multi-node[test,web]",
     "netifaces>=0.11.0",
 ]
 
