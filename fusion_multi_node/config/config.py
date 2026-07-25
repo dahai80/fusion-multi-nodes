@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from ..master import NodeInfo, ParallelMode
 from ..agent import AgentConfig
 
 
@@ -68,7 +68,7 @@ class ClusterConfig:
                 # 合并默认配置
                 self._data = self._merge(self.DEFAULT_CONFIG, user_config)
             except Exception as e:
-                print(f"加载配置失败: {e}")
+                logging.getLogger(__name__).error(f"加载配置失败: {e}")
                 self._data = dict(self.DEFAULT_CONFIG)
         else:
             self._data = dict(self.DEFAULT_CONFIG)

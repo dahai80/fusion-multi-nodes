@@ -5,20 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import click
 
 from . import __version__, __app_name__
 from .config import ClusterConfig
-from .master import ClusterMaster, NodeInfo, NodeStatus, ParallelMode, ClusterTask, TaskStatus
+from .master import ClusterMaster, NodeStatus, ParallelMode, ClusterTask, TaskStatus
 from .agent import NodeAgent
-from .distributed_mlx import DistributedMLXBridge, DistMode, CavemanManager, KVSharingManager
-from .mcp_gateway import MCPClusterGateway
+from .distributed_mlx import CavemanManager, KVSharingManager
 from .observability import ClusterObservability
-from .utils import setup_logger, get_data_dir, NetworkTopologyDetector
+from .utils import setup_logger, NetworkTopologyDetector
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +52,7 @@ def list_nodes(online: bool):
 
 async def _async_list_nodes(online_only: bool):
     master = _get_master()
-    nodes = master.get_online_nodes() if online_only else list(master.nodes.values())
+    nodes = await master.get_online_nodes() if online_only else list(master.nodes.values())
 
     if not nodes:
         click.echo("暂无节点")
@@ -254,8 +252,12 @@ async def _async_cluster_stop():
 @cluster.command("status")
 def cluster_status():
     """查看集群状态。"""
+    asyncio.run(_async_cluster_status())
+
+
+async def _async_cluster_status():
     master = _get_master()
-    stats = master.get_stats()
+    stats = await master.get_stats()
 
     click.echo()
     click.echo("📊 集群状态")
@@ -300,14 +302,14 @@ async def _async_task_submit(name: str, model: str, mode: str, prompt: str, time
         timeout_seconds=float(timeout),
     )
 
-    if master.assign_task(task):
+    if await master.assign_task(task):
         click.echo(f"✅ 任务已提交: {task.task_id}")
         click.echo(f"   名称:     {name}")
         click.echo(f"   模式:     {mode}")
         click.echo(f"   模型:     {model or '默认'}")
         click.echo(f"   节点:     {', '.join(task.assigned_nodes)}")
     else:
-        click.echo(f"❌ 任务提交失败: 可用节点不足")
+        click.echo("❌ 任务提交失败: 可用节点不足")
 
 
 @task.command("list")
@@ -348,12 +350,16 @@ def task_list():
 @click.argument("task_id")
 def task_cancel(task_id: str):
     """取消任务。"""
+    asyncio.run(_async_task_cancel(task_id))
+
+
+async def _async_task_cancel(task_id: str):
     master = _get_master()
     task = master.tasks.get(task_id)
     if not task:
         click.echo(f"任务不存在: {task_id}")
         return
-    master.complete_task(task_id, "cancelled by user")
+    await master.complete_task(task_id, "cancelled by user")
     click.echo(f"已取消任务: {task_id}")
 
 
@@ -498,8 +504,12 @@ def kv():
 @kv.command("stats")
 def kv_stats():
     """查看 KV 缓存统计。"""
+    asyncio.run(_async_kv_stats())
+
+
+async def _async_kv_stats():
     master = _get_master()
-    stats = master.get_stats()
+    stats = await master.get_stats()
     click.echo()
     click.echo("📦 KV 缓存统计")
     click.echo(f"  缓存条目: {stats.get('kv_cache_entries', 0)}")
@@ -518,7 +528,7 @@ async def _async_kv_warm(prompts: list, nodes: list):
         click.echo("请指定 --prompt")
         return
     if not nodes:
-        nodes = list(_get_master().get_online_nodes())
+        nodes = list(await _get_master().get_online_nodes())
         nodes = [n.node_id for n in nodes]
 
     manager = KVSharingManager()

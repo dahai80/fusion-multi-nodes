@@ -173,7 +173,7 @@ class TestMCPClusterGateway:
         tool = MCPTool(name="t1", description="test", parameters={})
         request = MCPRequest(
             request_id="r1", tool_name="t1", arguments={},
-            source="claude_code", assigned_node="10.0.0.5",
+            source="claude_code", assigned_node="remote_node_5",
         )
 
         mock_resp = MagicMock()

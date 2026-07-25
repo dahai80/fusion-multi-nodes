@@ -1,6 +1,7 @@
 """Observability coverage tests."""
 
 import asyncio
+import collections
 import time
 from unittest.mock import patch
 
@@ -54,9 +55,9 @@ class TestLogEntry:
 class TestClusterObservabilityInit:
     def test_init(self):
         obs = ClusterObservability()
-        assert obs.metrics == []
-        assert obs.alerts == []
-        assert obs.logs == []
+        assert len(obs.metrics) == 0
+        assert len(obs.alerts) == 0
+        assert len(obs.logs) == 0
 
     def test_init_custom_retention(self):
         obs = ClusterObservability(retention_hours=48.0)
@@ -77,7 +78,7 @@ class TestClusterObservabilityMetrics:
 
     def test_max_metrics_truncation(self):
         obs = ClusterObservability()
-        obs._max_metrics = 5
+        obs.metrics = collections.deque(maxlen=5)
         for i in range(10):
             obs.record_metric("n1", "cpu", float(i))
         assert len(obs.metrics) == 5
@@ -151,7 +152,7 @@ class TestClusterObservabilityLogs:
 
     def test_max_logs_truncation(self):
         obs = ClusterObservability()
-        obs._max_logs = 3
+        obs.logs = collections.deque(maxlen=3)
         for i in range(5):
             obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m", message=f"msg{i}"))
         assert len(obs.logs) == 3

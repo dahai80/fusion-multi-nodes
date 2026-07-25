@@ -12,11 +12,11 @@ from __future__ import annotations
 from fusion_multi_node.utils.auth import sanitize_node_url_part
 
 import asyncio
-import json
+import collections
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -61,11 +61,14 @@ class MCPClusterGateway:
         self.host = host
         self.port = port
         self.tools: Dict[str, MCPTool] = {}
-        self.requests: Dict[str, MCPRequest] = {}
+        self.requests: collections.OrderedDict = collections.OrderedDict()
+        self._max_requests = 10000
         self._node_selector: Optional[Callable] = None
         self._running = False
         self.total_token_count: int = 0
-        self.token_budget: int = 10_000_000  # 默认额度
+        self.token_budget: int = 10_000_000
+        self._lock = asyncio.Lock()
+        self._http_client = None
 
     def register_tool(self, tool: MCPTool) -> None:
         """注册工具到集群 MCP 网关。"""
@@ -92,6 +95,12 @@ class MCPClusterGateway:
         """设置节点选择器（由 Cluster Master 提供）。"""
         self._node_selector = selector
 
+    async def _get_http_client(self, timeout: float = 60.0):
+        import httpx
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        return self._http_client
+
     async def handle_tool_call(
         self,
         tool_name: str,
@@ -113,7 +122,11 @@ class MCPClusterGateway:
             source=source,
             created_at=time.time(),
         )
-        self.requests[request_id] = request
+
+        async with self._lock:
+            self.requests[request_id] = request
+            if len(self.requests) > self._max_requests:
+                self.requests.popitem(last=False)
 
         # 检查额度
         if self.total_token_count >= self.token_budget:
@@ -146,7 +159,8 @@ class MCPClusterGateway:
             # 估算 token 消耗
             estimated_tokens = len(str(arguments)) // 4
             request.token_count = estimated_tokens
-            self.total_token_count += estimated_tokens
+            async with self._lock:
+                self.total_token_count += estimated_tokens
             return result
         except Exception as e:
             request.status = "failed"
@@ -155,7 +169,6 @@ class MCPClusterGateway:
 
     async def _forward_to_node(self, request: MCPRequest, tool: MCPTool) -> Dict[str, Any]:
         """转发工具调用到目标节点执行。"""
-        import httpx
         node_id = request.assigned_node
 
         payload = {
@@ -165,24 +178,21 @@ class MCPClusterGateway:
             "request_id": request.request_id,
         }
 
-        # 如果节点是本机，直接通过 fusion-desk 本地 API
+        client = await self._get_http_client(tool.timeout)
         if node_id == "localhost":
-            async with httpx.AsyncClient(timeout=tool.timeout) as client:
-                resp = await client.post(
-                    f"http://localhost:9000/api/mcp/tools/{tool.name}",
-                    json=payload,
-                )
-                return resp.json()
+            resp = await client.post(
+                f"http://localhost:9000/api/mcp/tools/{tool.name}",
+                json=payload,
+            )
+            return resp.json()
         else:
-            # 转发到远程节点 agent
-            node_port = 9755  # Node Agent 默认端口
+            node_port = 9755
             safe_node = sanitize_node_url_part(node_id)
-            async with httpx.AsyncClient(timeout=tool.timeout) as client:
-                resp = await client.post(
-                    f"http://{safe_node}:{node_port}/api/mcp/execute",
-                    json=payload,
-                )
-                return resp.json()
+            resp = await client.post(
+                f"http://{safe_node}:{node_port}/api/mcp/execute",
+                json=payload,
+            )
+            return resp.json()
 
     def get_stats(self) -> Dict[str, Any]:
         """获取 MCP 网关统计。"""
@@ -204,4 +214,7 @@ class MCPClusterGateway:
     async def stop(self) -> None:
         """停止 MCP 网关。"""
         self._running = False
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
         logger.info("MCP 集群网关已停止")

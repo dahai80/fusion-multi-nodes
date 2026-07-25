@@ -12,15 +12,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-
-from fusion_multi_node.utils.auth import sanitize_node_url_part
+import threading
 import time
-import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
+
+from fusion_multi_node.utils.auth import sanitize_node_url_part
+
 logger = logging.getLogger(__name__)
+
+ALLOWED_SHARD_KEYS = {
+    "shard_id", "model_name", "layer_index", "node_id",
+    "token_count", "size_bytes", "created_at",
+    "access_count", "last_access", "is_compressed",
+}
 
 
 @dataclass
@@ -80,6 +88,8 @@ class KVSharingManager:
         # 本地缓存
         self._local_cache: OrderedDict[str, KVCacheEntry] = OrderedDict()
         self._local_size_bytes: int = 0
+        self._cache_lock = threading.Lock()
+        self._lookup_index: Dict[Tuple[str, str], str] = {}
 
         # 远程节点 KV 缓存索引
         self._remote_cache_index: Dict[str, List[KVCacheEntry]] = {}
@@ -93,53 +103,78 @@ class KVSharingManager:
             from .caveman_compress import CavemanCompressor
             self._compressor = CavemanCompressor()
 
+        # 复用 HTTP 客户端
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    async def _get_http_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        return self._http_client
+
+    async def close(self) -> None:
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
+
     # ── 本地缓存管理 ──
 
     def store_local(self, entry: KVCacheEntry) -> bool:
         """存储本地 KV 缓存。"""
-        # 检查空间
-        if self._local_size_bytes + entry.total_size_bytes > self.max_local_cache_mb * 1024 * 1024:
-            self._evict(entry.total_size_bytes)
-
-        self._local_cache[entry.cache_id] = entry
-        self._local_size_bytes += entry.total_size_bytes
+        max_bytes = self.max_local_cache_mb * 1024 * 1024
+        if entry.total_size_bytes > max_bytes:
+            logger.warning(f"KV 缓存条目过大: {entry.total_size_bytes / 1024:.1f}KB > "
+                          f"容量 {max_bytes / 1024:.1f}KB，拒绝存储")
+            return False
+        with self._cache_lock:
+            if self._local_size_bytes + entry.total_size_bytes > max_bytes:
+                self._evict(entry.total_size_bytes)
+            self._local_cache[entry.cache_id] = entry
+            self._local_size_bytes += entry.total_size_bytes
+            self._lookup_index[(entry.model_name, entry.prompt_hash)] = entry.cache_id
         logger.debug(f"KV 缓存存储: {entry.model_name} ({entry.total_tokens} tokens, "
                     f"{entry.total_size_bytes / 1024:.1f}KB)")
         return True
 
     def lookup_local(self, model_name: str, prompt_hash: str) -> Optional[KVCacheEntry]:
         """查询本地 KV 缓存。"""
-        for entry in self._local_cache.values():
-            if entry.model_name == model_name and entry.prompt_hash == prompt_hash:
-                if not entry.is_expired:
-                    entry.access_count += 1
-                    entry.shards[-1].last_access = time.time()
-                    # 移动到最近使用
-                    self._local_cache.move_to_end(entry.cache_id)
-                    return entry
-                else:
-                    # 删除过期
-                    self._local_cache.pop(entry.cache_id, None)
-                    self._local_size_bytes -= entry.total_size_bytes
-        return None
+        with self._cache_lock:
+            cache_id = self._lookup_index.get((model_name, prompt_hash))
+            if not cache_id:
+                return None
+            entry = self._local_cache.get(cache_id)
+            if not entry:
+                self._lookup_index.pop((model_name, prompt_hash), None)
+                return None
+            if entry.is_expired:
+                self._local_cache.pop(entry.cache_id, None)
+                self._local_size_bytes -= entry.total_size_bytes
+                self._lookup_index.pop((model_name, prompt_hash), None)
+                return None
+            entry.access_count += 1
+            if entry.shards:
+                entry.shards[-1].last_access = time.time()
+            self._local_cache.move_to_end(entry.cache_id)
+            return entry
 
     def lookup_prefix(self, model_name: str, prefix: str) -> List[KVCacheEntry]:
         """按前缀匹配查询 KV 缓存（用于缓存复用）。"""
-        matches = []
-        for entry in self._local_cache.values():
-            if entry.model_name == model_name and entry.prompt_prefix.startswith(prefix):
-                if not entry.is_expired:
-                    matches.append(entry)
-        return matches
+        with self._cache_lock:
+            matches = []
+            for entry in self._local_cache.values():
+                if entry.model_name == model_name and entry.prompt_prefix.startswith(prefix):
+                    if not entry.is_expired:
+                        matches.append(entry)
+            return matches
 
     def _evict(self, needed_bytes: int) -> None:
-        """LRU 淘汰缓存。"""
-        while self._local_size_bytes + needed_bytes > self.max_local_cache_mb * 1024 * 1024:
-            if not self._local_cache:
-                break
-            # 淘汰最久未使用
+        """LRU 淘汰缓存（需在 _cache_lock 内调用）。"""
+        max_bytes = self.max_local_cache_mb * 1024 * 1024
+        if needed_bytes > max_bytes:
+            return
+        while self._local_cache and self._local_size_bytes + needed_bytes > max_bytes:
             cache_id, entry = self._local_cache.popitem(last=False)
             self._local_size_bytes -= entry.total_size_bytes
+            self._lookup_index.pop((entry.model_name, entry.prompt_hash), None)
             logger.debug(f"KV 缓存淘汰: {cache_id} ({entry.total_size_bytes / 1024:.1f}KB)")
 
     # ── 远程缓存查询 ──
@@ -151,24 +186,23 @@ class KVSharingManager:
         nodes: List[str],
     ) -> Optional[Tuple[KVCacheEntry, str]]:
         """查询远程节点 KV 缓存。"""
-        import httpx
+        client = await self._get_http_client(self.max_remote_lookup_ms / 1000)
 
         for node_id in nodes:
             try:
                 safe_node = sanitize_node_url_part(node_id)
-                async with httpx.AsyncClient(timeout=self.max_remote_lookup_ms / 1000) as client:
-                    resp = await client.post(
-                        f"http://{safe_node}:9755/api/kv/lookup",
-                        json={
-                            "model_name": model_name,
-                            "prompt_hash": prompt_hash,
-                        },
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data.get("found"):
-                            entry = self._deserialize_entry(data["entry"])
-                            return entry, node_id
+                resp = await client.post(
+                    f"http://{safe_node}:9755/api/kv/lookup",
+                    json={
+                        "model_name": model_name,
+                        "prompt_hash": prompt_hash,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("found"):
+                        entry = self._deserialize_entry(data["entry"])
+                        return entry, node_id
             except Exception as e:
                 logger.debug(f"远程 KV 查询失败 {node_id}: {e}")
 
@@ -181,20 +215,18 @@ class KVSharingManager:
         target_node: str,
     ) -> bool:
         """跨节点传输 KV 缓存。"""
-        import httpx
-
         try:
+            client = await self._get_http_client(30.0)
             safe_source = sanitize_node_url_part(source_node)
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"http://{safe_source}:9755/api/kv/transfer",
-                    json={
-                        "cache_id": cache_id,
-                        "target_node": target_node,
-                        "compress": self.enable_compression,
-                    },
-                )
-                return resp.status_code == 200
+            resp = await client.post(
+                f"http://{safe_source}:9755/api/kv/transfer",
+                json={
+                    "cache_id": cache_id,
+                    "target_node": target_node,
+                    "compress": self.enable_compression,
+                },
+            )
+            return resp.status_code == 200
         except Exception as e:
             logger.error(f"KV 传输失败 {source_node} → {target_node}: {e}")
             return False
@@ -208,33 +240,31 @@ class KVSharingManager:
         nodes: List[str],
     ) -> Dict[str, Any]:
         """预加载高频 prompt 的 KV 缓存到多节点。"""
-        import httpx
-
         results = {"success": 0, "failed": 0, "details": []}
+        client = await self._get_http_client(60.0)
 
         for prompt in prompts:
             prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
             for node_id in nodes:
                 try:
                     safe_node = sanitize_node_url_part(node_id)
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        resp = await client.post(
-                            f"http://{safe_node}:9755/api/kv/warm",
-                            json={
-                                "model_name": model_name,
-                                "prompt": prompt,
-                                "prompt_hash": prompt_hash,
-                            },
-                        )
-                        if resp.status_code == 200:
-                            results["success"] += 1
-                            results["details"].append({
-                                "node": node_id,
-                                "prompt": prompt[:50],
-                                "status": "ok",
-                            })
-                        else:
-                            results["failed"] += 1
+                    resp = await client.post(
+                        f"http://{safe_node}:9755/api/kv/warm",
+                        json={
+                            "model_name": model_name,
+                            "prompt": prompt,
+                            "prompt_hash": prompt_hash,
+                        },
+                    )
+                    if resp.status_code == 200:
+                        results["success"] += 1
+                        results["details"].append({
+                            "node": node_id,
+                            "prompt": prompt[:50],
+                            "status": "ok",
+                        })
+                    else:
+                        results["failed"] += 1
                 except Exception as e:
                     results["failed"] += 1
                     logger.warning(f"缓存预热失败 {node_id}: {e}")
@@ -257,16 +287,10 @@ class KVSharingManager:
             "compression_enabled": self.enable_compression,
         }
 
-    ALLOWED_SHARD_KEYS = {
-        "shard_id", "model_name", "layer_index", "node_id",
-        "token_count", "size_bytes", "created_at",
-        "access_count", "last_access", "is_compressed",
-    }
-
     def _deserialize_entry(self, data: dict) -> KVCacheEntry:
         shards = []
         for s in data.get("shards", []):
-            filtered = {k: v for k, v in s.items() if k in self.ALLOWED_SHARD_KEYS}
+            filtered = {k: v for k, v in s.items() if k in ALLOWED_SHARD_KEYS}
             shards.append(KVShard(**filtered))
         return KVCacheEntry(
             cache_id=data["cache_id"],
@@ -287,13 +311,17 @@ class KVCacheWarmScheduler:
 
     def __init__(self, manager: KVSharingManager):
         self.manager = manager
-        self._hot_prompts: Dict[str, int] = {}  # prompt -> frequency
+        self._hot_prompts: Dict[str, int] = {}
+        self._max_hot_prompts = 1000
         self._running = False
 
     def record_prompt(self, prompt: str) -> None:
         """记录 prompt 使用频率。"""
-        key = prompt[:100]  # 取前 100 字符作为 key
+        key = prompt[:100]
         self._hot_prompts[key] = self._hot_prompts.get(key, 0) + 1
+        if len(self._hot_prompts) > self._max_hot_prompts:
+            sorted_items = sorted(self._hot_prompts.items(), key=lambda x: x[1])
+            self._hot_prompts = dict(sorted_items[len(sorted_items) // 2:])
 
     def get_hot_prompts(self, threshold: int = 3, max_count: int = 10) -> List[str]:
         """获取高频 prompt 列表。"""

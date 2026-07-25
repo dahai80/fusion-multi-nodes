@@ -7,17 +7,12 @@ import os
 import re
 import secrets
 from pathlib import Path
-from typing import Optional
-
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_PATH = str(Path.home() / ".fusion" / "multi-node" / ".cluster_token")
 
-SAFE_NODE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_\-\.]{0,63}$")
+SAFE_NODE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_\-]{0,63}$")
 
 
 def generate_cluster_token() -> str:
@@ -64,27 +59,45 @@ def sanitize_node_url_part(node_id: str) -> str:
     return node_id
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Bearer Token 认证中间件 — 校验 Authorization: Bearer <token>。"""
+class BearerAuthMiddleware:
+    """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。"""
 
-    EXEMPT_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc"}
+    EXEMPT_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc", "/", "/favicon.ico"}
 
     def __init__(self, app, shared_token: str):
-        super().__init__(app)
+        self.app = app
         self._expected = shared_token
 
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path in self.EXEMPT_PATHS:
-            return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            logger.warning(f"认证失败: 缺少 Bearer token ({request.url.path})")
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        path = scope.get("path", "")
+        if path in self.EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
 
-        token = auth[7:]
+        # 提取 Authorization header
+        auth_header = b""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                auth_header = value
+                break
+
+        if not auth_header.startswith(b"Bearer "):
+            logger.warning(f"认证失败: 缺少 Bearer token ({path})")
+            from starlette.responses import JSONResponse
+            response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            await response(scope, receive, send)
+            return
+
+        token = auth_header[7:].decode("utf-8", errors="replace")
         if not secrets.compare_digest(token, self._expected):
-            logger.warning(f"认证失败: token 不匹配 ({request.url.path})")
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            logger.warning(f"认证失败: token 不匹配 ({path})")
+            from starlette.responses import JSONResponse
+            response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            await response(scope, receive, send)
+            return
 
-        return await call_next(request)
+        await self.app(scope, receive, send)

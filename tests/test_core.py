@@ -24,7 +24,8 @@ class TestClusterMaster:
     def setup_method(self):
         self.master = ClusterMaster(host="127.0.0.1", port=19753, heartbeat_timeout=60.0)
 
-    def test_register_node(self):
+    @pytest.mark.asyncio
+    async def test_register_node(self):
         node = NodeInfo(
             node_id="test_node_1",
             hostname="test-mac-1",
@@ -36,11 +37,12 @@ class TestClusterMaster:
             gpu_cores=40,
             status=NodeStatus.ONLINE,
         )
-        self.master.register_node(node)
+        await self.master.register_node(node)
         assert "test_node_1" in self.master.nodes
         assert self.master.nodes["test_node_1"].status == NodeStatus.ONLINE
 
-    def test_get_online_nodes(self):
+    @pytest.mark.asyncio
+    async def test_get_online_nodes(self):
         node = NodeInfo(
             node_id="test_node_2",
             hostname="test-mac-2",
@@ -53,13 +55,14 @@ class TestClusterMaster:
             status=NodeStatus.ONLINE,
             last_heartbeat=time.time(),
         )
-        self.master.register_node(node)
-        online = self.master.get_online_nodes()
+        await self.master.register_node(node)
+        online = await self.master.get_online_nodes()
         assert len(online) >= 1
 
-    def test_select_nodes_data_parallel(self):
+    @pytest.mark.asyncio
+    async def test_select_nodes_data_parallel(self):
         for i in range(3):
-            self.master.register_node(NodeInfo(
+            await self.master.register_node(NodeInfo(
                 node_id=f"node_{i}",
                 hostname=f"mac-{i}",
                 ip_address=f"192.168.1.{100+i}",
@@ -71,11 +74,12 @@ class TestClusterMaster:
                 status=NodeStatus.ONLINE,
                 last_heartbeat=time.time(),
             ))
-        nodes = self.master.select_nodes(ParallelMode.DATA, count=2)
+        nodes = await self.master.select_nodes(ParallelMode.DATA, count=2)
         assert len(nodes) == 2
 
-    def test_assign_task(self):
-        self.master.register_node(NodeInfo(
+    @pytest.mark.asyncio
+    async def test_assign_task(self):
+        await self.master.register_node(NodeInfo(
             node_id="worker_1",
             hostname="worker-1",
             ip_address="192.168.1.10",
@@ -93,22 +97,24 @@ class TestClusterMaster:
             mode=ParallelMode.DATA,
             model_name="qwen3.5-9b",
         )
-        result = self.master.assign_task(task)
+        result = await self.master.assign_task(task)
         assert result is True
         assert task.status == TaskStatus.RUNNING
 
-    def test_complete_task(self):
+    @pytest.mark.asyncio
+    async def test_complete_task(self):
         task = ClusterTask(
             task_id="test_task_2",
             name="test-complete",
             mode=ParallelMode.DATA,
         )
         self.master.tasks["test_task_2"] = task
-        self.master.complete_task("test_task_2")
+        await self.master.complete_task("test_task_2")
         assert self.master.tasks["test_task_2"].status == TaskStatus.COMPLETED
 
-    def test_get_stats(self):
-        stats = self.master.get_stats()
+    @pytest.mark.asyncio
+    async def test_get_stats(self):
+        stats = await self.master.get_stats()
         assert "total_nodes" in stats
         assert "online_nodes" in stats
         assert "total_tasks" in stats

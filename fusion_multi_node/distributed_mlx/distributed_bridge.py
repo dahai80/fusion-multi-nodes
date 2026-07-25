@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+import httpx
 
 from fusion_multi_node.utils.auth import sanitize_node_url_part
 
@@ -61,6 +62,27 @@ class DistributedMLXBridge:
     def __init__(self):
         self._shards: Dict[str, List[ModelShard]] = {}
         self._active_pipelines: Dict[str, Dict[str, Any]] = {}
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._max_pipelines = 100
+        self._max_shards = 50
+
+    async def _get_http_client(self, timeout: float = 300.0) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        return self._http_client
+
+    async def close(self) -> None:
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    def _cleanup_completed_pipelines(self) -> None:
+        completed = [pid for pid, p in self._active_pipelines.items() if p["status"] in ("completed", "failed")]
+        for pid in completed:
+            del self._active_pipelines[pid]
+        if len(self._active_pipelines) > self._max_pipelines:
+            oldest = next(iter(self._active_pipelines))
+            del self._active_pipelines[oldest]
 
     async def shard_model(
         self,
@@ -68,16 +90,7 @@ class DistributedMLXBridge:
         num_shards: int,
         strategy: str = "auto",
     ) -> List[ModelShard]:
-        """将模型切分为分片。
-
-        Args:
-            model_name: 模型名称
-            num_shards: 分片数量
-            strategy: 切分策略
-
-        Returns:
-            分片列表
-        """
+        """将模型切分为分片。"""
         logger.info(f"模型分片: {model_name} → {num_shards} 片 (策略: {strategy})")
 
         # 获取模型配置
@@ -102,6 +115,9 @@ class DistributedMLXBridge:
             shards.append(shard)
 
         self._shards[model_name] = shards
+        if len(self._shards) > self._max_shards:
+            oldest = next(iter(self._shards))
+            del self._shards[oldest]
         logger.info(f"分片完成: {total_layers} 层 → {num_shards} 片 "
                     f"({layers_per_shard} 层/片)")
         return shards
@@ -113,10 +129,7 @@ class DistributedMLXBridge:
         node_id: str,
         fusion_mlx_port: int = 8000,
     ) -> bool:
-        """在指定节点加载模型分片。
-
-        通过 HTTP 调用 fusion-mlx 的分片加载 API。
-        """
+        """在指定节点加载模型分片。"""
         shards = self._shards.get(model_name, [])
         if shard_id >= len(shards):
             logger.error(f"分片索引越界: {shard_id}/{len(shards)}")
@@ -125,7 +138,6 @@ class DistributedMLXBridge:
         shard = shards[shard_id]
         shard.node_id = node_id
 
-        import httpx
         try:
             payload = {
                 "model": model_name,
@@ -136,18 +148,18 @@ class DistributedMLXBridge:
             }
 
             safe_node = sanitize_node_url_part(node_id)
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                resp = await client.post(
-                    f"http://{safe_node}:{fusion_mlx_port}/distributed/load_shard",
-                    json=payload,
-                )
-                if resp.status_code == 200:
-                    shard.status = "loaded"
-                    logger.info(f"分片加载成功: {model_name}[{shard_id}] @ {node_id}")
-                    return True
-                else:
-                    logger.error(f"分片加载失败: {resp.text}")
-                    return False
+            client = await self._get_http_client(300.0)
+            resp = await client.post(
+                f"http://{safe_node}:{fusion_mlx_port}/distributed/load_shard",
+                json=payload,
+            )
+            if resp.status_code == 200:
+                shard.status = "loaded"
+                logger.info(f"分片加载成功: {model_name}[{shard_id}] @ {node_id}")
+                return True
+            else:
+                logger.error(f"分片加载失败: {resp.text}")
+                return False
         except Exception as e:
             logger.error(f"分片加载异常: {e}")
             shard.status = "failed"
@@ -160,10 +172,7 @@ class DistributedMLXBridge:
         node_chain: List[str],
         fusion_mlx_port: int = 8000,
     ) -> Dict[str, Any]:
-        """流水线并行推理。
-
-        将 prompt 依次通过链式节点，每节点处理自己分片。
-        """
+        """流水线并行推理。"""
         pipeline_id = f"pipe_{model_name}_{len(self._active_pipelines)}"
         self._active_pipelines[pipeline_id] = {
             "model": model_name,
@@ -174,8 +183,8 @@ class DistributedMLXBridge:
 
         logger.info(f"流水线推理: {pipeline_id} ({len(node_chain)} 节点)")
 
-        import httpx
         current_input = prompt
+        client = await self._get_http_client(300.0)
 
         for i, node_id in enumerate(node_chain):
             payload = {
@@ -189,20 +198,20 @@ class DistributedMLXBridge:
 
             try:
                 safe_node = sanitize_node_url_part(node_id)
-                async with httpx.AsyncClient(timeout=300.0) as client:
-                    resp = await client.post(
-                        f"http://{safe_node}:{fusion_mlx_port}/distributed/pipeline_step",
-                        json=payload,
-                    )
-                    data = resp.json()
-                    current_input = data.get("output", current_input)
-                    logger.debug(f"流水线步骤 {i+1}/{len(node_chain)} 完成 @ {node_id}")
+                resp = await client.post(
+                    f"http://{safe_node}:{fusion_mlx_port}/distributed/pipeline_step",
+                    json=payload,
+                )
+                data = resp.json()
+                current_input = data.get("output", current_input)
+                logger.debug(f"流水线步骤 {i+1}/{len(node_chain)} 完成 @ {node_id}")
             except Exception as e:
                 logger.error(f"流水线步骤 {i+1} 失败: {e}")
                 self._active_pipelines[pipeline_id]["status"] = "failed"
                 return {"error": "流水线步骤执行失败", "pipeline_id": pipeline_id}
 
         self._active_pipelines[pipeline_id]["status"] = "completed"
+        self._cleanup_completed_pipelines()
         return {
             "pipeline_id": pipeline_id,
             "output": current_input,
@@ -216,18 +225,18 @@ class DistributedMLXBridge:
         nodes: List[str],
         fusion_mlx_port: int = 8000,
     ) -> List[Dict[str, Any]]:
-        """数据并行推理。
+        """数据并行推理 — 负载感知分配。
 
-        将多个 prompt 分发到不同节点并行推理。
+        优先分配给活跃任务数最少的节点，而非简单轮询。
         """
-        results = []
+        load: Dict[str, int] = {n: 0 for n in nodes}
         tasks = []
 
-        for i, prompt in enumerate(prompts):
-            node_id = nodes[i % len(nodes)]
-            tasks.append(self._single_inference(node_id, model_name, prompt, fusion_mlx_port))
+        for prompt in prompts:
+            min_node = min(load, key=load.get)
+            load[min_node] += 1
+            tasks.append(self._single_inference(min_node, model_name, prompt, fusion_mlx_port))
 
-        # 并行执行
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         processed = []
@@ -237,7 +246,7 @@ class DistributedMLXBridge:
             else:
                 processed.append(r)
 
-        logger.info(f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点")
+        logger.info(f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点, 分配: {load}")
         return processed
 
     async def _single_inference(
@@ -248,35 +257,33 @@ class DistributedMLXBridge:
         port: int,
     ) -> Dict[str, Any]:
         """单节点推理。"""
-        import httpx
         payload = {
             "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4096,
         }
         safe_node = sanitize_node_url_part(node_id)
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(
-                f"http://{safe_node}:{port}/v1/chat/completions",
-                json=payload,
-            )
-            data = resp.json()
-            return {
-                "node_id": node_id,
-                "content": data["choices"][0]["message"]["content"],
-                "usage": data.get("usage", {}),
-            }
+        client = await self._get_http_client(300.0)
+        resp = await client.post(
+            f"http://{safe_node}:{port}/v1/chat/completions",
+            json=payload,
+        )
+        data = resp.json()
+        return {
+            "node_id": node_id,
+            "content": data["choices"][0]["message"]["content"],
+            "usage": data.get("usage", {}),
+        }
 
     async def _get_model_config(self, model_name: str) -> Dict[str, Any]:
         """获取模型配置（通过 fusion-mlx API）。"""
-        import httpx
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"http://localhost:8000/v1/models/{model_name}"
-                )
-                if resp.status_code == 200:
-                    return resp.json()
+            client = await self._get_http_client(10.0)
+            resp = await client.get(
+                f"http://localhost:8000/v1/models/{model_name}"
+            )
+            if resp.status_code == 200:
+                return resp.json()
         except Exception:
             pass
         # 默认值
@@ -294,8 +301,8 @@ class DistributedMLXBridge:
         port: int = 8000,
     ) -> bool:
         """跨节点同步模型权重。"""
-        import httpx
         success = True
+        client = await self._get_http_client(600.0)
         for target in target_nodes:
             try:
                 payload = {
@@ -304,14 +311,13 @@ class DistributedMLXBridge:
                     "target": target,
                 }
                 safe_source = sanitize_node_url_part(source_node)
-                async with httpx.AsyncClient(timeout=600.0) as client:
-                    resp = await client.post(
-                        f"http://{safe_source}:{port}/distributed/sync_weights",
-                        json=payload,
-                    )
-                    if resp.status_code != 200:
-                        success = False
-                        logger.error(f"权重同步失败: {source_node} → {target}")
+                resp = await client.post(
+                    f"http://{safe_source}:{port}/distributed/sync_weights",
+                    json=payload,
+                )
+                if resp.status_code != 200:
+                    success = False
+                    logger.error(f"权重同步失败: {source_node} → {target}")
             except Exception as e:
                 success = False
                 logger.error(f"权重同步异常: {e}")

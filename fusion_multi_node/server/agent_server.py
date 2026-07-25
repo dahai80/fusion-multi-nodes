@@ -10,11 +10,17 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from fusion_multi_node.agent import AgentConfig, NodeAgent
-from fusion_multi_node.distributed_mlx import KVCacheEntry, KVSharingManager, KVShard
+from fusion_multi_node.agent import NodeAgent
+from fusion_multi_node.distributed_mlx import KVSharingManager
 from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
 
 logger = logging.getLogger(__name__)
+
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version("fusion-multi-node")
+except Exception:
+    _VERSION = "0.2.0"
 
 ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin"}
 ALLOWED_EXTRA_KEYS = {"temperature", "top_p", "top_k", "repeat_penalty", "seed"}
@@ -23,10 +29,16 @@ ALLOWED_EXTRA_KEYS = {"temperature", "top_p", "top_k", "repeat_penalty", "seed"}
 class InMemoryRateLimiter:
     """简易内存速率限制器 — 按 IP 限制请求频率。"""
 
+    _MAX_IP_ENTRIES = 10000
+    _CLEANUP_INTERVAL = 100
+    _TIME_CLEANUP_INTERVAL = 60.0
+
     def __init__(self, max_requests: int = 30, window_seconds: float = 60.0):
         self._max = max_requests
         self._window = window_seconds
         self._counts: Dict[str, List[float]] = defaultdict(list)
+        self._call_count = 0
+        self._last_time_cleanup: float = time.time()
 
     def is_allowed(self, key: str) -> bool:
         now = time.time()
@@ -36,13 +48,64 @@ class InMemoryRateLimiter:
         if len(self._counts[key]) >= self._max:
             return False
         self._counts[key].append(now)
+        self._call_count += 1
+        if self._call_count % self._CLEANUP_INTERVAL == 0:
+            self._cleanup_stale(now)
+        if now - self._last_time_cleanup >= self._TIME_CLEANUP_INTERVAL:
+            self._cleanup_stale(now)
+            self._last_time_cleanup = now
         return True
+
+    def _cleanup_stale(self, now: float) -> None:
+        cutoff = now - self._window
+        stale_keys = [k for k, v in self._counts.items() if not v or v[-1] < cutoff]
+        for k in stale_keys:
+            del self._counts[k]
+        if len(self._counts) > self._MAX_IP_ENTRIES:
+            sorted_keys = sorted(self._counts, key=lambda k: self._counts[k][-1] if self._counts[k] else 0)
+            for k in sorted_keys[:len(self._counts) - self._MAX_IP_ENTRIES]:
+                del self._counts[k]
+
+
+class RateLimitMiddleware:
+    """全局限流中间件 — 所有 API 端点统一限流。"""
+
+    EXEMPT_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc", "/", "/favicon.ico"}
+
+    def __init__(self, app, limiter: Optional[InMemoryRateLimiter] = None):
+        self.app = app
+        self._limiter = limiter or InMemoryRateLimiter()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in self.EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        client_ip = "unknown"
+        for name, value in scope.get("headers", []):
+            if name == b"x-forwarded-for":
+                client_ip = value.decode("utf-8", errors="replace").split(",")[0].strip()
+                break
+        if client_ip == "unknown":
+            client = scope.get("client")
+            if client:
+                client_ip = client[0]
+
+        if not self._limiter.is_allowed(client_ip):
+            from starlette.responses import JSONResponse
+            response = JSONResponse(status_code=429, content={"detail": "请求过于频繁"})
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 # ── Pydantic 请求/响应模型 ──
-
-ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin"}
-ALLOWED_EXTRA_KEYS = {"temperature", "top_p", "top_k", "repeat_penalty", "seed"}
 
 
 class ExecuteRequest(BaseModel):
@@ -90,12 +153,13 @@ class AgentServer:
     ):
         self.agent = agent or NodeAgent()
         self.kv_manager = kv_manager or KVSharingManager()
-        self.app = FastAPI(title="Fusion Multi-Node Agent", version="0.1.0")
+        self.app = FastAPI(title="Fusion Multi-Node Agent", version=_VERSION)
         self._shared_token = shared_token or load_or_create_token()
+        self._rate_limiter = InMemoryRateLimiter()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
+        self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
         self._uvicorn_server: Optional[Any] = None
         self._started_at: float = 0.0
-        self._rate_limiter = InMemoryRateLimiter()
         self._setup_routes()
 
     def _setup_routes(self):
@@ -103,19 +167,12 @@ class AgentServer:
 
         @app.get("/api/health")
         async def health():
-            return HealthResponse(
-                status="ok",
-                node_id=self.agent.config.node_id,
-                uptime_seconds=time.time() - self._started_at if self._started_at else 0.0,
-            )
+            return {"status": "ok"}
 
         # ── 任务执行 ──
 
         @app.post("/api/execute")
         async def execute_task(req: ExecuteRequest, request: Request):
-            client_ip = request.client.host if request.client else "unknown"
-            if not self._rate_limiter.is_allowed(client_ip):
-                raise HTTPException(status_code=429, detail="请求过于频繁")
             if req.task_type not in ALLOWED_TASK_TYPES:
                 raise HTTPException(status_code=400, detail=f"不合法的任务类型: {req.task_type}")
             filtered_extra = {k: v for k, v in req.extra.items() if k in ALLOWED_EXTRA_KEYS}
@@ -129,7 +186,7 @@ class AgentServer:
                 **filtered_extra,
             }
             try:
-                result = self.agent.execute_task(task)
+                result = await self.agent.execute_task(task)
                 return {"status": "ok", "result": result}
             except Exception as e:
                 logger.error(f"任务执行失败: {e}")

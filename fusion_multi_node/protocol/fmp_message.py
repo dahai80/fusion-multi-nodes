@@ -24,10 +24,8 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── 常量 ──
-
-FMP_MAGIC = b"\x46\x4D\x50\x01"  # "FMP\x01"
-FMP_HEADER_SIZE = 12  # magic(4) + version(1) + flags(1) + payload_len(4) + reserved(2)
+FMP_MAGIC = b"\x46\x4D\x50\x01"
+FMP_HEADER_SIZE = 12
 MAX_HOP_COUNT = 3
 MAX_ROUNDS = 10
 FMP_VERSION = 1
@@ -56,8 +54,6 @@ class ControlType(Enum):
     FLOW_CONTROL = "flow_control"
     DISCONNECT = "disconnect"
 
-
-# ── 三层结构 ──
 
 @dataclass
 class FMPLinkLayer:
@@ -174,8 +170,6 @@ class FMPControlLayer:
         )
 
 
-# ── FMP 消息 ──
-
 @dataclass
 class FMPMessage:
     """FMP 完整消息 — 三层封装。"""
@@ -208,7 +202,7 @@ class FMPMessage:
         )
         control = FMPControlLayer(
             control_type=control_type,
-            sequence=int(time.time() * 1000) % (2**31),
+            sequence=uuid.uuid4().int >> 96,
             timestamp=time.time(),
         )
         return cls(message_id=msg_id, link=link, business=business, control=control)
@@ -232,19 +226,34 @@ class FMPMessage:
             encrypted=d.get("encrypted", False),
         )
 
-    def serialize(self) -> bytes:
-        """序列化为二进制帧: [MAGIC][VERSION][FLAGS][PAYLOAD_LEN][RESERVED][JSON_PAYLOAD]"""
-        json_bytes = json.dumps(self.to_dict()).encode("utf-8")
+    def serialize(self, use_msgpack: bool = False) -> bytes:
+        """序列化为二进制帧: [MAGIC][VERSION][FLAGS][PAYLOAD_LEN][RESERVED][PAYLOAD]
+
+        FLAGS: bit0=encrypted, bit1=msgpack(1)/json(0)
+        """
+        payload_dict = self.to_dict()
         flags = 0x01 if self.encrypted else 0x00
+
+        if use_msgpack:
+            try:
+                import msgpack
+                payload_bytes = msgpack.packb(payload_dict, use_bin_type=True)
+                flags |= 0x02
+            except ImportError:
+                logger.debug("msgpack 未安装，回退 JSON 序列化")
+                payload_bytes = json.dumps(payload_dict).encode("utf-8")
+        else:
+            payload_bytes = json.dumps(payload_dict).encode("utf-8")
+
         header = struct.pack(
             "!4sBBIH",
             FMP_MAGIC,
             FMP_VERSION,
             flags,
-            len(json_bytes),
+            len(payload_bytes),
             0,
         )
-        return header + json_bytes
+        return header + payload_bytes
 
     @classmethod
     def deserialize(cls, data: bytes) -> FMPMessage:
@@ -260,13 +269,29 @@ class FMPMessage:
         if payload_len > FMP_MAX_PAYLOAD_SIZE:
             raise ValueError(f"payload 超限: {payload_len} > {FMP_MAX_PAYLOAD_SIZE}")
 
-        json_bytes = data[FMP_HEADER_SIZE:FMP_HEADER_SIZE + payload_len]
-        d = json.loads(json_bytes.decode("utf-8"))
+        expected_total = FMP_HEADER_SIZE + payload_len
+        if len(data) < expected_total:
+            raise ValueError(
+                f"数据不足: 声明 {payload_len} 字节, 实际 {len(data) - FMP_HEADER_SIZE} 字节"
+            )
+        if len(data) > expected_total:
+            logger.warning(f"帧含尾部数据: {len(data) - expected_total} 字节将被忽略")
+
+        payload_bytes = data[FMP_HEADER_SIZE:expected_total]
+        is_msgpack = bool(flags & 0x02)
+
+        if is_msgpack:
+            try:
+                import msgpack
+                d = msgpack.unpackb(payload_bytes, raw=False)
+            except ImportError:
+                raise ValueError("收到 msgpack 帧，但 msgpack 未安装")
+        else:
+            d = json.loads(payload_bytes.decode("utf-8"))
+
         d["encrypted"] = bool(flags & 0x01)
         return cls.from_dict(d)
 
-
-# ── AES-GCM 加密封装 ──
 
 class FMPCrypto:
     """AES-GCM 加密器。"""
@@ -275,42 +300,50 @@ class FMPCrypto:
         if key and len(key) != 32:
             raise ValueError("AES-256-GCM 需要 32 字节密钥")
         self._key = key
+        self._aesgcm = None
+        if key:
+            try:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                self._aesgcm = AESGCM(key)
+            except ImportError:
+                pass
 
     @classmethod
     def generate_key(cls) -> bytes:
         return os.urandom(32)
 
     def encrypt(self, plaintext: bytes, aad: Optional[bytes] = None) -> bytes:
-        if not self._key:
+        if not self._aesgcm:
             raise RuntimeError("FMPCrypto: 加密密钥未设置，拒绝明文传输")
-        try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        except ImportError:
-            raise RuntimeError("FMPCrypto: cryptography 未安装，无法加密")
-        aesgcm = AESGCM(self._key)
         nonce = os.urandom(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
+        ciphertext = self._aesgcm.encrypt(nonce, plaintext, aad)
         return nonce + ciphertext
 
     def decrypt(self, data: bytes, aad: Optional[bytes] = None) -> bytes:
-        if not self._key:
+        if not self._aesgcm:
             raise RuntimeError("FMPCrypto: 解密密钥未设置，拒绝明文处理")
-        try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        except ImportError:
-            raise RuntimeError("FMPCrypto: cryptography 未安装，无法解密")
-        aesgcm = AESGCM(self._key)
         nonce = data[:12]
         ciphertext = data[12:]
-        return aesgcm.decrypt(nonce, ciphertext, aad)
+        return self._aesgcm.decrypt(nonce, ciphertext, aad)
 
     def encrypt_message(self, msg: FMPMessage) -> FMPMessage:
         raw_payload = msg.business.payload
         aad = f"{msg.link.source_id}:{msg.link.target_id}".encode("utf-8")
         encrypted_payload = self.encrypt(raw_payload, aad=aad)
-        msg.business.payload = encrypted_payload
-        msg.encrypted = True
-        return msg
+        encrypted_business = FMPBusinessLayer(
+            payload_type=msg.business.payload_type,
+            payload=encrypted_payload,
+            round_id=msg.business.round_id,
+            round_number=msg.business.round_number,
+            max_rounds=msg.business.max_rounds,
+        )
+        return FMPMessage(
+            message_id=msg.message_id,
+            link=msg.link,
+            business=encrypted_business,
+            control=msg.control,
+            encrypted=True,
+        )
 
     def decrypt_message(self, msg: FMPMessage) -> FMPMessage:
         if not msg.encrypted:

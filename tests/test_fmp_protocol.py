@@ -154,11 +154,12 @@ class TestFMPCrypto:
             payload={"status": "ok"},
         )
         original = msg.business.payload
-        crypto.encrypt_message(msg)
-        assert msg.encrypted
-        crypto.decrypt_message(msg)
+        encrypted_msg = crypto.encrypt_message(msg)
         assert not msg.encrypted
-        assert msg.business.payload == original
+        assert encrypted_msg.encrypted
+        decrypted_msg = crypto.decrypt_message(encrypted_msg)
+        assert not decrypted_msg.encrypted
+        assert decrypted_msg.business.payload == original
 
     def test_invalid_key_length(self):
         with pytest.raises(ValueError):

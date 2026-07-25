@@ -10,14 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import platform
-import socket
-import struct
 import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -298,10 +295,10 @@ class NetworkTopologyDetector:
 
     def get_best_link(self) -> Optional[LinkInfo]:
         """获取最优链路。"""
-        active = [l for l in self._interfaces.values() if l.is_active]
+        active = [lnk for lnk in self._interfaces.values() if lnk.is_active]
         if not active:
             return None
-        return min(active, key=lambda l: l.priority)
+        return min(active, key=lambda lnk: lnk.priority)
 
     def get_primary_interface(self) -> str:
         """获取主接口名称。"""
@@ -321,8 +318,8 @@ class NetworkTopologyDetector:
     def is_thunderbolt_available(self) -> bool:
         """检查是否有 Thunderbolt 高速链路。"""
         return any(
-            l.type in (LinkType.THUNDERBOLT_5, LinkType.THUNDERBOLT_4, LinkType.THUNDERBOLT_3)
-            for l in self._interfaces.values()
+            lnk.type in (LinkType.THUNDERBOLT_5, LinkType.THUNDERBOLT_4, LinkType.THUNDERBOLT_3)
+            for lnk in self._interfaces.values()
         )
 
     def get_recommended_compression(self) -> str:

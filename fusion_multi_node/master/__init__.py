@@ -7,6 +7,7 @@ from .cluster_master import (
     NodeInfo,
     NodeStatus,
     ParallelMode,
+    StandbyMaster,
     TaskStatus,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "NodeInfo",
     "NodeStatus",
     "ParallelMode",
+    "StandbyMaster",
     "TaskStatus",
 ]

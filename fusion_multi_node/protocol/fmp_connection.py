@@ -13,17 +13,31 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
 
-from .circuit_breaker import CircuitBreaker, CircuitState
-from .fmp_message import FMPMessage, PayloadType, ControlType, FMPControlLayer, FMPCrypto
+from .circuit_breaker import CircuitBreaker
+from .fmp_message import FMPMessage, FMPCrypto
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECONNECT_INTERVAL = 3.0
 DEFAULT_HEARTBEAT_INTERVAL = 10.0
 DEFAULT_READ_TIMEOUT = 30.0
+
+_tls_manager: Optional[Any] = None
+
+
+def _get_shared_tls_manager():
+    """全局共享 TLSCertManager 实例，避免每次连接重建。"""
+    global _tls_manager
+    if _tls_manager is None:
+        try:
+            from fusion_multi_node.protocol import TLSCertManager
+            _tls_manager = TLSCertManager()
+        except Exception:
+            pass
+    return _tls_manager
 
 
 @dataclass
@@ -65,6 +79,8 @@ class FMPConnection:
         self._reconnect_interval = DEFAULT_RECONNECT_INTERVAL
         self._circuit_breaker = CircuitBreaker(name=f"conn-{node_id}")
         self._send_lock = asyncio.Lock()
+        self._read_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
 
     @property
     def is_connected(self) -> bool:
@@ -75,12 +91,9 @@ class FMPConnection:
         try:
             ssl_ctx = None
             if self._use_tls:
-                try:
-                    from fusion_multi_node.protocol import TLSCertManager
-                    tls_mgr = TLSCertManager()
+                tls_mgr = _get_shared_tls_manager()
+                if tls_mgr:
                     ssl_ctx = tls_mgr.get_client_ssl_context()
-                except Exception:
-                    pass
             self._reader, self._writer = await asyncio.open_connection(
                 self.info.host, self.info.port, ssl=ssl_ctx,
             )
@@ -90,7 +103,11 @@ class FMPConnection:
             self._running = True
             self._circuit_breaker.reset()
             logger.info(f"FMP 连接建立: {self.info.host}:{self.info.port}")
-            asyncio.create_task(self._read_loop())
+            if self._read_task and not self._read_task.done():
+                self._read_task.cancel()
+            if self._reconnect_task and not self._reconnect_task.done():
+                self._reconnect_task.cancel()
+            self._read_task = asyncio.create_task(self._read_loop())
             return True
         except Exception as e:
             self._circuit_breaker.record_failure()
@@ -109,6 +126,13 @@ class FMPConnection:
     async def disconnect(self) -> None:
         """断开连接。"""
         self._running = False
+        for task in (self._read_task, self._reconnect_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self._writer and not self._writer.is_closing():
             try:
                 self._writer.close()
@@ -169,7 +193,11 @@ class FMPConnection:
                 self.info.last_active = time.time()
 
                 if self._on_message:
-                    self._on_message(msg)
+                    import asyncio as _aio
+                    import inspect
+                    result = self._on_message(msg)
+                    if inspect.iscoroutine(result):
+                        _aio.create_task(result)
 
             except asyncio.TimeoutError:
                 continue
@@ -182,7 +210,9 @@ class FMPConnection:
 
         self.info.is_alive = False
         if self._running:
-            asyncio.create_task(self._auto_reconnect())
+            if self._reconnect_task and not self._reconnect_task.done():
+                return
+            self._reconnect_task = asyncio.create_task(self._auto_reconnect())
 
     async def _auto_reconnect(self) -> None:
         """自动重连。"""
@@ -206,38 +236,46 @@ class FMPConnectionManager:
         self._crypto = crypto
         self._on_message = on_message
         self._connections: Dict[str, FMPConnection] = {}
+        self._lock = asyncio.Lock()
 
     async def add_connection(self, node_id: str, host: str, port: int) -> FMPConnection:
         """添加并连接到远程节点。"""
-        if node_id in self._connections:
-            conn = self._connections[node_id]
-            if conn.is_connected:
-                return conn
-            await conn.disconnect()
+        async with self._lock:
+            if node_id in self._connections:
+                conn = self._connections[node_id]
+                if conn.is_connected:
+                    return conn
+                await conn.disconnect()
 
-        conn = FMPConnection(
-            node_id=node_id,
-            host=host,
-            port=port,
-            crypto=self._crypto,
-            on_message=self._on_message,
-        )
-        self._connections[node_id] = conn
+            conn = FMPConnection(
+                node_id=node_id,
+                host=host,
+                port=port,
+                crypto=self._crypto,
+                on_message=self._on_message,
+            )
+            self._connections[node_id] = conn
         await conn.connect_with_retry()
         return conn
 
     async def remove_connection(self, node_id: str) -> None:
         """移除连接。"""
-        conn = self._connections.pop(node_id, None)
+        async with self._lock:
+            conn = self._connections.pop(node_id, None)
         if conn:
             await conn.disconnect()
 
     def get_connection(self, node_id: str) -> Optional[FMPConnection]:
         return self._connections.get(node_id)
 
+    async def safe_get_connection(self, node_id: str) -> Optional[FMPConnection]:
+        async with self._lock:
+            return self._connections.get(node_id)
+
     async def send_to(self, node_id: str, msg: FMPMessage) -> bool:
         """向指定节点发送消息。"""
-        conn = self._connections.get(node_id)
+        async with self._lock:
+            conn = self._connections.get(node_id)
         if not conn or not conn.is_connected:
             logger.warning(f"节点 {node_id} 连接不可用")
             return False
@@ -245,17 +283,20 @@ class FMPConnectionManager:
 
     async def broadcast(self, msg: FMPMessage) -> Dict[str, bool]:
         """广播消息到所有连接。"""
+        async with self._lock:
+            targets = {nid: conn for nid, conn in self._connections.items() if conn.is_connected}
         results = {}
-        for node_id, conn in list(self._connections.items()):
-            if conn.is_connected:
-                results[node_id] = await conn.send(msg)
+        for node_id, conn in targets.items():
+            results[node_id] = await conn.send(msg)
         return results
 
     async def close_all(self) -> None:
         """关闭所有连接。"""
-        for conn in list(self._connections.values()):
+        async with self._lock:
+            conns = list(self._connections.values())
+            self._connections.clear()
+        for conn in conns:
             await conn.disconnect()
-        self._connections.clear()
 
     def get_stats(self) -> Dict[str, Any]:
         return {

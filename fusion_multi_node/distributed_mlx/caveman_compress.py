@@ -11,12 +11,11 @@ Caveman 通过轻量无损压缩算法，降低 40-60% 传输量。
 
 from __future__ import annotations
 
-import math
 import struct
 import zlib
 from collections import Counter
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 
 @dataclass
@@ -46,6 +45,8 @@ class CavemanCompressor:
 
     def build_dictionary(self, tokens: List[int]) -> None:
         """根据 token 频率构建字典。"""
+        self._dictionary.clear()
+        self._reverse_dict.clear()
         freq = Counter(tokens)
         # 高频 token 分配短编码
         common = freq.most_common(self.dictionary_size)
@@ -262,3 +263,7 @@ class CavemanManager:
             "savings_bytes": self.total_original - self.total_compressed,
             "savings_percent": round((1 - self.get_compression_ratio()) * 100, 1),
         }
+
+    def reset_stats(self) -> None:
+        self.total_original = 0
+        self.total_compressed = 0

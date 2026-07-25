@@ -109,82 +109,91 @@ class TestClusterMaster:
         await master.stop()
         assert master._running is False
 
-    def test_register_node(self):
+    @pytest.mark.asyncio
+    async def test_register_node(self):
         master = ClusterMaster()
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
-        master.register_node(info)
+        await master.register_node(info)
         assert "n1" in master.nodes
         assert master.nodes["n1"].status == NodeStatus.ONLINE
 
-    def test_unregister_node(self):
+    @pytest.mark.asyncio
+    async def test_unregister_node(self):
         master = ClusterMaster()
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
-        master.register_node(info)
-        master.unregister_node("n1")
+        await master.register_node(info)
+        await master.unregister_node("n1")
         assert "n1" not in master.nodes
 
-    def test_get_online_nodes_empty(self):
+    @pytest.mark.asyncio
+    async def test_get_online_nodes_empty(self):
         master = ClusterMaster()
-        nodes = master.get_online_nodes()
+        nodes = await master.get_online_nodes()
         assert len(nodes) == 0
 
-    def test_get_online_nodes(self):
+    @pytest.mark.asyncio
+    async def test_get_online_nodes(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
-        master.register_node(info)
-        nodes = master.get_online_nodes()
+        await master.register_node(info)
+        nodes = await master.get_online_nodes()
         assert len(nodes) == 1
 
-    def test_assign_task(self):
+    @pytest.mark.asyncio
+    async def test_assign_task(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="test")
-        ok = master.assign_task(task)
+        ok = await master.assign_task(task)
         assert ok is True
         assert "t1" in master.tasks
 
-    def test_assign_task_no_nodes(self):
+    @pytest.mark.asyncio
+    async def test_assign_task_no_nodes(self):
         master = ClusterMaster()
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE)
-        ok = master.assign_task(task)
+        ok = await master.assign_task(task)
         assert ok is False
 
-    def test_complete_task(self):
+    @pytest.mark.asyncio
+    async def test_complete_task(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="test")
-        master.assign_task(task)
-        master.complete_task("t1")
+        await master.assign_task(task)
+        await master.complete_task("t1")
         assert master.tasks["t1"].status == TaskStatus.COMPLETED
 
-    def test_complete_task_with_error_sets_failed(self):
+    @pytest.mark.asyncio
+    async def test_complete_task_with_error_sets_failed(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="test")
-        master.assign_task(task)
-        master.complete_task("t1", error="OOM")
+        await master.assign_task(task)
+        await master.complete_task("t1", error="OOM")
         assert master.tasks["t1"].status == TaskStatus.FAILED
         assert master.tasks["t1"].error == "OOM"
 
-    def test_migrate_task(self):
+    @pytest.mark.asyncio
+    async def test_migrate_task(self):
         master = ClusterMaster()
         info1 = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
@@ -196,65 +205,69 @@ class TestClusterMaster:
             status=NodeStatus.ONLINE, available_memory_gb=60.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info1)
-        master.register_node(info2)
+        await master.register_node(info1)
+        await master.register_node(info2)
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="test")
-        master.assign_task(task)
-        ok = master.migrate_task("t1")
+        await master.assign_task(task)
+        ok = await master.migrate_task("t1")
         assert ok is True
-        # migrate_task resets to PENDING then re-assigns -> RUNNING
         assert master.tasks["t1"].status == TaskStatus.RUNNING
 
-    def test_migrate_task_not_found(self):
+    @pytest.mark.asyncio
+    async def test_migrate_task_not_found(self):
         master = ClusterMaster()
-        ok = master.migrate_task("nope")
+        ok = await master.migrate_task("nope")
         assert ok is False
 
-    def test_check_heartbeat(self):
+    @pytest.mark.asyncio
+    async def test_check_heartbeat(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
-        master.register_node(info)
-        ok = master.check_heartbeat("n1")
+        await master.register_node(info)
+        ok = await master.check_heartbeat("n1")
         assert ok is True
 
-    def test_check_heartbeat_stale_sets_offline(self):
+    @pytest.mark.asyncio
+    async def test_check_heartbeat_stale_sets_offline(self):
         master = ClusterMaster(heartbeat_timeout=5.0)
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
-        master.register_node(info)
-        # register_node sets last_heartbeat=time.time(), so force stale AFTER registration
+        await master.register_node(info)
         master.nodes["n1"].last_heartbeat = time.time() - 100
-        ok = master.check_heartbeat("n1")
+        ok = await master.check_heartbeat("n1")
         assert ok is False
         assert master.nodes["n1"].status == NodeStatus.OFFLINE
 
-    def test_check_heartbeat_missing_node(self):
+    @pytest.mark.asyncio
+    async def test_check_heartbeat_missing_node(self):
         master = ClusterMaster()
-        ok = master.check_heartbeat("nope")
+        ok = await master.check_heartbeat("nope")
         assert ok is False
 
-    def test_check_timeouts(self):
+    @pytest.mark.asyncio
+    async def test_check_timeouts(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         task = ClusterTask(
             task_id="t1", name="infer", mode=ParallelMode.PIPELINE,
             model_name="test", timeout_seconds=0.01,
         )
-        master.assign_task(task)
+        await master.assign_task(task)
         master.tasks["t1"].status = TaskStatus.RUNNING
         master.tasks["t1"].started_at = time.time() - 1
-        timed_out = master.check_timeouts()
+        timed_out = await master.check_timeouts()
         assert "t1" in timed_out
         assert master.tasks["t1"].status == TaskStatus.TIMEOUT
 
-    def test_select_nodes(self):
+    @pytest.mark.asyncio
+    async def test_select_nodes(self):
         master = ClusterMaster()
         info1 = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
@@ -266,89 +279,94 @@ class TestClusterMaster:
             status=NodeStatus.ONLINE, available_memory_gb=60.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info1)
-        master.register_node(info2)
-        selected = master.select_nodes(ParallelMode.PIPELINE, required_memory_gb=10.0, count=2)
+        await master.register_node(info1)
+        await master.register_node(info2)
+        selected = await master.select_nodes(ParallelMode.PIPELINE, required_memory_gb=10.0, count=2)
         assert len(selected) == 2
 
-    def test_select_nodes_insufficient(self):
+    @pytest.mark.asyncio
+    async def test_select_nodes_insufficient(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, available_memory_gb=5.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info)
-        selected = master.select_nodes(ParallelMode.PIPELINE, required_memory_gb=50.0, count=1)
+        await master.register_node(info)
+        selected = await master.select_nodes(ParallelMode.PIPELINE, required_memory_gb=50.0, count=1)
         assert len(selected) == 0
 
-    def test_register_kv_cache(self):
+    @pytest.mark.asyncio
+    async def test_register_kv_cache(self):
         master = ClusterMaster()
         entry = KVCacheEntry(
             cache_id="c1", model_name="test", node_id="n1",
             created_at=time.time(), size_mb=100.0,
         )
-        master.register_kv_cache(entry)
+        await master.register_kv_cache(entry)
         assert "c1" in master.kv_cache
 
-    def test_find_kv_cache(self):
+    @pytest.mark.asyncio
+    async def test_find_kv_cache(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         entry = KVCacheEntry(
             cache_id="c1", model_name="test", node_id="n1",
             created_at=time.time(), size_mb=100.0,
         )
-        master.register_kv_cache(entry)
-        found = master.find_kv_cache("test")
+        await master.register_kv_cache(entry)
+        found = await master.find_kv_cache("test")
         assert found is not None
         assert found.cache_id == "c1"
 
-    def test_find_kv_cache_missing(self):
+    @pytest.mark.asyncio
+    async def test_find_kv_cache_missing(self):
         master = ClusterMaster()
-        found = master.find_kv_cache("nope")
+        found = await master.find_kv_cache("nope")
         assert found is None
 
-    def test_find_kv_cache_offline_node_skips(self):
+    @pytest.mark.asyncio
+    async def test_find_kv_cache_offline_node_skips(self):
         master = ClusterMaster()
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
-        master.register_node(info)
-        # Force offline AFTER registration (register_node sets ONLINE)
+        await master.register_node(info)
         master.nodes["n1"].status = NodeStatus.OFFLINE
         entry = KVCacheEntry(
             cache_id="c1", model_name="test", node_id="n1",
             created_at=time.time(), size_mb=100.0,
         )
-        master.register_kv_cache(entry)
-        found = master.find_kv_cache("test")
+        await master.register_kv_cache(entry)
+        found = await master.find_kv_cache("test")
         assert found is None
-        # offline node entries are skipped but NOT removed
         assert "c1" in master.kv_cache
 
-    def test_find_kv_cache_expired(self):
+    @pytest.mark.asyncio
+    async def test_find_kv_cache_expired(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         entry = KVCacheEntry(
             cache_id="c1", model_name="test", node_id="n1",
             created_at=time.time() - 5000, size_mb=100.0, ttl_seconds=1.0,
         )
-        master.register_kv_cache(entry)
-        found = master.find_kv_cache("test")
+        await master.register_kv_cache(entry)
+        found = await master.find_kv_cache("test")
         assert found is None
         assert "c1" not in master.kv_cache
 
-    def test_get_stats(self):
+    @pytest.mark.asyncio
+    async def test_get_stats(self):
         master = ClusterMaster()
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
-        master.register_node(info)
-        stats = master.get_stats()
+        await master.register_node(info)
+        stats = await master.get_stats()
         assert "total_nodes" in stats
         assert "online_nodes" in stats
 
@@ -358,32 +376,35 @@ class TestClusterMaster:
         master._start_mdns()
         master._stop_mdns()
 
-    def test_get_online_nodes_stale_goes_offline(self):
+    @pytest.mark.asyncio
+    async def test_get_online_nodes_stale_goes_offline(self):
         master = ClusterMaster(heartbeat_timeout=0.01)
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
-        master.register_node(info)
+        await master.register_node(info)
         master.nodes["n1"].last_heartbeat = time.time() - 100
-        online = master.get_online_nodes()
+        online = await master.get_online_nodes()
         assert len(online) == 0
         assert master.nodes["n1"].status == NodeStatus.OFFLINE
 
-    def test_complete_task_decrements_active(self):
+    @pytest.mark.asyncio
+    async def test_complete_task_decrements_active(self):
         master = ClusterMaster()
         info = NodeInfo(
             node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
-        master.register_node(info)
+        await master.register_node(info)
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="test")
-        master.assign_task(task)
+        await master.assign_task(task)
         assert master.nodes["n1"].active_tasks >= 1
-        master.complete_task("t1")
+        await master.complete_task("t1")
         assert master.nodes["n1"].active_tasks == 0
 
-    def test_complete_task_missing(self):
+    @pytest.mark.asyncio
+    async def test_complete_task_missing(self):
         master = ClusterMaster()
-        master.complete_task("nope")
+        await master.complete_task("nope")
 
     @pytest.mark.asyncio
     async def test_health_check_loop(self):

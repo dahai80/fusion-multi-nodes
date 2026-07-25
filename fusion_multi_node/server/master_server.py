@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -22,6 +21,12 @@ from fusion_multi_node.master import (
 from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
 
 logger = logging.getLogger(__name__)
+
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version("fusion-multi-node")
+except Exception:
+    _VERSION = "0.2.0"
 
 
 # ── Pydantic 请求/响应模型 ──
@@ -111,7 +116,7 @@ class MasterServer:
 
     def __init__(self, master: Optional[ClusterMaster] = None, shared_token: Optional[str] = None):
         self.master = master or ClusterMaster()
-        self.app = FastAPI(title="Fusion Multi-Node Master", version="0.1.0")
+        self.app = FastAPI(title="Fusion Multi-Node Master", version=_VERSION)
         self._shared_token = shared_token or load_or_create_token()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
         self._uvicorn_server: Optional[Any] = None
@@ -146,7 +151,7 @@ class MasterServer:
                 network_rtt_ms=req.network_rtt_ms,
                 last_heartbeat=time.time(),
             )
-            self.master.register_node(node)
+            await self.master.register_node(node)
             logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port})")
             return {"status": "ok", "node_id": req.node_id}
 
@@ -175,7 +180,7 @@ class MasterServer:
 
         @app.get("/api/nodes")
         async def list_nodes():
-            online = self.master.get_online_nodes()
+            online = await self.master.get_online_nodes()
             return {
                 "total": len(self.master.nodes),
                 "online": len(online),
@@ -191,7 +196,7 @@ class MasterServer:
 
         @app.delete("/api/nodes/{node_id}")
         async def unregister_node(node_id: str):
-            self.master.unregister_node(node_id)
+            await self.master.unregister_node(node_id)
             return {"status": "ok"}
 
         # ── 任务管理 ──
@@ -208,7 +213,7 @@ class MasterServer:
                 user=req.user,
                 created_at=time.time(),
             )
-            ok = self.master.assign_task(task)
+            ok = await self.master.assign_task(task)
             if not ok:
                 raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
             return _task_to_resp(task)
@@ -234,12 +239,12 @@ class MasterServer:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
                 raise HTTPException(status_code=400, detail=f"任务 {task_id} 无法取消（状态: {task.status.value}）")
-            self.master.complete_task(task_id, error=f"用户取消: {req.reason}")
+            await self.master.complete_task(task_id, error=f"用户取消: {req.reason}")
             return {"status": "ok", "task_id": task_id}
 
         @app.post("/api/tasks/{task_id}/migrate")
         async def migrate_task(task_id: str):
-            ok = self.master.migrate_task(task_id)
+            ok = await self.master.migrate_task(task_id)
             if not ok:
                 raise HTTPException(status_code=500, detail="任务迁移失败")
             return {"status": "ok", "task_id": task_id}
@@ -256,12 +261,12 @@ class MasterServer:
                 size_mb=req.size_mb,
                 ttl_seconds=req.ttl_seconds,
             )
-            self.master.register_kv_cache(entry)
+            await self.master.register_kv_cache(entry)
             return {"status": "ok", "cache_id": req.cache_id}
 
         @app.get("/api/kv/find/{model_name}")
         async def find_kv(model_name: str):
-            entry = self.master.find_kv_cache(model_name)
+            entry = await self.master.find_kv_cache(model_name)
             if not entry:
                 raise HTTPException(status_code=404, detail=f"模型 {model_name} 无可用 KV 缓存")
             return {
@@ -276,20 +281,19 @@ class MasterServer:
 
         @app.get("/api/cluster/stats")
         async def cluster_stats():
-            return self.master.get_stats()
+            return await self.master.get_stats()
 
     async def start(self, host: str = "127.0.0.1", port: int = 9753) -> None:
         import uvicorn
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)
-        self.master._running = True
         logger.info(f"Master 服务启动: {host}:{port}")
         await self._uvicorn_server.serve()
 
     async def stop(self) -> None:
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
-        self.master._running = False
+        await self.master.stop()
         logger.info("Master 服务已停止")
 
 

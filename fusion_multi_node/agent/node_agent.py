@@ -12,18 +12,105 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import platform
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
+
+
+class InferenceBackend:
+    """推理后端协议 — 解耦 Agent 对 fusion-mlx 的硬依赖。
+
+    默认实现 FusionMLXBackend 通过 HTTP 调用本地 fusion-mlx；
+    可替换为其他推理引擎（vLLM、TGI 等），只需实现 chat / embed 接口。
+    """
+
+    async def chat(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    async def embed(
+        self,
+        model: str,
+        input_text: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    async def health(self) -> bool:
+        raise NotImplementedError
+
+
+class FusionMLXBackend(InferenceBackend):
+    """默认推理后端 — 通过 HTTP 调用本地 fusion-mlx (OpenAI-compatible API)。"""
+
+    def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 120.0):
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def chat(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            **kwargs,
+        }
+        client = await self._get_client()
+        resp = await client.post(f"{self._base_url}/v1/chat/completions", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def embed(
+        self,
+        model: str,
+        input_text: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        payload = {"model": model, "input": input_text, **kwargs}
+        client = await self._get_client()
+        resp = await client.post(f"{self._base_url}/v1/embeddings", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def health(self) -> bool:
+        try:
+            client = await self._get_client()
+            resp = await client.get(f"{self._base_url}/v1/models", timeout=3.0)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
 
 @dataclass
@@ -45,11 +132,21 @@ class NodeAgent:
     与 Cluster Master 保持心跳，上报硬件状态，执行下发的推理任务。
     """
 
-    def __init__(self, config: Optional[AgentConfig] = None):
+    def __init__(
+        self,
+        config: Optional[AgentConfig] = None,
+        backend: Optional[InferenceBackend] = None,
+    ):
         self.config = config or AgentConfig()
         self.config.node_id = self.config.node_id or f"node_{uuid.uuid4().hex[:8]}"
         self._running = False
         self._current_task: Optional[Dict[str, Any]] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._hardware_task: Optional[asyncio.Task] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._backend = backend or FusionMLXBackend(
+            base_url=f"http://localhost:{self.config.fusion_mlx_port}",
+        )
 
     # ── 硬件信息收集 ──
 
@@ -115,7 +212,6 @@ class NodeAgent:
     def _get_mlx_version(self) -> str:
         """获取 fusion-mlx 底座版本。"""
         try:
-            import httpx
             resp = httpx.get("http://localhost:11434/v1/models", timeout=3.0)
             if resp.status_code == 200:
                 return "fusion-mlx running"
@@ -151,21 +247,25 @@ class NodeAgent:
 
     # ── Master 通信 ──
 
+    async def _get_http_client(self, timeout: float = 5.0) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        return self._http_client
+
     async def send_heartbeat(self) -> bool:
         """向 Master 发送心跳。"""
         info = self.collect_hardware_info()
-        import httpx
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(
-                    f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
-                    json={
-                        "node_id": self.config.node_id,
-                        "available_memory_gb": info["available_memory_gb"],
-                        "active_tasks": 1 if self._current_task else 0,
-                    },
-                )
-                return resp.status_code == 200
+            client = await self._get_http_client(5.0)
+            resp = await client.post(
+                f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
+                json={
+                    "node_id": self.config.node_id,
+                    "available_memory_gb": info["available_memory_gb"],
+                    "active_tasks": 1 if self._current_task else 0,
+                },
+            )
+            return resp.status_code == 200
         except Exception as e:
             logger.debug(f"心跳发送失败: {e}")
             return False
@@ -173,28 +273,27 @@ class NodeAgent:
     async def report_hardware(self) -> bool:
         """向 Master 上报完整硬件信息。"""
         info = self.collect_hardware_info()
-        import httpx
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(
-                    f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/register",
-                    json={
-                        "node_id": info["node_id"],
-                        "hostname": info["hostname"],
-                        "ip_address": info["ip_address"],
-                        "port": info["port"],
-                        "arch": info["arch"],
-                        "total_memory_gb": info["total_memory_gb"],
-                        "available_memory_gb": info["available_memory_gb"],
-                        "cpu_cores": info["cpu_cores"],
-                        "gpu_cores": info["gpu_cores"],
-                        "mlx_version": info.get("mlx_version", ""),
-                        "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
-                        "active_tasks": 0,
-                        "max_tasks": 4,
-                    },
-                )
-                return resp.status_code == 200
+            client = await self._get_http_client(5.0)
+            resp = await client.post(
+                f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/register",
+                json={
+                    "node_id": info["node_id"],
+                    "hostname": info["hostname"],
+                    "ip_address": info["ip_address"],
+                    "port": info["port"],
+                    "arch": info["arch"],
+                    "total_memory_gb": info["total_memory_gb"],
+                    "available_memory_gb": info["available_memory_gb"],
+                    "cpu_cores": info["cpu_cores"],
+                    "gpu_cores": info["gpu_cores"],
+                    "mlx_version": info.get("mlx_version", ""),
+                    "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
+                    "active_tasks": 0,
+                    "max_tasks": 4,
+                },
+            )
+            return resp.status_code == 200
         except Exception as e:
             logger.error(f"硬件上报失败: {e}")
             return False
@@ -234,7 +333,7 @@ class NodeAgent:
         return result
 
     async def _execute_inference(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        """执行推理任务（通过 fusion-mlx HTTP API）。"""
+        """执行推理任务（通过 InferenceBackend）。"""
         model = task.get("model", "")
         prompt = task.get("params", {}).get("prompt", "")
         messages = task.get("params", {}).get("messages", [])
@@ -242,21 +341,12 @@ class NodeAgent:
         if not messages and prompt:
             messages = [{"role": "user", "content": prompt}]
 
-        import httpx
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": task.get("params", {}).get("temperature", 0.7),
-            "max_tokens": task.get("params", {}).get("max_tokens", 4096),
-        }
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"http://localhost:{self.config.fusion_mlx_port}/v1/chat/completions",
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        data = await self._backend.chat(
+            model=model,
+            messages=messages,
+            temperature=task.get("params", {}).get("temperature", 0.7),
+            max_tokens=task.get("params", {}).get("max_tokens", 4096),
+        )
 
         return {
             "task_id": task["task_id"],
@@ -266,20 +356,11 @@ class NodeAgent:
         }
 
     async def _execute_embedding(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        """执行 Embedding 任务。"""
+        """执行 Embedding 任务（通过 InferenceBackend）。"""
         text = task.get("params", {}).get("text", "")
         model = task.get("model", "BGE-M3")
 
-        import httpx
-        payload = {"model": model, "input": text}
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"http://localhost:{self.config.fusion_mlx_port}/v1/embeddings",
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        data = await self._backend.embed(model=model, input_text=text)
 
         return {
             "task_id": task["task_id"],
@@ -293,31 +374,29 @@ class NodeAgent:
         plugin = task.get("plugin", "")
         action = task.get("action", "")
 
-        import httpx
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"http://localhost:{self.config.fusion_desk_port}/api/plugins/{plugin}/{action}",
-                json=task.get("params", {}),
-            )
-            return resp.json()
+        client = await self._get_http_client(60.0)
+        resp = await client.post(
+            f"http://localhost:{self.config.fusion_desk_port}/api/plugins/{plugin}/{action}",
+            json=task.get("params", {}),
+        )
+        return resp.json()
 
     # ── 故障上报 ──
 
     async def report_fault(self, fault_type: str, message: str) -> bool:
         """向 Master 上报故障。"""
-        import httpx
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(
-                    f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/fault",
-                    json={
-                        "node_id": self.config.node_id,
-                        "fault_type": fault_type,
-                        "message": message,
-                        "timestamp": time.time(),
-                    },
-                )
-                return resp.status_code == 200
+            client = await self._get_http_client(5.0)
+            resp = await client.post(
+                f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/fault",
+                json={
+                    "node_id": self.config.node_id,
+                    "fault_type": fault_type,
+                    "message": message,
+                    "timestamp": time.time(),
+                },
+            )
+            return resp.status_code == 200
         except Exception as e:
             logger.error(f"故障上报失败: {e}")
             return False
@@ -336,9 +415,9 @@ class NodeAgent:
         await self.report_hardware()
 
         # 心跳循环
-        asyncio.create_task(self._heartbeat_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         # 硬件上报循环
-        asyncio.create_task(self._hardware_report_loop())
+        self._hardware_task = asyncio.create_task(self._hardware_report_loop())
 
         if with_server:
             from fusion_multi_node.server import AgentServer
@@ -348,6 +427,16 @@ class NodeAgent:
     async def stop(self) -> None:
         """停止节点代理。"""
         self._running = False
+        for task in (self._heartbeat_task, self._hardware_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
         # 通知 Master 离线
         await self.report_fault("shutdown", "Node agent stopped")
         logger.info(f"Node Agent 已停止: {self.config.node_id}")

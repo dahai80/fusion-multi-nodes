@@ -11,20 +11,13 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
 
-from .circuit_breaker import CircuitBreaker
 from .fmp_connection import FMPConnectionManager
 from .fmp_message import (
     FMPMessage,
-    FMPLinkLayer,
-    FMPBusinessLayer,
-    FMPControlLayer,
     PayloadType,
-    ControlType,
-    MAX_HOP_COUNT,
     MAX_ROUNDS,
 )
 
@@ -70,6 +63,7 @@ class FMPRouter:
 
     async def route(self, msg: FMPMessage) -> bool:
         """路由消息。"""
+        self.cleanup_stale_rounds()
         link = msg.link
 
         # 检查目标是否被屏蔽

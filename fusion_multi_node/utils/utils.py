@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 
 def setup_logger(
@@ -43,3 +45,23 @@ def get_log_dir() -> Path:
     log_dir = get_data_dir() / "logs"
     log_dir.mkdir(exist_ok=True)
     return log_dir
+
+
+_HOST_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+def build_url(host: str, port: int, path: str, scheme: str = "http") -> str:
+    """构建 HTTP URL — 统一校验 host/port/path，防止拼接注入。
+
+    - host 仅允许字母/数字/._-
+    - port 范围 1-65535
+    - path 必须以 / 开头，自动 URL-encode 路径段
+    """
+    if not _HOST_RE.match(host):
+        raise ValueError(f"非法 host: {host!r}")
+    if not (1 <= port <= 65535):
+        raise ValueError(f"非法 port: {port}")
+    if not path.startswith("/"):
+        path = "/" + path
+    encoded = "/".join(quote(seg, safe="") for seg in path.split("/"))
+    return f"{scheme}://{host}:{port}{encoded}"

@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import bisect
+import collections
 import logging
 import time
-from collections import defaultdict
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -58,13 +59,13 @@ class ClusterObservability:
 
     def __init__(self, retention_hours: float = 24.0):
         self.retention_seconds = retention_hours * 3600
-        self.metrics: List[MetricPoint] = []
-        self.alerts: List[Alert] = []
-        self.logs: List[LogEntry] = []
+        self.metrics: collections.deque = collections.deque(maxlen=10000)
+        self.alerts: collections.deque = collections.deque(maxlen=10000)
+        self.logs: collections.deque = collections.deque(maxlen=50000)
+        self._metric_times: List[float] = []
         self._alert_handlers: List[Callable] = []
         self._running = False
-        self._max_metrics = 10000
-        self._max_logs = 50000
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     # ── 指标收集 ──
 
@@ -76,15 +77,15 @@ class ClusterObservability:
         tags: Optional[Dict[str, str]] = None,
     ) -> None:
         """记录指标。"""
+        ts = time.time()
         self.metrics.append(MetricPoint(
-            timestamp=time.time(),
+            timestamp=ts,
             node_id=node_id,
             metric_name=name,
             value=value,
             tags=tags or {},
         ))
-        if len(self.metrics) > self._max_metrics:
-            self.metrics = self.metrics[-self._max_metrics:]
+        self._metric_times.append(ts)
 
     def get_metrics(
         self,
@@ -93,17 +94,20 @@ class ClusterObservability:
         since: float = 0.0,
         limit: int = 100,
     ) -> List[MetricPoint]:
-        """查询指标。"""
+        """查询指标 — 使用时间索引加速 since 过滤。"""
         results = []
-        for m in self.metrics:
-            if m.metric_name == name:
-                if node_id and m.node_id != node_id:
-                    continue
-                if since > 0 and m.timestamp < since:
-                    continue
-                results.append(m)
-                if len(results) >= limit:
-                    break
+        start_idx = 0
+        if since > 0 and self._metric_times:
+            start_idx = bisect.bisect_left(self._metric_times, since)
+        for i in range(start_idx, len(self.metrics)):
+            m = self.metrics[i]
+            if m.metric_name != name:
+                continue
+            if node_id and m.node_id != node_id:
+                continue
+            results.append(m)
+            if len(results) >= limit:
+                break
         return results
 
     def get_latest_metric(self, name: str, node_id: str = "") -> Optional[MetricPoint]:
@@ -119,8 +123,6 @@ class ClusterObservability:
     def add_log(self, entry: LogEntry) -> None:
         """添加日志条目。"""
         self.logs.append(entry)
-        if len(self.logs) > self._max_logs:
-            self.logs = self.logs[-self._max_logs:]
         # 日志级别告警
         if entry.level in ("ERROR", "CRITICAL"):
             self.create_alert(
@@ -162,7 +164,7 @@ class ClusterObservability:
     ) -> Alert:
         """创建告警。"""
         alert = Alert(
-            alert_id=f"alert_{len(self.alerts)}",
+            alert_id=f"alert_{uuid.uuid4().hex[:12]}",
             severity=severity,
             title=title,
             message=message,
@@ -240,7 +242,9 @@ class ClusterObservability:
         recent_metrics = [m for m in self.metrics if m.timestamp > since]
 
         # 各节点指标聚合
-        node_metrics = defaultdict(lambda: defaultdict(list))
+        node_metrics: Dict[str, Dict[str, List[float]]] = collections.defaultdict(
+            lambda: collections.defaultdict(list)
+        )
         for m in recent_metrics:
             node_metrics[m.node_id][m.metric_name].append(m.value)
 
@@ -251,7 +255,7 @@ class ClusterObservability:
         return {
             "time_range": f"{since:.0f} - {now:.0f}",
             "metrics_collected": len(recent_metrics),
-            "logs_collected": sum(1 for l in self.logs if l.timestamp > since),
+            "logs_collected": sum(1 for lg in self.logs if lg.timestamp > since),
             "active_alerts": active_alerts,
             "total_alerts": total_alerts,
             "node_summary": {
@@ -265,22 +269,42 @@ class ClusterObservability:
     async def start(self) -> None:
         """启动可观测模块。"""
         self._running = True
-        asyncio.create_task(self._cleanup_loop())
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         logger.info("Cluster Observability 已启动")
 
     async def stop(self) -> None:
         """停止可观测模块。"""
         self._running = False
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
         logger.info("Cluster Observability 已停止")
 
     async def _cleanup_loop(self) -> None:
         """定期清理过期数据。"""
-        while self._running:
-            await asyncio.sleep(300)  # 每5分钟清理
-            cutoff = time.time() - self.retention_seconds
-            self.metrics = [m for m in self.metrics if m.timestamp > cutoff]
-            self.logs = [l for l in self.logs if l.timestamp > cutoff]
-            logger.debug(f"可观测数据清理完成: {len(self.metrics)} 指标, {len(self.logs)} 日志")
+        try:
+            while self._running:
+                await asyncio.sleep(300)  # 每5分钟清理
+                cutoff = time.time() - self.retention_seconds
+                before_m = len(self.metrics)
+                before_l = len(self.logs)
+                before_a = len(self.alerts)
+                while self.metrics and self.metrics[0].timestamp <= cutoff:
+                    self.metrics.popleft()
+                    if self._metric_times:
+                        self._metric_times.pop(0)
+                while self.logs and self.logs[0].timestamp <= cutoff:
+                    self.logs.popleft()
+                while self.alerts and (self.alerts[0].resolved and self.alerts[0].created_at <= cutoff):
+                    self.alerts.popleft()
+                logger.debug(f"可观测数据清理完成: 指标 {before_m}→{len(self.metrics)}, "
+                            f"日志 {before_l}→{len(self.logs)}, "
+                            f"告警 {before_a}→{len(self.alerts)}")
+        except asyncio.CancelledError:
+            pass
 
 
 def _build_node_summary(metrics: dict) -> dict:

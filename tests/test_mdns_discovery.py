@@ -5,7 +5,7 @@
 """
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -154,7 +154,7 @@ class TestMDNSDiscoveryFindMaster:
         d = MDNSDiscovery(node_id="test-node")
         master_info = DiscoveryInfo(
             name="master", host="10.0.0.1", port=9754,
-            properties={"role": "master"},
+            properties={"role": "master", "node_id": "master-1"},
         )
         with patch.object(d, "browse", return_value=[master_info]):
             result = d.find_master(timeout=0.01)
@@ -174,7 +174,8 @@ class TestMDNSDiscoveryFindMaster:
     @pytest.mark.asyncio
     async def test_find_master_async_no_discovered(self):
         d = MDNSDiscovery(node_id="test-node")
-        with patch.object(d, "find_master", return_value=None):
+        with patch.object(d, "browse_async", return_value=AsyncMock(return_value=[])):
+            d.browse_async = AsyncMock(return_value=[])
             result = await d.find_master_async(timeout=0.01)
             assert result is None
 
@@ -183,11 +184,11 @@ class TestMDNSDiscoveryFindMaster:
         d = MDNSDiscovery(node_id="test-node")
         master_info = DiscoveryInfo(
             name="master", host="10.0.0.1", port=9754,
-            properties={"role": "master"},
+            properties={"role": "master", "node_id": "master-1"},
         )
-        with patch.object(d, "find_master", return_value=master_info):
-            result = await d.find_master_async(timeout=0.01)
-            assert result is not None
+        d.browse_async = AsyncMock(return_value=[master_info])
+        result = await d.find_master_async(timeout=0.01)
+        assert result is not None
 
 
 class TestMDNSDiscoveryLocalIP:

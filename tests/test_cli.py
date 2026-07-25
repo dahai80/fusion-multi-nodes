@@ -40,6 +40,7 @@ def runner():
 
 @pytest.fixture
 def master_with_nodes():
+    # 直接写入 master.nodes 字典，避免调用 async register_node()
     m = ClusterMaster()
     for i in range(3):
         info = NodeInfo(
@@ -48,7 +49,7 @@ def master_with_nodes():
             available_memory_gb=50.0 - i * 10, total_memory_gb=64.0,
             active_tasks=i, max_tasks=4,
         )
-        m.register_node(info)
+        m.nodes[f"n{i}"] = info
     return m
 
 
@@ -262,7 +263,7 @@ class TestTaskCommands:
             task_id="t1", name="infer", mode=ParallelMode.PIPELINE,
             model_name="test", timeout_seconds=300.0,
         )
-        m.assign_task(task)
+        m.tasks["t1"] = task
         with patch("fusion_multi_node.cli._get_master", return_value=m):
             result = runner.invoke(cli, ["task", "list"])
             assert result.exit_code == 0
@@ -293,7 +294,7 @@ class TestTaskCommands:
             task_id="t1", name="infer", mode=ParallelMode.PIPELINE,
             model_name="test",
         )
-        m.assign_task(task)
+        m.tasks["t1"] = task
         with patch("fusion_multi_node.cli._get_master", return_value=m):
             result = runner.invoke(cli, ["task", "cancel", "t1"])
             assert result.exit_code == 0

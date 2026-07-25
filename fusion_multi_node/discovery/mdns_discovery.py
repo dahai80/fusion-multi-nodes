@@ -23,7 +23,7 @@ DEFAULT_DISCOVERY_PORT = 9754
 
 
 def _hash_cluster_secret(secret: str) -> str:
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass
@@ -121,9 +121,12 @@ class MDNSDiscovery:
         on_discover: Optional[Callable[[DiscoveryInfo], None]] = None,
         on_remove: Optional[Callable[[str], None]] = None,
     ) -> List[DiscoveryInfo]:
-        """浏览局域网内 mDNS 服务，返回发现的节点列表。"""
+        """浏览局域网内 mDNS 服务，返回发现的节点列表。
+
+        注意: 此方法是同步的，会阻塞调用线程。在 async 环境中请使用 browse_async。
+        """
         try:
-            from zeroconf import Zeroconf, ServiceBrowser, ServiceStateChange
+            from zeroconf import Zeroconf, ServiceBrowser
         except ImportError:
             logger.error("zeroconf 未安装，请运行: pip install zeroconf")
             return []
@@ -181,13 +184,60 @@ class MDNSDiscovery:
         on_discover: Optional[Callable[[DiscoveryInfo], None]] = None,
         on_remove: Optional[Callable[[str], None]] = None,
     ) -> List[DiscoveryInfo]:
-        """异步浏览 mDNS 服务。"""
+        """异步浏览 mDNS 服务 — 非阻塞版本。"""
         import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: self.browse(timeout, on_discover, on_remove),
-        )
+        try:
+            from zeroconf import Zeroconf, ServiceBrowser
+        except ImportError:
+            logger.error("zeroconf 未安装，请运行: pip install zeroconf")
+            return []
+
+        self._on_discover = on_discover
+        self._on_remove = on_remove
+        self._discovered.clear()
+
+        class _AsyncListener:
+            def __init__(self, outer: MDNSDiscovery):
+                self._outer = outer
+
+            def add_service(self, zc: Any, type_: str, name: str) -> None:
+                info = zc.get_service_info(type_, name)
+                if info:
+                    di = _service_info_to_discovery(name, info)
+                    self._outer._discovered[name] = di
+                    if self._outer._on_discover:
+                        self._outer._on_discover(di)
+                    logger.info(f"mDNS 发现节点: {di.name} @ {di.host}:{di.port}")
+
+            def remove_service(self, zc: Any, type_: str, name: str) -> None:
+                self._outer._discovered.pop(name, None)
+                if self._outer._on_remove:
+                    self._outer._on_remove(name)
+                logger.info(f"mDNS 节点离线: {name}")
+
+            def update_service(self, zc: Any, type_: str, name: str) -> None:
+                self.add_service(zc, type_, name)
+
+        try:
+            zc = Zeroconf()
+            browser = ServiceBrowser(zc, self.service_type, handlers=[_AsyncListener(self)])
+            self._zeroconf = zc
+            self._browser = browser
+
+            logger.info(f"mDNS 异步浏览中... (超时: {timeout}s)")
+            await asyncio.sleep(timeout)
+
+            browser.cancel()
+            zc.close()
+            self._browser = None
+            self._zeroconf = None
+
+            results = list(self._discovered.values())
+            logger.info(f"mDNS 异步发现 {len(results)} 个节点")
+            return results
+        except Exception as e:
+            logger.error(f"mDNS 异步浏览失败: {e}")
+            return []
 
     def get_discovered(self) -> List[DiscoveryInfo]:
         """获取已发现的节点列表。"""
@@ -197,24 +247,39 @@ class MDNSDiscovery:
         """浏览并找到 Master 节点。"""
         nodes = self.browse(timeout)
         for node in nodes:
-            if node.properties.get("role") == "master":
-                if self._cluster_secret:
-                    remote_hash = node.properties.get("cluster_hash", "")
-                    expected = _hash_cluster_secret(self._cluster_secret)
-                    if remote_hash != expected:
-                        logger.warning(f"mDNS 节点 {node.name} 密钥验证失败，跳过")
-                        continue
-                return node
+            if node.properties.get("role") != "master":
+                continue
+            node_id = node.properties.get("node_id", "")
+            if not node_id:
+                logger.warning(f"mDNS 节点 {node.name} 缺少 node_id，跳过")
+                continue
+            if self._cluster_secret:
+                remote_hash = node.properties.get("cluster_hash", "")
+                expected = _hash_cluster_secret(self._cluster_secret)
+                if remote_hash != expected:
+                    logger.warning(f"mDNS 节点 {node.name} 密钥验证失败，跳过")
+                    continue
+            return node
         return None
 
     async def find_master_async(self, timeout: float = 5.0) -> Optional[DiscoveryInfo]:
-        """异步查找 Master 节点。"""
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: self.find_master(timeout),
-        )
+        """异步查找 Master 节点 — 非阻塞版本。"""
+        nodes = await self.browse_async(timeout)
+        for node in nodes:
+            if node.properties.get("role") != "master":
+                continue
+            node_id = node.properties.get("node_id", "")
+            if not node_id:
+                logger.warning(f"mDNS 节点 {node.name} 缺少 node_id，跳过")
+                continue
+            if self._cluster_secret:
+                remote_hash = node.properties.get("cluster_hash", "")
+                expected = _hash_cluster_secret(self._cluster_secret)
+                if remote_hash != expected:
+                    logger.warning(f"mDNS 节点 {node.name} 密钥验证失败，跳过")
+                    continue
+            return node
+        return None
 
     # ── 辅助 ──
 

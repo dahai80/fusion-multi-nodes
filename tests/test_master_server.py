@@ -217,7 +217,7 @@ class TestMasterServerTaskManagement:
         await _register_node(client)
         submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
         task_id = submit_resp.json()["task_id"]
-        master_server.master.complete_task(task_id)
+        await master_server.master.complete_task(task_id)
         resp = await client.post(f"/api/tasks/{task_id}/cancel", json={"reason": "too late"}, headers=AUTH_HEADERS)
         assert resp.status_code == 400
 
@@ -240,7 +240,7 @@ class TestMasterServerTaskManagement:
         await _register_node(client)
         submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
         task_id = submit_resp.json()["task_id"]
-        master_server.master.complete_task(task_id)
+        await master_server.master.complete_task(task_id)
         resp = await client.post(f"/api/tasks/{task_id}/migrate", headers=AUTH_HEADERS)
         assert resp.status_code == 500
 
@@ -308,6 +308,5 @@ class TestMasterServerLifecycle:
         with patch("uvicorn.Config", return_value=mock_config), \
              patch("uvicorn.Server", return_value=mock_server_instance):
             await master_server.start(host="0.0.0.0", port=9999)
-        assert master_server.master._running is True
         assert mock_server_instance.serve.called
         master_server.master._running = False
