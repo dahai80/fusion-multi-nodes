@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from fusion_multi_node.utils.auth import sanitize_node_url_part
+
 import asyncio
 import json
 import logging
@@ -55,7 +57,7 @@ class MCPClusterGateway:
     对外暴露标准 MCP 协议接口，对内聚合所有节点插件能力。
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 9756):
+    def __init__(self, host: str = "127.0.0.1", port: int = 9756):
         self.host = host
         self.port = port
         self.tools: Dict[str, MCPTool] = {}
@@ -149,7 +151,7 @@ class MCPClusterGateway:
         except Exception as e:
             request.status = "failed"
             request.error = str(e)
-            return {"error": str(e)}
+            return {"error": "内部错误"}
 
     async def _forward_to_node(self, request: MCPRequest, tool: MCPTool) -> Dict[str, Any]:
         """转发工具调用到目标节点执行。"""
@@ -174,9 +176,10 @@ class MCPClusterGateway:
         else:
             # 转发到远程节点 agent
             node_port = 9755  # Node Agent 默认端口
+            safe_node = sanitize_node_url_part(node_id)
             async with httpx.AsyncClient(timeout=tool.timeout) as client:
                 resp = await client.post(
-                    f"http://{node_id}:{node_port}/api/mcp/execute",
+                    f"http://{safe_node}:{node_port}/api/mcp/execute",
                     json=payload,
                 )
                 return resp.json()

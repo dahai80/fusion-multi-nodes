@@ -53,10 +53,12 @@ class FMPConnection:
         port: int,
         crypto: Optional[FMPCrypto] = None,
         on_message: Optional[Callable[[FMPMessage], None]] = None,
+        use_tls: bool = False,
     ):
         self.info = ConnectionInfo(node_id=node_id, host=host, port=port)
         self._crypto = crypto
         self._on_message = on_message
+        self._use_tls = use_tls
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._running = False
@@ -69,10 +71,18 @@ class FMPConnection:
         return self.info.is_alive and self._writer is not None and not self._writer.is_closing()
 
     async def connect(self) -> bool:
-        """建立 TCP 连接。"""
+        """建立 TCP 连接（use_tls=True 时启用 TLS）。"""
         try:
+            ssl_ctx = None
+            if self._use_tls:
+                try:
+                    from fusion_multi_node.protocol import TLSCertManager
+                    tls_mgr = TLSCertManager()
+                    ssl_ctx = tls_mgr.get_client_ssl_context()
+                except Exception:
+                    pass
             self._reader, self._writer = await asyncio.open_connection(
-                self.info.host, self.info.port,
+                self.info.host, self.info.port, ssl=ssl_ctx,
             )
             self.info.is_alive = True
             self.info.connected_at = time.time()

@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
+
+from fusion_multi_node.utils.auth import sanitize_node_url_part
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +135,10 @@ class DistributedMLXBridge:
                 "mode": "pipeline",
             }
 
+            safe_node = sanitize_node_url_part(node_id)
             async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(
-                    f"http://{node_id}:{fusion_mlx_port}/distributed/load_shard",
+                    f"http://{safe_node}:{fusion_mlx_port}/distributed/load_shard",
                     json=payload,
                 )
                 if resp.status_code == 200:
@@ -165,7 +169,7 @@ class DistributedMLXBridge:
             "model": model_name,
             "nodes": node_chain,
             "status": "running",
-            "started_at": __import__("time").time(),
+            "started_at": time.time(),
         }
 
         logger.info(f"流水线推理: {pipeline_id} ({len(node_chain)} 节点)")
@@ -184,9 +188,10 @@ class DistributedMLXBridge:
             }
 
             try:
+                safe_node = sanitize_node_url_part(node_id)
                 async with httpx.AsyncClient(timeout=300.0) as client:
                     resp = await client.post(
-                        f"http://{node_id}:{fusion_mlx_port}/distributed/pipeline_step",
+                        f"http://{safe_node}:{fusion_mlx_port}/distributed/pipeline_step",
                         json=payload,
                     )
                     data = resp.json()
@@ -195,7 +200,7 @@ class DistributedMLXBridge:
             except Exception as e:
                 logger.error(f"流水线步骤 {i+1} 失败: {e}")
                 self._active_pipelines[pipeline_id]["status"] = "failed"
-                return {"error": str(e), "pipeline_id": pipeline_id}
+                return {"error": "流水线步骤执行失败", "pipeline_id": pipeline_id}
 
         self._active_pipelines[pipeline_id]["status"] = "completed"
         return {
@@ -228,7 +233,7 @@ class DistributedMLXBridge:
         processed = []
         for r in results:
             if isinstance(r, Exception):
-                processed.append({"error": str(r)})
+                processed.append({"error": "推理执行失败"})
             else:
                 processed.append(r)
 
@@ -249,9 +254,10 @@ class DistributedMLXBridge:
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4096,
         }
+        safe_node = sanitize_node_url_part(node_id)
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(
-                f"http://{node_id}:{port}/v1/chat/completions",
+                f"http://{safe_node}:{port}/v1/chat/completions",
                 json=payload,
             )
             data = resp.json()
@@ -297,9 +303,10 @@ class DistributedMLXBridge:
                     "source": source_node,
                     "target": target,
                 }
+                safe_source = sanitize_node_url_part(source_node)
                 async with httpx.AsyncClient(timeout=600.0) as client:
                     resp = await client.post(
-                        f"http://{source_node}:{port}/distributed/sync_weights",
+                        f"http://{safe_source}:{port}/distributed/sync_weights",
                         json=payload,
                     )
                     if resp.status_code != 200:

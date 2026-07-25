@@ -17,7 +17,7 @@ class ClusterConfig:
     DEFAULT_CONFIG = {
         "cluster": {
             "name": "fusion-cluster",
-            "master_host": "0.0.0.0",
+            "master_host": "127.0.0.1",
             "master_port": 9753,
             "discovery_port": 9754,
             "agent_port": 9755,
@@ -78,8 +78,10 @@ class ClusterConfig:
         """保存配置。"""
         path = Path(self.config_path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
         with open(path, "w") as f:
             json.dump(self._data, f, indent=2, ensure_ascii=False)
+        os.chmod(path, 0o600)
 
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置项。"""

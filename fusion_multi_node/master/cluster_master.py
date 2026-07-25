@@ -114,7 +114,7 @@ class ClusterMaster:
 
     def __init__(
         self,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 9753,
         discovery_port: int = 9754,
         heartbeat_timeout: float = 15.0,

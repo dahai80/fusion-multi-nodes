@@ -10,6 +10,9 @@ from fusion_multi_node.agent import AgentConfig, NodeAgent
 from fusion_multi_node.distributed_mlx import KVCacheEntry, KVSharingManager, KVShard
 from fusion_multi_node.server.agent_server import AgentServer
 
+TEST_TOKEN = "test-cluster-token"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_TOKEN}"}
+
 
 def _make_kv_entry(
     cache_id: str = "kv1",
@@ -65,7 +68,7 @@ def mock_kv_manager():
 
 @pytest.fixture
 def agent_server(mock_agent, mock_kv_manager):
-    return AgentServer(agent=mock_agent, kv_manager=mock_kv_manager)
+    return AgentServer(agent=mock_agent, kv_manager=mock_kv_manager, shared_token=TEST_TOKEN)
 
 
 @pytest.fixture
@@ -122,7 +125,7 @@ class TestExecuteEndpoint:
             "prompt": "say hello",
             "max_tokens": 2048,
             "temperature": 0.7,
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -140,7 +143,7 @@ class TestExecuteEndpoint:
             "task_type": "inference",
             "model_name": "llama-3b",
             "extra": {"top_p": 0.9},
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         call_args = mock_agent.execute_task.call_args[0][0]
         assert call_args["top_p"] == 0.9
@@ -151,9 +154,9 @@ class TestExecuteEndpoint:
         resp = await client.post("/api/execute", json={
             "task_type": "inference",
             "model_name": "missing-model",
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 500
-        assert "model not found" in resp.json()["detail"]
+        assert "内部错误" in resp.json()["detail"]
 
 
 class TestKVLookupEndpoint:
@@ -164,7 +167,7 @@ class TestKVLookupEndpoint:
         resp = await client.post("/api/kv/lookup", json={
             "model_name": "llama-3b",
             "prompt_hash": "abc123",
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["cache_id"] == "kv1"
@@ -186,7 +189,7 @@ class TestKVLookupEndpoint:
         resp = await client.post("/api/kv/lookup", json={
             "model_name": "llama-3b",
             "prompt_hash": "missing",
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 404
 
 
@@ -197,7 +200,7 @@ class TestKVTransferEndpoint:
         resp = await client.post("/api/kv/transfer", json={
             "cache_id": "kv1",
             "target_node": "node_2",
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -208,7 +211,7 @@ class TestKVTransferEndpoint:
         resp = await client.post("/api/kv/transfer", json={
             "cache_id": "kv1",
             "target_node": "node_2",
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 500
 
     @pytest.mark.asyncio
@@ -218,7 +221,7 @@ class TestKVTransferEndpoint:
             "cache_id": "kv1",
             "target_node": "node_2",
             "target_port": 8765,
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
 
 
@@ -229,7 +232,7 @@ class TestKVWarmEndpoint:
         resp = await client.post("/api/kv/warm", json={
             "model_name": "llama-3b",
             "prompts": ["hello", "world", "test"],
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -241,7 +244,7 @@ class TestKVWarmEndpoint:
         resp = await client.post("/api/kv/warm", json={
             "model_name": "llama-3b",
             "prompts": ["hello"],
-        })
+        }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["warmed"] == 0
@@ -254,7 +257,7 @@ class TestKVStatsEndpoint:
             "local_entries": 5,
             "local_size_mb": 128.0,
         }
-        resp = await client.get("/api/kv/stats")
+        resp = await client.get("/api/kv/stats", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["local_entries"] == 5
@@ -264,7 +267,7 @@ class TestKVStatsEndpoint:
 class TestHardwareEndpoint:
     @pytest.mark.asyncio
     async def test_hardware_info(self, client, mock_agent):
-        resp = await client.get("/api/hardware")
+        resp = await client.get("/api/hardware", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
         assert data["node_id"] == "test_node"

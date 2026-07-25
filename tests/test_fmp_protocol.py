@@ -134,11 +134,12 @@ class TestFMPMessage:
 
 
 class TestFMPCrypto:
-    def test_no_key_passthrough(self):
+    def test_no_key_raises(self):
         crypto = FMPCrypto()
-        plain = b"hello"
-        assert crypto.encrypt(plain) == plain
-        assert crypto.decrypt(plain) == plain
+        with pytest.raises(RuntimeError):
+            crypto.encrypt(b"hello")
+        with pytest.raises(RuntimeError):
+            crypto.decrypt(b"hello")
 
     def test_generate_key(self):
         key = FMPCrypto.generate_key()

@@ -31,6 +31,7 @@ FMP_HEADER_SIZE = 12  # magic(4) + version(1) + flags(1) + payload_len(4) + rese
 MAX_HOP_COUNT = 3
 MAX_ROUNDS = 10
 FMP_VERSION = 1
+FMP_MAX_PAYLOAD_SIZE = 16 * 1024 * 1024
 
 
 class PayloadType(Enum):
@@ -256,6 +257,8 @@ class FMPMessage:
             raise ValueError(f"无效 MAGIC: {magic}")
         if version != FMP_VERSION:
             raise ValueError(f"版本不匹配: {version}")
+        if payload_len > FMP_MAX_PAYLOAD_SIZE:
+            raise ValueError(f"payload 超限: {payload_len} > {FMP_MAX_PAYLOAD_SIZE}")
 
         json_bytes = data[FMP_HEADER_SIZE:FMP_HEADER_SIZE + payload_len]
         d = json.loads(json_bytes.decode("utf-8"))
@@ -277,46 +280,44 @@ class FMPCrypto:
     def generate_key(cls) -> bytes:
         return os.urandom(32)
 
-    def encrypt(self, plaintext: bytes) -> bytes:
+    def encrypt(self, plaintext: bytes, aad: Optional[bytes] = None) -> bytes:
         if not self._key:
-            return plaintext
+            raise RuntimeError("FMPCrypto: 加密密钥未设置，拒绝明文传输")
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            aesgcm = AESGCM(self._key)
-            nonce = os.urandom(12)
-            ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-            return nonce + ciphertext
         except ImportError:
-            logger.warning("cryptography 未安装，跳过加密")
-            return plaintext
+            raise RuntimeError("FMPCrypto: cryptography 未安装，无法加密")
+        aesgcm = AESGCM(self._key)
+        nonce = os.urandom(12)
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
+        return nonce + ciphertext
 
-    def decrypt(self, data: bytes) -> bytes:
+    def decrypt(self, data: bytes, aad: Optional[bytes] = None) -> bytes:
         if not self._key:
-            return data
+            raise RuntimeError("FMPCrypto: 解密密钥未设置，拒绝明文处理")
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            aesgcm = AESGCM(self._key)
-            nonce = data[:12]
-            ciphertext = data[12:]
-            return aesgcm.decrypt(nonce, ciphertext, None)
         except ImportError:
-            logger.warning("cryptography 未安装，跳过解密")
-            return data
+            raise RuntimeError("FMPCrypto: cryptography 未安装，无法解密")
+        aesgcm = AESGCM(self._key)
+        nonce = data[:12]
+        ciphertext = data[12:]
+        return aesgcm.decrypt(nonce, ciphertext, aad)
 
     def encrypt_message(self, msg: FMPMessage) -> FMPMessage:
-        """加密消息 payload，返回加密后的消息。"""
         raw_payload = msg.business.payload
-        encrypted_payload = self.encrypt(raw_payload)
+        aad = f"{msg.link.source_id}:{msg.link.target_id}".encode("utf-8")
+        encrypted_payload = self.encrypt(raw_payload, aad=aad)
         msg.business.payload = encrypted_payload
         msg.encrypted = True
         return msg
 
     def decrypt_message(self, msg: FMPMessage) -> FMPMessage:
-        """解密消息 payload，返回解密后的消息。"""
         if not msg.encrypted:
             return msg
         encrypted_payload = msg.business.payload
-        decrypted_payload = self.decrypt(encrypted_payload)
+        aad = f"{msg.link.source_id}:{msg.link.target_id}".encode("utf-8")
+        decrypted_payload = self.decrypt(encrypted_payload, aad=aad)
         msg.business.payload = decrypted_payload
         msg.encrypted = False
         return msg

@@ -343,7 +343,7 @@ class NodeAgent:
         if with_server:
             from fusion_multi_node.server import AgentServer
             server = AgentServer(agent=self)
-            await server.start(host="0.0.0.0", port=self.config.agent_port)
+            await server.start(host="127.0.0.1", port=self.config.agent_port)
 
     async def stop(self) -> None:
         """停止节点代理。"""

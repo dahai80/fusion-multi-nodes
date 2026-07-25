@@ -10,7 +10,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+
+from fusion_multi_node.utils.auth import sanitize_node_url_part
 import time
 import uuid
 from collections import OrderedDict
@@ -152,9 +155,10 @@ class KVSharingManager:
 
         for node_id in nodes:
             try:
+                safe_node = sanitize_node_url_part(node_id)
                 async with httpx.AsyncClient(timeout=self.max_remote_lookup_ms / 1000) as client:
                     resp = await client.post(
-                        f"http://{node_id}:9755/api/kv/lookup",
+                        f"http://{safe_node}:9755/api/kv/lookup",
                         json={
                             "model_name": model_name,
                             "prompt_hash": prompt_hash,
@@ -180,10 +184,10 @@ class KVSharingManager:
         import httpx
 
         try:
+            safe_source = sanitize_node_url_part(source_node)
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # 请求源节点传输
                 resp = await client.post(
-                    f"http://{source_node}:9755/api/kv/transfer",
+                    f"http://{safe_source}:9755/api/kv/transfer",
                     json={
                         "cache_id": cache_id,
                         "target_node": target_node,
@@ -209,12 +213,13 @@ class KVSharingManager:
         results = {"success": 0, "failed": 0, "details": []}
 
         for prompt in prompts:
-            prompt_hash = str(hash(prompt))[:16]
+            prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
             for node_id in nodes:
                 try:
+                    safe_node = sanitize_node_url_part(node_id)
                     async with httpx.AsyncClient(timeout=60.0) as client:
                         resp = await client.post(
-                            f"http://{node_id}:9755/api/kv/warm",
+                            f"http://{safe_node}:9755/api/kv/warm",
                             json={
                                 "model_name": model_name,
                                 "prompt": prompt,
@@ -252,9 +257,17 @@ class KVSharingManager:
             "compression_enabled": self.enable_compression,
         }
 
+    ALLOWED_SHARD_KEYS = {
+        "shard_id", "model_name", "layer_index", "node_id",
+        "token_count", "size_bytes", "created_at",
+        "access_count", "last_access", "is_compressed",
+    }
+
     def _deserialize_entry(self, data: dict) -> KVCacheEntry:
-        """反序列化 KV 缓存条目。"""
-        shards = [KVShard(**s) for s in data.get("shards", [])]
+        shards = []
+        for s in data.get("shards", []):
+            filtered = {k: v for k, v in s.items() if k in self.ALLOWED_SHARD_KEYS}
+            shards.append(KVShard(**filtered))
         return KVCacheEntry(
             cache_id=data["cache_id"],
             model_name=data["model_name"],

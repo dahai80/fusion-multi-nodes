@@ -108,7 +108,7 @@ def node_info(node_id: str):
 
 @node.command("start")
 @click.option("--role", type=click.Choice(["master", "agent"]), required=True, help="节点角色")
-@click.option("--host", default="0.0.0.0", help="监听地址")
+@click.option("--host", default="127.0.0.1", help="监听地址")
 @click.option("--port", default=0, help="监听端口 (0=默认)")
 @click.option("--master-host", default="localhost", help="Master 地址 (agent)")
 @click.option("--master-port", default=9753, help="Master 端口 (agent)")
@@ -212,7 +212,7 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
 
     if mode in ("master", "both"):
         _master = ClusterMaster(
-            host=_config.get("cluster.master_host", "0.0.0.0"),
+            host=_config.get("cluster.master_host", "127.0.0.1"),
             port=_config.get("cluster.master_port", 9753),
         )
         await _master.start()
@@ -403,7 +403,7 @@ def _get_master() -> ClusterMaster:
     global _master
     if _master is None:
         _master = ClusterMaster(
-            host=_config.get("cluster.master_host", "0.0.0.0"),
+            host=_config.get("cluster.master_host", "127.0.0.1"),
             port=_config.get("cluster.master_port", 9753),
         )
     return _master

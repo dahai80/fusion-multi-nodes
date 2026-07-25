@@ -19,6 +19,7 @@ from fusion_multi_node.master import (
     ParallelMode,
     TaskStatus,
 )
+from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +109,11 @@ class NodeResponse(BaseModel):
 class MasterServer:
     """集群 Master HTTP 服务。"""
 
-    def __init__(self, master: Optional[ClusterMaster] = None):
+    def __init__(self, master: Optional[ClusterMaster] = None, shared_token: Optional[str] = None):
         self.master = master or ClusterMaster()
         self.app = FastAPI(title="Fusion Multi-Node Master", version="0.1.0")
+        self._shared_token = shared_token or load_or_create_token()
+        self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
         self._uvicorn_server: Optional[Any] = None
         self._setup_routes()
 
@@ -275,7 +278,7 @@ class MasterServer:
         async def cluster_stats():
             return self.master.get_stats()
 
-    async def start(self, host: str = "0.0.0.0", port: int = 9753) -> None:
+    async def start(self, host: str = "127.0.0.1", port: int = 9753) -> None:
         import uvicorn
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)

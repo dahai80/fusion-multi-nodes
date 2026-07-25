@@ -3,10 +3,12 @@
 基于 zeroconf 实现：
 - Master: 注册 mDNS 服务，局域网可发现
 - Agent: 浏览 mDNS 服务，自动发现 Master
+- 支持共享密钥验证，防止未授权节点加入
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import platform
 import socket
@@ -18,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 SERVICE_TYPE = "_fusionmlx._tcp.local."
 DEFAULT_DISCOVERY_PORT = 9754
+
+
+def _hash_cluster_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -37,9 +43,11 @@ class DiscoveryInfo:
 class MDNSDiscovery:
     """mDNS 节点发现管理器。"""
 
-    def __init__(self, node_id: str = "", service_type: str = SERVICE_TYPE):
+    def __init__(self, node_id: str = "", service_type: str = SERVICE_TYPE,
+                 cluster_secret: str = ""):
         self.node_id = node_id or f"fusion-{platform.node().lower()}"
         self.service_type = service_type
+        self._cluster_secret = cluster_secret
         self._registry: Optional[Any] = None
         self._browser: Optional[Any] = None
         self._zeroconf: Optional[Any] = None
@@ -67,6 +75,8 @@ class MDNSDiscovery:
         props.setdefault("role", "master")
         props.setdefault("arch", platform.machine())
         props.setdefault("hostname", platform.node())
+        if self._cluster_secret:
+            props["cluster_hash"] = _hash_cluster_secret(self._cluster_secret)
 
         try:
             local_ip = self._get_local_ip()
@@ -188,6 +198,12 @@ class MDNSDiscovery:
         nodes = self.browse(timeout)
         for node in nodes:
             if node.properties.get("role") == "master":
+                if self._cluster_secret:
+                    remote_hash = node.properties.get("cluster_hash", "")
+                    expected = _hash_cluster_secret(self._cluster_secret)
+                    if remote_hash != expected:
+                        logger.warning(f"mDNS 节点 {node.name} 密钥验证失败，跳过")
+                        continue
                 return node
         return None
 
