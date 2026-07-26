@@ -63,7 +63,7 @@
 | `GET /api/routing/summary` | 负载概要 | 路由策略面板 | ✅ RoutingStrategyView |
 | `GET /api/nodes/{id}` | 单节点详情 | Inspector 面板 | ⚠️ 待实现 |
 | `GET /api/tasks/{id}` | 单任务详情 | Inspector 面板 | ⚠️ 待实现 |
-| `POST /api/kv/register` | KV 注册 | KV 缓存面板 | ⚠️ 待实现 |
+| `POST /api/kv/register` | KV 注册 | KV 缓存面板 | ✅ MultiNodeEngine.registerKVCache |
 | `GET /api/kv/find/{model}` | KV 查找 | KV 缓存面板 | ✅ KVCacheView |
 | `GET /api/v1/observability/logs/export` | 日志导出 | 告警中心 | ✅ AlertCenterView export button |
 | `GET /api/v1/nodes/{id}/metrics` | 节点指标 | Inspector 面板 | ✅ 已用于 fetchNodeMetrics |
@@ -72,11 +72,11 @@
 
 | 端点 | 功能 | 说明 | 状态 |
 |------|------|------|------|
-| `GET /api/health` | Agent 健康检查 | 需连接 Agent 9755 端口 | ⚠️ 待实现 |
+| `GET /api/health` | Agent 健康检查 | KV 面板 | ✅ KVCacheView health indicator |
 | `POST /api/execute` | 推理执行 | 高危操作，建议仅监控 | ❌ 不暴露 |
-| `POST /api/kv/lookup` | KV 查找 | KV 面板 | ⚠️ 待实现 |
-| `POST /api/kv/transfer` | KV 迁移 | KV 面板 | ⚠️ 待实现 |
-| `POST /api/kv/warm` | KV 预热 | KV 面板 | ⚠️ 待实现 |
+| `POST /api/kv/lookup` | KV 查找 | KV 面板 | ✅ KVCacheView |
+| `POST /api/kv/transfer` | KV 迁移 | KV 面板 | ✅ KVCacheView |
+| `POST /api/kv/warm` | KV 预热 | KV 面板 | ✅ KVCacheView |
 | `GET /api/kv/stats` | KV 统计 | KV 面板 | ✅ KVCacheView |
 | `GET /api/hardware` | 硬件信息 | KV 面板 | ✅ KVCacheView |
 
