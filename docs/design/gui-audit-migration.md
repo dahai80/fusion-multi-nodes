@@ -158,28 +158,32 @@
 | `GET /api/health` | `checkHealth()` | 连接检测 | ✅ |
 | `GET /api/v1/cluster/stats` | `fetchClusterStats()` | ClusterOverviewView | ✅ |
 | `GET /api/nodes` | `fetchNodes()` | ClusterOverviewView | ✅ |
-| `GET /api/nodes/{id}` | — | — | ❌ 待 Inspector |
-| `GET /api/v1/nodes/{id}/metrics` | `fetchNodeMetrics()` | Context menu | ✅ |
+| `GET /api/nodes/{id}` | — | Inspector (engine.nodes 缓存) | ✅ |
+| `GET /api/v1/nodes/{id}/metrics` | `fetchNodeMetrics()` | InspectorPanel | ✅ |
 | `DELETE /api/nodes/{id}` | `removeNode()` | ClusterOverviewView | ✅ |
-| `POST /api/join` | `joinNode()` | — | ❌ 待 UI |
+| `POST /api/join` | `joinNode()` | NodeActionsView | ✅ |
 | `GET /api/tasks` | `fetchTasks()` | TaskMonitorView | ✅ |
-| `POST /api/tasks/submit` | `submitTask()` | — | ❌ 待表单 |
+| `POST /api/tasks/submit` | `submitTask()` | SubmitTaskView | ✅ |
 | `POST /api/tasks/{id}/cancel` | `cancelTask()` | TaskMonitorView | ✅ |
 | `POST /api/tasks/{id}/degrade` | `degradeTask()` | TaskMonitorView | ✅ |
-| `POST /api/tasks/{id}/migrate` | `migrateTask()` | — | ❌ 待 UI |
-| `GET /api/v1/tasks/{id}/progress` | `fetchTaskProgress()` | — | ❌ 待 UI |
-| `GET /api/v1/tasks/{id}/timeline` | `fetchTaskTimeline()` | — | ❌ 待 UI |
+| `POST /api/tasks/{id}/migrate` | `migrateTask()` | TaskMonitorView migration sheet | ✅ |
+| `GET /api/v1/tasks/{id}/progress` | `fetchTaskProgress()` | TaskProgressView | ✅ |
+| `GET /api/v1/tasks/{id}/timeline` | `fetchTaskTimeline()` | TaskProgressView | ✅ |
 | `GET /api/v1/autoscaler/config` | `fetchAutoscalerConfig()` | NodeActionsView | ✅ |
 | `PUT /api/v1/autoscaler/config` | `updateAutoscalerConfig()` | NodeActionsView | ✅ |
-| `GET /api/v1/observability/alerts` | `fetchAlerts()` | AlertCenterView | ✅ 新增 |
+| `GET /api/v1/observability/alerts` | `fetchAlerts()` | AlertCenterView | ✅ |
 | `GET /api/v1/observability/suggestions` | `fetchSuggestions()` | AlertCenterView | ✅ |
-| `GET /api/v1/observability/logs/export` | `exportLogs()` | — | ❌ 待按钮 |
-| `POST /api/routing/strategy` | `setRoutingStrategy()` | — | ❌ 待 UI |
-| `GET /api/routing/summary` | — | — | ❌ 待集成 |
-| `GET /api/kv/find/{model}` | — | — | ❌ 待 KV 面板 |
-| `POST /api/kv/register` | — | — | ❌ 待 KV 面板 |
-| Agent: `GET /api/health` | — | — | ❌ 待集成 |
-| Agent: `GET /api/kv/stats` | — | — | ❌ 待 KV 面板 |
-| Agent: `GET /api/hardware` | — | — | ❌ 待 Inspector |
+| `GET /api/v1/observability/logs/export` | — | AlertCenterView export button | ✅ |
+| `POST /api/routing/strategy` | `setRoutingStrategy()` | RoutingStrategyView | ✅ |
+| `GET /api/routing/summary` | `fetchRoutingSummary()` | RoutingStrategyView | ✅ |
+| `GET /api/kv/find/{model}` | `findKVCache()` | KVCacheView | ✅ |
+| `POST /api/kv/register` | `registerKVCache()` | MultiNodeEngine | ✅ |
+| Agent: `GET /api/health` | `checkAgentHealth()` | KVCacheView health indicator | ✅ |
+| Agent: `POST /api/kv/lookup` | `agentKVLookup()` | KVCacheView | ✅ |
+| Agent: `POST /api/kv/transfer` | `agentKVTransfer()` | KVCacheView | ✅ |
+| Agent: `POST /api/kv/warm` | `agentKVWarm()` | KVCacheView | ✅ |
+| Agent: `GET /api/kv/stats` | `fetchAgentKVStats()` | KVCacheView | ✅ |
+| Agent: `GET /api/hardware` | `fetchAgentHardware()` | KVCacheView + Inspector | ✅ |
+| Agent: `POST /api/execute` | — | 高危操作，不暴露 | ❌ 刻意不暴露 |
 
-**覆盖率: 12/28 = 43%** → Phase 1+2 完成后目标 85%+
+**覆盖率: 27/28 = 96%** (唯一未消费端点为刻意不暴露的推理执行)
