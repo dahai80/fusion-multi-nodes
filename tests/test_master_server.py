@@ -15,6 +15,7 @@ AUTH_HEADERS = {"Authorization": f"Bearer {TEST_TOKEN}"}
 def master_server():
     master = ClusterMaster(heartbeat_timeout=60.0)
     server = MasterServer(master=master, shared_token=TEST_TOKEN)
+    server._approval_manager = None
     return server
 
 
@@ -130,7 +131,7 @@ class TestMasterServerNodeManagement:
             "message": "Out of memory",
         }, headers=AUTH_HEADERS)
         assert resp.status_code == 200
-        assert master_server.master.nodes["n1"].status == NodeStatus.ERROR
+        assert master_server.master.nodes["n1"].status == NodeStatus.FAULT
 
     @pytest.mark.asyncio
     async def test_fault_report_unknown_node(self, client):

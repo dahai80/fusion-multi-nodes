@@ -2,6 +2,39 @@ syntax = "proto3";
 
 package fusion_multi_node.protocol;
 
+message FMPEnvelope {
+    string source_id = 1;
+    string target_id = 2;
+    int32 hop_count = 3;
+    int32 max_hops = 4;
+    repeated string trace = 5;
+    string message_id = 6;
+    double timestamp = 7;
+    int32 sequence = 8;
+}
+
+message FMPControl {
+    int32 code = 1;
+    int32 sequence = 2;
+    double timestamp = 3;
+    int32 ack_seq = 4;
+    int32 flow_window = 5;
+    string reason = 6;
+}
+
+message FMPPayload {
+    int32 payload_type = 1;
+    bytes data = 2;
+    string round_id = 3;
+    int32 round_number = 4;
+    int32 max_rounds = 5;
+    bool compressed = 6;
+}
+
 message FMPFrame {
-    string payload_json = 1;
+    FMPEnvelope envelope = 1;
+    FMPControl control = 2;
+    FMPPayload payload = 3;
+    bool encrypted = 4;
+    string payload_json = 5;
 }

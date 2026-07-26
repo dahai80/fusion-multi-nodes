@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.5.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-765%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-784%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -32,13 +32,13 @@
 | **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, master election, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync |
 | **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
-| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count |
+| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server |
 | **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing |
 | **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration |
-| **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, data scrubbing |
-| **Observability** | Metrics, logs, alerts, log store & export, intelligent fault diagnosis |
-| **Autoscaler** | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance |
-| **Storage Volumes** | Volume abstraction, shard replication, checkpoint persistence, capacity monitoring, LRU eviction, shard distribution |
+| **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, OS-level sandbox-exec, data scrubbing, FMPCrypto (AES-256-GCM + ECDH), Metal AES-GCM acceleration |
+| **Observability** | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions, 7-day retention |
+| **Autoscaler** | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance, hot-reload config |
+| **Storage Volumes** | Volume abstraction, shard replication, checkpoint persistence, capacity monitoring, LRU eviction, shard distribution, distributed KV store, quorum read/write |
 
 ### Architecture
 
@@ -149,7 +149,7 @@ await master.degrade_task("task_1")  # 70b→32b→13b→8b→3b→1b
 master.complete_task("task_1")
 ```
 
-**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize), heartbeat timeout.
+**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, cloud fallback on retry exhaustion.
 
 ### Master Election (`fusion_multi_node.master.election`)
 
@@ -219,7 +219,7 @@ Three-layer binary protocol with AES-GCM encryption, circuit breaker, and hop_co
 ```python
 from fusion_multi_node.protocol import (
     FMPMessage, PayloadType, FMPCrypto,
-    FMPConnectionManager, FMPRouter, CircuitBreaker,
+    FMPConnectionManager, FMPRouter, CircuitBreaker, FMPServer,
 )
 
 msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
@@ -236,7 +236,7 @@ if cb.allow_request():
     cb.record_success()
 ```
 
-**Three layers**: LinkLayer (routing, hop_count), BusinessLayer (payload, rounds), ControlLayer (heartbeat, ACK, flow control).
+**Three layers**: LinkLayer (routing, hop_count), BusinessLayer (payload, rounds), ControlLayer (heartbeat, ACK, flow control). **Unified interface**: FMPInterface wraps connection management, message construction, encryption, heartbeat. **Protobuf v2**: Structured .proto with Envelope/Control/Payload messages, auto-fallback to JSON/msgpack.
 
 ### 5. Security (`fusion_multi_node.security`)
 
@@ -245,8 +245,9 @@ Node approval, Master/Worker permission isolation, Worker sandbox, data scrubbin
 ```python
 from fusion_multi_node.security.permission import PermissionManager, NodeRole, Permission
 from fusion_multi_node.security.node_approval import NodeApprovalManager
-from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig
+from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig, SandboxExecutor
 from fusion_multi_node.security.data_scrubber import DataScrubber
+from fusion_multi_node.security.crypto import FMPCrypto, MetalCryptoBackend
 
 # Permission isolation
 pm = PermissionManager()
@@ -273,6 +274,15 @@ sandbox.filter_environment({"HOME": "/u", "SECRET": "x"}) # SECRET removed
 # Data scrubbing (phone, email, API key, ID card, etc.)
 scrubber = DataScrubber()
 text, hits = scrubber.scrub_text("Call 13912345678, key=sk-abc123...")
+
+# OS-level sandbox execution (macOS sandbox-exec / Linux unshare)
+executor = SandboxExecutor()
+result = await executor.execute_in_sandbox("task-1", ["python", "script.py"])
+
+# Metal AES-GCM acceleration (Apple Silicon hardware)
+metal = MetalCryptoBackend()
+encrypted = metal.encrypt(key, plaintext)
+decrypted = metal.decrypt(key, encrypted)
 ```
 
 ### 6. Observability (`fusion_multi_node.observability`)
@@ -284,9 +294,11 @@ from fusion_multi_node.observability import ClusterObservability, LogEntry
 from fusion_multi_node.observability.log_store import LogStore, StoredLog, FaultDiagnoser
 
 # Metrics & alerts
-obs = ClusterObservability(retention_hours=24.0)
+obs = ClusterObservability(retention_hours=168.0)
 obs.record_metric("node_1", "memory_used_gb", 16.0, tags={"gpu": "m4_ultra"})
 obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "Task completed"))
+logs = obs.export_logs(fmt="json")        # M8-02 log export
+suggestions = obs.generate_optimization_suggestions()  # M8-03 smart suggestions
 
 # Log store & export
 store = LogStore()
@@ -325,6 +337,7 @@ Volume abstraction, shard replication, checkpoint persistence.
 from fusion_multi_node.storage import StorageVolume, VolumeSpec, VolumeType
 from fusion_multi_node.storage import ShardReplicator, ReplicationConfig
 from fusion_multi_node.storage import CheckpointManager, CheckpointEntry
+from fusion_multi_node.storage import DistributedKVStore, KVEntry
 
 # Volume management
 sv = StorageVolume(base_dir="/data/volumes")
@@ -341,6 +354,17 @@ healthy = replicator.get_healthy_replica("shard-1")
 cp = CheckpointManager(checkpoint_dir="/data/checkpoints")
 cp.save(CheckpointEntry(checkpoint_id="cp-1", task_id="t1", node_id="n1", step=5, state_data={...}))
 latest = cp.load_latest("t1")
+
+# Distributed KV Store with TTL, partitions, snapshot/restore
+kv = DistributedKVStore(data_dir="/data/kv")
+kv.put("config:model", {"name": "llama-70b"}, partition="config", ttl_seconds=3600)
+val = kv.get("config:model")
+kv.snapshot()  # M9-03: persist to disk
+kv.restore("snapshot.json", merge=True)
+
+# Quorum read/write for shard replication
+qr = replicator.quorum_write("shard-1", data, storage_volume=sv)
+qread = replicator.quorum_read("shard-1", storage_volume=sv)
 ```
 
 ### 9. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
@@ -387,7 +411,7 @@ Default config at `~/.fusion/multi-node/config.json`:
     "tool_timeout": 60.0
   },
   "observability": {
-    "retention_hours": 24.0
+    "retention_hours": 168.0
   }
 }
 ```
@@ -399,7 +423,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (663 tests)
+# Run all tests (784 tests)
 pytest tests/ -v
 
 # With coverage
@@ -444,41 +468,70 @@ pytest tests/test_new_features.py -v
 ### v0.3.0 ✅
 - [x] Full audit remediation (P0-P3), 585 tests, 0 ruff errors
 
-### v0.4.0 ✅ (Current)
+### v0.5.0 ✅ (Current)
 - [x] M1-02 device_model + UMA size in mDNS discovery & NodeInfo
 - [x] M1-03 Heartbeat interval 5s→3s
+- [x] M1-02/03 mDNS heartbeat_interval/timeout in broadcast properties, real device_model + uma_size_gb
 - [x] M1-05 Manual IP join fallback (mDNS failure scenario)
 - [x] M2-04 hop_count broadcast storm prevention
+- [x] M2-01 Structured .proto with Envelope/Control/Payload messages
+- [x] M2-03 FMP heartbeat sending (start_heartbeat/stop_heartbeat on connection)
+- [x] M2-05 FMPInterface unified API (connect, send_heartbeat, send_task_assign, broadcast)
 - [x] M3-01 Master/Worker permission isolation
-- [x] M3-02 Node approval mechanism
+- [x] M3-02 Node approval mechanism (integrated into /api/nodes/register)
+- [x] M3-02 NodeInfo.role field (master/worker/standby)
+- [x] M3-05 TaskSpec separation (task definition vs runtime state)
+- [x] M3-02 NodeStatus.FAULT enum value
 - [x] M3-03 Master election (Raft-simplified with priority)
 - [x] M4-01 LoadMetrics + LoadRouter structured load-aware routing
 - [x] M4-02 Local-force gate (≤0.5B models forced local)
-- [x] M4-03 VRAM-first scheduling (≥13B models)
+- [x] M4-03 VRAM-first scheduling (≥13B models, thread-safe strategy switching)
 - [x] M4-04 Task auto-degradation (70b→32b→13b→8b→3b→1b)
 - [x] M4-05 Cloud API fallback (OpenAI/Anthropic, daily cost limits)
 - [x] M5-01/02/05 Task sharding (inference/AST/vectorize, by_file/by_document/by_batch, result merge)
+- [x] M5-03 Timeout task auto-retry queue (_enqueue_retry, max 1 attempt)
+- [x] M5-03 TaskShard timeout field + is_timed_out property
 - [x] M5-04 Task full-lifecycle cancel (recursive sub-task)
 - [x] M6-01 Master data isolation enforcement
-- [x] M6-02 Worker sandbox (resource limits, path/network filtering)
+- [x] M6-01 Worker temp dir cleanup (auto mkdir/rmtree on task execute)
+- [x] M6-02 Worker sandbox (resource limits, path/network filtering, usage monitoring, subprocess env)
+- [x] M6-03 Node approval integrated into register endpoint
 - [x] M6-04 AST diff-only transmission
 - [x] M6-04 Data scrubbing (phone, email, API key, ID card, etc.)
+- [x] M6-04 FMPCrypto (AES-256-GCM with ECDH-negotiated session keys)
+- [x] M7-06 Monitoring API v1 (/api/v1/nodes/{id}/metrics, /api/v1/tasks/{id}/progress)
+- [x] M7-06 /api/v1/cluster/stats + /api/v1/tasks/{id}/timeline endpoints
+- [x] M8-01 LogLevel standard enum (INFO/WARN/ERROR/FATAL) + Master全节点日志汇总 (collect_node_logs)
 - [x] M8 Log store & export (JSON/CSV/text)
 - [x] M8 Intelligent fault diagnosis (pattern matching + root cause)
 - [x] M9-02/03 Storage data transfer + capacity monitoring + LRU eviction
+- [x] M9-01 Distributed KV Store (TTL, partitions, snapshot/restore, persistence)
+- [x] M9-02 Quorum read/write for shard replication
+- [x] M9-03 KV Store snapshot/restore
 - [x] M9-04 FMP protocol KV cache sync
 - [x] M9 Storage volumes (local/shared/distributed)
 - [x] M9 Shard replication with health tracking
 - [x] M9 Checkpoint persistence
 - [x] M9 Model shard distribution
+- [x] M10-02/03 Autoscaler builtin scale actions (standby activation + migrate-then-deactivate)
 - [x] M10 Autoscaler (conservative/balanced/aggressive policies)
 - [x] M10 Task migration on scale-down
-- [x] 765 tests, 0 ruff errors
+- [x] protobuf>=5.0.0 dependency
+- [x] P0: FMPServer inbound TCP server (cross-node shard/KV transport)
+- [x] P0: Protobuf structured encoding (envelope/control/payload fields)
+- [x] P0: Autoscaler hot-reload (update_config/update_policy)
+- [x] P0: Cross-node FMP transport (ShardReplicator + DistributedKVStore remote ops)
+- [x] P1: Log retention 7 days (168h default) + log export API
+- [x] P1: Smart optimization suggestions (alert-driven + error pattern analysis)
+- [x] P1: SandboxExecutor (macOS sandbox-exec / Linux unshare / python-resource fallback)
+- [x] P2: Metal AES-GCM acceleration (Apple Silicon CommonCrypto bridge + auto-fallback)
+- [x] P2: CLI --transport fmp wiring (FMPServer + FMPConnectionManager)
+- [x] 784 tests, 0 ruff errors
 
 ### Future
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Plugin ecosystem cluster registration
-- [ ] Cluster monitoring dashboard (fusion-ui)
+- [ ] Cluster monitoring dashboard (fusion-studio)
 - [ ] Thunderbolt RDMA acceleration
 - [ ] Cross-node KV cache with Caveman compression
 

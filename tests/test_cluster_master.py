@@ -264,7 +264,7 @@ class TestClusterMaster:
         master.tasks["t1"].started_at = time.time() - 1
         timed_out = await master.check_timeouts()
         assert "t1" in timed_out
-        assert master.tasks["t1"].status == TaskStatus.TIMEOUT
+        assert master.tasks["t1"].status == TaskStatus.PENDING
 
     @pytest.mark.asyncio
     async def test_select_nodes(self):

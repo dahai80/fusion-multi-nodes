@@ -133,7 +133,15 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
         _master = ClusterMaster(host=host, port=actual_port)
         with_mdns = not no_mdns
         await _master.start(with_server=True, with_mdns=with_mdns)
-        click.echo(f"✅ Master 已启动: {host}:{actual_port} (mDNS={'ON' if with_mdns else 'OFF'})")
+
+        if transport == "fmp":
+            from .protocol import FMPServer
+            fmp_server = FMPServer()
+            await fmp_server.start(host=host, port=9756)
+            _master._fmp_server = fmp_server
+            click.echo(f"  FMP 服务已启动: {host}:9756")
+
+        click.echo(f"✅ Master 已启动: {host}:{actual_port} (mDNS={'ON' if with_mdns else 'OFF'}, transport={transport})")
     else:
         from .agent import AgentConfig
         actual_port = port or 9755
@@ -144,7 +152,15 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
         )
         _agent = NodeAgent(config)
         await _agent.start(with_server=True, auto_discover=auto_discover)
-        click.echo(f"✅ Agent 已启动: {_agent.config.node_id} (auto_discover={auto_discover})")
+
+        if transport == "fmp":
+            from .protocol import FMPConnectionManager
+            fmp_conn = FMPConnectionManager()
+            await fmp_conn.connect(master_host, 9756)
+            _agent._fmp_conn = fmp_conn
+            click.echo(f"  FMP 已连接 Master: {master_host}:9756")
+
+        click.echo(f"✅ Agent 已启动: {_agent.config.node_id} (auto_discover={auto_discover}, transport={transport})")
 
     click.echo("按 Ctrl+C 停止...")
     try:
@@ -214,6 +230,13 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
             port=_config.get("cluster.master_port", 9753),
         )
         await _master.start()
+
+        if transport == "fmp":
+            from .protocol import FMPServer
+            fmp_server = FMPServer()
+            await fmp_server.start(host=_master.host, port=9756)
+            _master._fmp_server = fmp_server
+
         click.echo(f"✅ Cluster Master 已启动 (端口 {_master.port}, transport={transport})")
 
     if mode in ("agent", "both"):
@@ -224,7 +247,7 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
 
     if mode in ("master", "both"):
         _observability = ClusterObservability(
-            retention_hours=_config.get("observability.retention_hours", 24.0)
+            retention_hours=_config.get("observability.retention_hours", 168.0)
         )
         await _observability.start()
         click.echo("✅ 可观测模块已启动")

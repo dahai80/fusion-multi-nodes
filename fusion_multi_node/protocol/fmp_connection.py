@@ -17,13 +17,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from .circuit_breaker import CircuitBreaker
-from .fmp_message import FMPMessage, FMPCrypto
+from .fmp_message import FMPMessage, FMPCrypto, PayloadType, ControlType
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RECONNECT_INTERVAL = 3.0
 DEFAULT_HEARTBEAT_INTERVAL = 10.0
 DEFAULT_READ_TIMEOUT = 30.0
+HEARTBEAT_PAYLOAD = {"type": "heartbeat", "ts": 0}
 
 _tls_manager: Optional[Any] = None
 
@@ -81,6 +82,8 @@ class FMPConnection:
         self._send_lock = asyncio.Lock()
         self._read_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_interval = DEFAULT_HEARTBEAT_INTERVAL
 
     @property
     def is_connected(self) -> bool:
@@ -125,6 +128,7 @@ class FMPConnection:
 
     async def disconnect(self) -> None:
         """断开连接。"""
+        await self.stop_heartbeat()
         self._running = False
         for task in (self._read_task, self._reconnect_task):
             if task and not task.done():
@@ -222,6 +226,42 @@ class FMPConnection:
                 return
             await asyncio.sleep(self._reconnect_interval)
 
+    def start_heartbeat(self, interval: float = 0.0) -> None:
+        """M2-03 启动心跳发送。"""
+        self._heartbeat_interval = interval or self._heartbeat_interval
+        self.stop_heartbeat()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        logger.debug(f"FMP 心跳启动: {self.info.node_id} interval={self._heartbeat_interval}s")
+
+    async def stop_heartbeat(self) -> None:
+        """停止心跳发送。"""
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        self._heartbeat_task = None
+
+    async def _heartbeat_loop(self) -> None:
+        """M2-03 心跳循环。"""
+        while self._running and self.is_connected:
+            try:
+                import copy
+                payload = copy.deepcopy(HEARTBEAT_PAYLOAD)
+                payload["ts"] = time.time()
+                msg = FMPMessage.create(
+                    source_id=self.info.node_id,
+                    target_id=self.info.node_id,
+                    payload_type=PayloadType.HEARTBEAT,
+                    payload=payload,
+                    control_type=ControlType.HEARTBEAT,
+                )
+                await self.send(msg)
+            except Exception as e:
+                logger.debug(f"FMP 心跳发送失败: {e}")
+            await asyncio.sleep(self._heartbeat_interval)
+
 
 class FMPConnectionManager:
     """FMP 连接池管理器。"""
@@ -312,3 +352,73 @@ class FMPConnectionManager:
                 for nid, c in self._connections.items()
             },
         }
+
+
+class FMPInterface:
+    """M2-05 统一 FMP 接口 — 封装连接管理、消息构建、加密、心跳。
+
+    对外提供简洁 API，隐藏三层协议细节。
+    """
+
+    def __init__(
+        self,
+        node_id: str = "",
+        crypto: Optional[FMPCrypto] = None,
+        on_message: Optional[Callable[[FMPMessage], None]] = None,
+    ):
+        self._conn_mgr = FMPConnectionManager(
+            local_node_id=node_id,
+            crypto=crypto,
+            on_message=on_message,
+        )
+        self._crypto = crypto
+
+    async def connect_to(self, node_id: str, host: str, port: int) -> bool:
+        conn = await self._conn_mgr.add_connection(node_id, host, port)
+        return conn.is_connected
+
+    async def disconnect_from(self, node_id: str) -> None:
+        await self._conn_mgr.remove_connection(node_id)
+
+    async def send_heartbeat(self, target_id: str) -> bool:
+        msg = FMPMessage.create(
+            source_id=self._conn_mgr.local_node_id,
+            target_id=target_id,
+            payload_type=PayloadType.HEARTBEAT,
+            payload={"ts": time.time()},
+            control_type=ControlType.HEARTBEAT,
+        )
+        return await self._conn_mgr.send_to(target_id, msg)
+
+    async def send_task_assign(self, target_id: str, task_data: Dict[str, Any]) -> bool:
+        msg = FMPMessage.create(
+            source_id=self._conn_mgr.local_node_id,
+            target_id=target_id,
+            payload_type=PayloadType.TASK_ASSIGN,
+            payload=task_data,
+        )
+        return await self._conn_mgr.send_to(target_id, msg)
+
+    async def send_task_result(self, target_id: str, result: Dict[str, Any]) -> bool:
+        msg = FMPMessage.create(
+            source_id=self._conn_mgr.local_node_id,
+            target_id=target_id,
+            payload_type=PayloadType.TASK_RESULT,
+            payload=result,
+        )
+        return await self._conn_mgr.send_to(target_id, msg)
+
+    async def broadcast(self, payload_type: PayloadType, payload: Any) -> Dict[str, bool]:
+        msg = FMPMessage.create(
+            source_id=self._conn_mgr.local_node_id,
+            target_id="*",
+            payload_type=payload_type,
+            payload=payload,
+        )
+        return await self._conn_mgr.broadcast(msg)
+
+    async def close(self) -> None:
+        await self._conn_mgr.close_all()
+
+    def get_stats(self) -> Dict[str, Any]:
+        return self._conn_mgr.get_stats()

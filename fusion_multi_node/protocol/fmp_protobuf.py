@@ -319,12 +319,50 @@ class FMPProtoMessage:
 
 
 def _try_protobuf_encode(payload_dict: Dict[str, Any]) -> Optional[bytes]:
+    """将消息字典编码为结构化 protobuf — 使用 FMPEnvelope/FMPControl/FMPPayload 字段。"""
     try:
         from fusion_multi_node.protocol import fmp_proto_pb2
         import json
-        msg = fmp_proto_pb2.FMPFrame()
-        msg.payload_json = json.dumps(payload_dict)
-        return msg.SerializeToString()
+
+        frame = fmp_proto_pb2.FMPFrame()
+
+        env_data = payload_dict.get("envelope", {})
+        env = frame.envelope
+        env.source_id = env_data.get("source_id", "")
+        env.target_id = env_data.get("target_id", "")
+        env.hop_count = env_data.get("hop_count", 0)
+        env.max_hops = env_data.get("max_hops", 3)
+        for t in env_data.get("trace", []):
+            env.trace.append(t)
+        env.message_id = env_data.get("message_id", "")
+        env.timestamp = env_data.get("timestamp", 0.0)
+        env.sequence = env_data.get("sequence", 0)
+
+        ctrl_data = payload_dict.get("control", {})
+        ctrl = frame.control
+        ctrl.code = ctrl_data.get("code", 0)
+        ctrl.sequence = ctrl_data.get("sequence", 0)
+        ctrl.timestamp = ctrl_data.get("timestamp", 0.0)
+        ctrl.ack_seq = ctrl_data.get("ack_seq", 0)
+        ctrl.flow_window = ctrl_data.get("flow_window", 64)
+        ctrl.reason = ctrl_data.get("reason", "")
+
+        pay_data = payload_dict.get("payload", {})
+        pay = frame.payload
+        pay.payload_type = pay_data.get("payload_type", 0)
+        raw = pay_data.get("data", "")
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        pay.data = raw
+        pay.round_id = pay_data.get("round_id", "")
+        pay.round_number = pay_data.get("round_number", 0)
+        pay.max_rounds = pay_data.get("max_rounds", 10)
+        pay.compressed = pay_data.get("compressed", False)
+
+        frame.encrypted = payload_dict.get("encrypted", False)
+        frame.payload_json = ""
+
+        return frame.SerializeToString()
     except ImportError:
         return None
     except Exception as e:
@@ -333,12 +371,52 @@ def _try_protobuf_encode(payload_dict: Dict[str, Any]) -> Optional[bytes]:
 
 
 def _try_protobuf_decode(data: bytes) -> Optional[Dict[str, Any]]:
+    """从 protobuf 二进制解码为消息字典 — 使用结构化字段。"""
     try:
         from fusion_multi_node.protocol import fmp_proto_pb2
         import json
-        msg = fmp_proto_pb2.FMPFrame()
-        msg.ParseFromString(data)
-        return json.loads(msg.payload_json)
+
+        frame = fmp_proto_pb2.FMPFrame()
+        frame.ParseFromString(data)
+
+        env = frame.envelope
+        ctrl = frame.control
+        pay = frame.payload
+
+        result = {
+            "envelope": {
+                "source_id": env.source_id,
+                "target_id": env.target_id,
+                "hop_count": env.hop_count,
+                "max_hops": env.max_hops,
+                "trace": list(env.trace),
+                "message_id": env.message_id,
+                "timestamp": env.timestamp,
+                "sequence": env.sequence,
+            },
+            "control": {
+                "code": ctrl.code,
+                "sequence": ctrl.sequence,
+                "timestamp": ctrl.timestamp,
+                "ack_seq": ctrl.ack_seq,
+                "flow_window": ctrl.flow_window,
+                "reason": ctrl.reason,
+            },
+            "payload": {
+                "payload_type": pay.payload_type,
+                "data": pay.data.decode("utf-8", errors="replace"),
+                "round_id": pay.round_id,
+                "round_number": pay.round_number,
+                "max_rounds": pay.max_rounds,
+                "compressed": pay.compressed,
+            },
+            "encrypted": frame.encrypted,
+        }
+
+        if frame.payload_json and not pay.data:
+            return json.loads(frame.payload_json)
+
+        return result
     except ImportError:
         return None
     except Exception as e:

@@ -75,6 +75,8 @@ class MDNSDiscovery:
         props.setdefault("role", "master")
         props.setdefault("arch", platform.machine())
         props.setdefault("hostname", platform.node())
+        props.setdefault("heartbeat_interval", "3")
+        props.setdefault("heartbeat_timeout", "15")
         if self._cluster_secret:
             props["cluster_hash"] = _hash_cluster_secret(self._cluster_secret)
 
@@ -284,7 +286,6 @@ class MDNSDiscovery:
     # ── 辅助 ──
 
     def _get_local_ip(self) -> str:
-        """获取本机局域网 IP。"""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -293,6 +294,12 @@ class MDNSDiscovery:
             return ip
         except Exception:
             return "127.0.0.1"
+
+    @staticmethod
+    def get_heartbeat_config(properties: Dict[str, str]) -> Dict[str, int]:
+        interval = int(properties.get("heartbeat_interval", "3"))
+        timeout = int(properties.get("heartbeat_timeout", "15"))
+        return {"interval": interval, "timeout": timeout}
 
 
 def _service_info_to_discovery(name: str, info: Any) -> DiscoveryInfo:

@@ -8,6 +8,7 @@ P0 核心调度模块：
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -129,28 +130,34 @@ class LoadRouter:
         self.queue_capacity = queue_capacity
         self._metrics: Dict[str, LoadMetrics] = {}
         self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
+        self._lock = threading.Lock()
         logger.info(f"LoadRouter 初始化: 策略={strategy.value}, 权重校验={self._weights.validate()}")
 
     def set_strategy(self, strategy: RoutingStrategy) -> None:
-        self.strategy = strategy
-        self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
+        with self._lock:
+            self.strategy = strategy
+            self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
         logger.info(f"LoadRouter 策略切换: {strategy.value}")
 
     def update_metrics(self, node_id: str, metrics: LoadMetrics) -> None:
         metrics.node_id = node_id
         metrics.timestamp = time.time()
-        self._metrics[node_id] = metrics
+        with self._lock:
+            self._metrics[node_id] = metrics
         logger.debug(f"负载指标更新: {node_id} uma={metrics.uma_used_ratio:.2f} cpu={metrics.cpu_percent:.1f}%")
 
     def remove_node(self, node_id: str) -> None:
-        self._metrics.pop(node_id, None)
+        with self._lock:
+            self._metrics.pop(node_id, None)
 
     def get_metrics(self, node_id: str) -> Optional[LoadMetrics]:
-        return self._metrics.get(node_id)
+        with self._lock:
+            return self._metrics.get(node_id)
 
     def compute_score(self, metrics: LoadMetrics, weights: Optional[RoutingWeights] = None) -> float:
         """计算节点综合评分 (0~1, 越高越优先)。"""
-        w = weights or self._weights
+        with self._lock:
+            w = weights or self._weights
 
         uma_score = max(0.0, 1.0 - metrics.uma_used_ratio)
         cpu_score = max(0.0, 1.0 - metrics.cpu_percent / 100.0)
@@ -192,10 +199,15 @@ class LoadRouter:
     ) -> Optional[RoutingResult]:
         """从候选节点中选择最优节点。"""
         now = time.time()
+        with self._lock:
+            snapshot = dict(self._metrics)
+            current_weights = self._weights
+            current_strategy = self.strategy
+
         candidates: List[RoutingResult] = []
 
         for nid in candidate_ids:
-            m = self._metrics.get(nid)
+            m = snapshot.get(nid)
             if not m:
                 logger.debug(f"节点 {nid} 无负载指标，跳过")
                 continue
@@ -206,17 +218,17 @@ class LoadRouter:
                 logger.debug(f"节点 {nid} UMA不足 ({m.uma_available_ratio:.2f} < {required_uma_ratio:.2f})")
                 continue
 
-            score = self.compute_score(m)
+            score = self.compute_score(m, current_weights)
             preferred_bonus = 0.1 if nid == preferred_node_id else 0.0
             final_score = min(1.0, score + preferred_bonus)
-            breakdown = self.score_breakdown(m)
+            breakdown = self.score_breakdown(m, current_weights)
             if nid == preferred_node_id:
                 breakdown["preferred_bonus"] = preferred_bonus
 
             candidates.append(RoutingResult(
                 node_id=nid,
                 score=final_score,
-                strategy=self.strategy,
+                strategy=current_strategy,
                 metrics=m,
                 breakdown=breakdown,
             ))
@@ -242,10 +254,15 @@ class LoadRouter:
     ) -> List[RoutingResult]:
         """选择 top-N 个最优节点。"""
         now = time.time()
+        with self._lock:
+            snapshot = dict(self._metrics)
+            current_weights = self._weights
+            current_strategy = self.strategy
+
         candidates: List[RoutingResult] = []
 
         for nid in candidate_ids:
-            m = self._metrics.get(nid)
+            m = snapshot.get(nid)
             if not m:
                 continue
             if now - m.timestamp > self.stale_threshold:
@@ -253,17 +270,17 @@ class LoadRouter:
             if required_uma_ratio > 0 and m.uma_available_ratio < required_uma_ratio:
                 continue
 
-            score = self.compute_score(m)
+            score = self.compute_score(m, current_weights)
             preferred_bonus = 0.1 if nid == preferred_node_id else 0.0
             final_score = min(1.0, score + preferred_bonus)
-            breakdown = self.score_breakdown(m)
+            breakdown = self.score_breakdown(m, current_weights)
             if nid == preferred_node_id:
                 breakdown["preferred_bonus"] = preferred_bonus
 
             candidates.append(RoutingResult(
                 node_id=nid,
                 score=final_score,
-                strategy=self.strategy,
+                strategy=current_strategy,
                 metrics=m,
                 breakdown=breakdown,
             ))
@@ -273,18 +290,21 @@ class LoadRouter:
 
     def get_cluster_load_summary(self) -> Dict[str, Any]:
         """获取集群负载摘要。"""
-        if not self._metrics:
-            return {"node_count": 0, "avg_score": 0.0}
+        with self._lock:
+            if not self._metrics:
+                return {"node_count": 0, "avg_score": 0.0}
+            metrics_snapshot = list(self._metrics.values())
+            current_strategy = self.strategy
 
-        scores = [self.compute_score(m) for m in self._metrics.values()]
-        avg_uma = sum(m.uma_used_ratio for m in self._metrics.values()) / len(self._metrics)
-        avg_cpu = sum(m.cpu_percent for m in self._metrics.values()) / len(self._metrics)
-        avg_queue = sum(m.task_queue_len for m in self._metrics.values()) / len(self._metrics)
-        avg_rtt = sum(m.net_rtt_ms for m in self._metrics.values()) / len(self._metrics)
+        scores = [self.compute_score(m) for m in metrics_snapshot]
+        avg_uma = sum(m.uma_used_ratio for m in metrics_snapshot) / len(metrics_snapshot)
+        avg_cpu = sum(m.cpu_percent for m in metrics_snapshot) / len(metrics_snapshot)
+        avg_queue = sum(m.task_queue_len for m in metrics_snapshot) / len(metrics_snapshot)
+        avg_rtt = sum(m.net_rtt_ms for m in metrics_snapshot) / len(metrics_snapshot)
 
         return {
             "node_count": len(self._metrics),
-            "strategy": self.strategy.value,
+            "strategy": current_strategy.value,
             "avg_score": sum(scores) / len(scores),
             "min_score": min(scores),
             "max_score": max(scores),

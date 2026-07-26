@@ -16,9 +16,11 @@ from fusion_multi_node.master import (
     NodeInfo,
     NodeStatus,
     ParallelMode,
+    TaskStatus,
 )
 from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
 from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
+from fusion_multi_node.security.permission import PermissionManager, NodeRole
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ class NodeRegisterRequest(BaseModel):
     device_model: str = ""
     uma_size_gb: float = 0.0
     mlx_version: str = ""
+    role: str = "worker"
     tags: List[str] = []
     active_tasks: int = 0
     max_tasks: int = 4
@@ -135,11 +138,21 @@ class MasterServer:
         self.app = FastAPI(title="Fusion Multi-Node Master", version=_VERSION)
         self._shared_token = shared_token or load_or_create_token()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
+        self._permission_manager = PermissionManager()
+        self._permission_manager.assign_role("master", NodeRole.MASTER, "system")
         self._uvicorn_server: Optional[Any] = None
+        try:
+            from fusion_multi_node.security.node_approval import NodeApprovalManager
+            self._approval_manager = NodeApprovalManager()
+        except Exception:
+            self._approval_manager = None
         self._setup_routes()
 
     def _setup_routes(self):
         app = self.app
+
+        async def _check_permission(node_id: str, path: str, method: str = "GET") -> bool:
+            return self._permission_manager.check_path_access(node_id, path, method)
 
         @app.get("/api/health")
         async def health():
@@ -172,6 +185,23 @@ class MasterServer:
 
         @app.post("/api/nodes/register")
         async def register_node(req: NodeRegisterRequest):
+            role = self._permission_manager.get_role(req.node_id)
+            if role is not None:
+                if not await _check_permission(req.node_id, "/api/nodes/register", "POST"):
+                    raise HTTPException(status_code=403, detail="权限不足: node register")
+            if self._approval_manager:
+                approval = self._approval_manager.request_join(
+                    node_id=req.node_id,
+                    hostname=req.hostname,
+                    ip_address=req.ip_address,
+                    port=req.port,
+                )
+                if approval.status.value != "approved":
+                    logger.warning(f"节点注册被拒绝: {req.node_id} (未审批)")
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"节点 {req.node_id} 未通过审批，当前状态: {approval.status.value}",
+                    )
             node = NodeInfo(
                 node_id=req.node_id,
                 hostname=req.hostname,
@@ -185,6 +215,7 @@ class MasterServer:
                 device_model=req.device_model,
                 uma_size_gb=req.uma_size_gb,
                 mlx_version=req.mlx_version,
+                role=req.role,
                 status=NodeStatus.ONLINE,
                 tags=req.tags,
                 active_tasks=req.active_tasks,
@@ -193,7 +224,9 @@ class MasterServer:
                 last_heartbeat=time.time(),
             )
             await self.master.register_node(node)
-            logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port})")
+            role = NodeRole.MASTER if req.role == "master" else NodeRole.WORKER
+            self._permission_manager.assign_role(req.node_id, role, "register")
+            logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={req.role}")
             return {"status": "ok", "node_id": req.node_id}
 
         @app.post("/api/nodes/heartbeat")
@@ -216,7 +249,7 @@ class MasterServer:
             logger.warning(f"节点故障上报: {req.node_id} [{req.fault_type}] {req.message}")
             node = self.master.nodes.get(req.node_id)
             if node:
-                node.status = NodeStatus.ERROR
+                node.status = NodeStatus.FAULT
             return {"status": "ok"}
 
         @app.post("/api/nodes/load")
@@ -263,6 +296,8 @@ class MasterServer:
 
         @app.delete("/api/nodes/{node_id}")
         async def unregister_node(node_id: str):
+            if not await _check_permission("master", "/api/nodes/", "DELETE"):
+                raise HTTPException(status_code=403, detail="权限不足: node delete")
             await self.master.unregister_node(node_id)
             return {"status": "ok"}
 
@@ -270,6 +305,8 @@ class MasterServer:
 
         @app.post("/api/tasks/submit")
         async def submit_task(req: TaskSubmitRequest):
+            if not await _check_permission("master", "/api/tasks/submit", "POST"):
+                raise HTTPException(status_code=403, detail="权限不足: task submit")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
             task = ClusterTask(
                 task_id=f"task_{int(time.time() * 1000)}",
@@ -304,6 +341,8 @@ class MasterServer:
 
         @app.post("/api/tasks/{task_id}/cancel")
         async def cancel_task(task_id: str, req: TaskCancelRequest):
+            if not await _check_permission("master", "/api/tasks/cancel", "POST"):
+                raise HTTPException(status_code=403, detail="权限不足: task cancel")
             if task_id not in self.master.tasks:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             ok = await self.master.cancel_task(task_id, reason=req.reason, cancel_sub_tasks=True)
@@ -321,6 +360,8 @@ class MasterServer:
 
         @app.post("/api/tasks/{task_id}/migrate")
         async def migrate_task(task_id: str):
+            if not await _check_permission("master", "/api/tasks/migrate", "POST"):
+                raise HTTPException(status_code=403, detail="权限不足: task migrate")
             ok = await self.master.migrate_task(task_id)
             if not ok:
                 raise HTTPException(status_code=500, detail="任务迁移失败")
@@ -359,6 +400,193 @@ class MasterServer:
         @app.get("/api/cluster/stats")
         async def cluster_stats():
             return await self.master.get_stats()
+
+        # ── M7-06 监控 API ──
+
+        @app.get("/api/v1/cluster/stats")
+        async def v1_cluster_stats():
+            stats = await self.master.get_stats()
+            online = stats.get("online_nodes", 0)
+            total = stats.get("total_nodes", 0)
+            active = stats.get("active_tasks", 0)
+            total_mem = stats.get("total_memory_gb", 0.0)
+            avail_mem = stats.get("available_memory_gb", 0.0)
+            return {
+                "cluster": {
+                    "online_nodes": online,
+                    "total_nodes": total,
+                    "active_tasks": active,
+                    "total_memory_gb": round(total_mem, 2),
+                    "available_memory_gb": round(avail_mem, 2),
+                    "utilization": round(1.0 - avail_mem / max(total_mem, 0.01), 4) if total_mem > 0 else 0.0,
+                },
+                "tasks": {
+                    "total": stats.get("total_tasks", 0),
+                    "completed": stats.get("completed_tasks", 0),
+                    "failed": stats.get("failed_tasks", 0),
+                },
+                "load_summary": stats.get("load_summary", {}),
+            }
+
+        @app.get("/api/v1/nodes/{node_id}/metrics")
+        async def node_metrics(node_id: str):
+            node = self.master.nodes.get(node_id)
+            if not node:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            load = self.master.load_router._node_loads.get(node_id)
+            result = {
+                "node_id": node_id,
+                "status": node.status.value,
+                "role": node.role,
+                "score": node.score,
+                "available_memory_gb": node.available_memory_gb,
+                "total_memory_gb": node.total_memory_gb,
+                "active_tasks": node.active_tasks,
+                "max_tasks": node.max_tasks,
+                "network_rtt_ms": node.network_rtt_ms,
+            }
+            if load:
+                result["load_metrics"] = {
+                    "uma_used_ratio": load.uma_used_ratio,
+                    "cpu_percent": load.cpu_percent,
+                    "metal_util": load.metal_util,
+                    "task_queue_len": load.task_queue_len,
+                    "net_rtt_ms": load.net_rtt_ms,
+                }
+            return result
+
+        @app.get("/api/v1/tasks/{task_id}/progress")
+        async def task_progress(task_id: str):
+            task = self.master.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
+            total_shards = len(task.sub_tasks) if task.sub_tasks else 1
+            completed_shards = sum(
+                1 for stid in task.sub_tasks
+                if self.master.tasks.get(stid, None) and self.master.tasks[stid].status == TaskStatus.COMPLETED
+            )
+            progress = completed_shards / max(total_shards, 1)
+            elapsed = time.time() - task.started_at if task.started_at > 0 else 0.0
+            remaining = max(task.timeout_seconds - elapsed, 0.0) if task.started_at > 0 else task.timeout_seconds
+            return {
+                "task_id": task_id,
+                "name": task.name,
+                "status": task.status.value,
+                "progress": round(progress, 3),
+                "total_shards": total_shards,
+                "completed_shards": completed_shards,
+                "assigned_nodes": task.assigned_nodes,
+                "elapsed_seconds": round(elapsed, 1),
+                "remaining_seconds": round(remaining, 1),
+                "model_name": task.model_name,
+            }
+
+        @app.get("/api/v1/tasks/{task_id}/timeline")
+        async def task_timeline(task_id: str):
+            task = self.master.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
+            events = []
+            if task.created_at > 0:
+                events.append({"timestamp": task.created_at, "event": "created", "detail": f"mode={task.mode.value}"})
+            if task.started_at > 0:
+                events.append({"timestamp": task.started_at, "event": "started", "detail": f"nodes={task.assigned_nodes}"})
+            if task.degraded_from_model:
+                events.append({"timestamp": task.started_at or task.created_at, "event": "degraded", "detail": f"{task.degraded_from_model} → {task.model_name}"})
+            for sub_id in task.sub_tasks:
+                sub = self.master.tasks.get(sub_id)
+                if sub:
+                    if sub.started_at > 0:
+                        events.append({"timestamp": sub.started_at, "event": "subtask_started", "detail": f"sub_task={sub_id}"})
+                    if sub.completed_at > 0:
+                        events.append({"timestamp": sub.completed_at, "event": "subtask_completed", "detail": f"sub_task={sub_id}"})
+            if task.completed_at > 0:
+                event_type = "completed" if task.status == TaskStatus.COMPLETED else "failed"
+                events.append({"timestamp": task.completed_at, "event": event_type, "detail": task.error or ""})
+            events.sort(key=lambda e: e["timestamp"])
+            return {
+                "task_id": task_id,
+                "name": task.name,
+                "status": task.status.value,
+                "events": events,
+            }
+
+        # M10-04 Autoscaler 配置热更新
+        @app.get("/api/v1/autoscaler/config")
+        async def get_autoscaler_config():
+            autoscaler = getattr(self.master, "_autoscaler", None)
+            if not autoscaler:
+                return {"enabled": False}
+            cfg = autoscaler.config
+            return {
+                "enabled": True,
+                "min_nodes": cfg.min_nodes,
+                "max_nodes": cfg.max_nodes,
+                "scale_up_threshold": cfg.scale_up_threshold,
+                "scale_down_threshold": cfg.scale_down_threshold,
+                "cooldown_seconds": cfg.cooldown_seconds,
+                "idle_timeout_seconds": cfg.idle_timeout_seconds,
+                "policy": cfg.policy.value,
+                "check_interval": cfg.check_interval,
+                "rebalance_threshold": cfg.rebalance_threshold,
+            }
+
+        @app.put("/api/v1/autoscaler/config")
+        async def update_autoscaler_config(req: dict):
+            from fusion_multi_node.autoscaler.autoscaler import AutoscalerConfig, ScalePolicy
+            autoscaler = getattr(self.master, "_autoscaler", None)
+            if not autoscaler:
+                raise HTTPException(status_code=404, detail="Autoscaler 未启用")
+            if "policy" in req:
+                try:
+                    policy = ScalePolicy(req["policy"])
+                    autoscaler.update_policy(policy)
+                    return {"status": "ok", "action": "policy_updated", "policy": policy.value}
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"无效策略: {req['policy']}")
+            try:
+                new_config = AutoscalerConfig(
+                    min_nodes=req.get("min_nodes", autoscaler.config.min_nodes),
+                    max_nodes=req.get("max_nodes", autoscaler.config.max_nodes),
+                    scale_up_threshold=req.get("scale_up_threshold", autoscaler.config.scale_up_threshold),
+                    scale_down_threshold=req.get("scale_down_threshold", autoscaler.config.scale_down_threshold),
+                    cooldown_seconds=req.get("cooldown_seconds", autoscaler.config.cooldown_seconds),
+                    idle_timeout_seconds=req.get("idle_timeout_seconds", autoscaler.config.idle_timeout_seconds),
+                    policy=autoscaler.config.policy,
+                    check_interval=req.get("check_interval", autoscaler.config.check_interval),
+                    rebalance_threshold=req.get("rebalance_threshold", autoscaler.config.rebalance_threshold),
+                )
+                autoscaler.update_config(new_config)
+                return {"status": "ok", "action": "config_updated"}
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        # M8-02 日志导出
+        @app.get("/api/v1/observability/logs/export")
+        async def export_logs(fmt: str = "json", since: float = 0.0, node_id: str = ""):
+            obs = getattr(self.master, "_observability", None)
+            if not obs:
+                raise HTTPException(status_code=503, detail="observability not initialized")
+            try:
+                result = obs.export_logs(fmt=fmt, since=since, node_id=node_id)
+                if fmt == "csv":
+                    from fastapi.responses import PlainTextResponse
+                    return PlainTextResponse(content=result, media_type="text/csv")
+                return {"logs": result, "count": len(result)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # M8-03 智能优化建议
+        @app.get("/api/v1/observability/suggestions")
+        async def get_optimization_suggestions():
+            obs = getattr(self.master, "_observability", None)
+            if not obs:
+                return {"suggestions": [], "error": "observability not initialized"}
+            try:
+                suggestions = obs.generate_optimization_suggestions()
+                return {"suggestions": suggestions}
+            except Exception as e:
+                return {"suggestions": [], "error": str(e)}
 
     async def start(self, host: str = "127.0.0.1", port: int = 9753) -> None:
         import uvicorn

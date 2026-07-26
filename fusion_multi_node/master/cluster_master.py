@@ -18,6 +18,9 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from fusion_multi_node.master.load_metrics import LoadMetrics, LoadRouter, RoutingStrategy
+from fusion_multi_node.master.task_spec import TaskSpec
+from fusion_multi_node.master.election import MasterElection, ElectionCandidate
+from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig, CloudProvider
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,7 @@ class NodeStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
     BUSY = "busy"
+    FAULT = "fault"
     ERROR = "error"
 
 
@@ -60,6 +64,7 @@ class NodeInfo:
     gpu_cores: int = 0
     device_model: str = ""
     uma_size_gb: float = 0.0
+    role: str = "worker"
     status: NodeStatus = NodeStatus.OFFLINE
     last_heartbeat: float = 0.0
     tags: List[str] = field(default_factory=list)
@@ -78,7 +83,7 @@ class NodeInfo:
 
 @dataclass
 class ClusterTask:
-    """集群任务定义。"""
+    """集群任务 — spec 定义 + 运行时状态。"""
     task_id: str
     name: str
     mode: ParallelMode
@@ -92,7 +97,6 @@ class ClusterTask:
     timeout_seconds: float = 300.0
     error: str = ""
     user: str = ""
-    # M3-05 TaskSpec 结构化能力匹配
     required_capability: str = ""
     preferred_node_id: str = ""
     priority: int = 0
@@ -103,6 +107,25 @@ class ClusterTask:
     # M5-04 任务全生命周期取消
     sub_tasks: List[str] = field(default_factory=list)
     cancel_reason: str = ""
+    # M3-05 TaskSpec 引用
+    spec: Optional[TaskSpec] = None
+
+    @classmethod
+    def from_spec(cls, task_id: str, spec: TaskSpec) -> ClusterTask:
+        mode = ParallelMode.PIPELINE if spec.mode == "pipeline" else ParallelMode.DATA
+        return cls(
+            task_id=task_id,
+            name=spec.name,
+            mode=mode,
+            model_name=spec.model_name,
+            model_shards=spec.model_shards,
+            timeout_seconds=spec.timeout_seconds,
+            user=spec.user,
+            required_capability=spec.required_capability,
+            preferred_node_id=spec.preferred_node_id,
+            priority=spec.priority.value,
+            spec=spec,
+        )
 
 
 @dataclass
@@ -152,9 +175,14 @@ class ClusterMaster:
         self._health_task: Optional[asyncio.Task] = None
         self._retry_task: Optional[asyncio.Task] = None
         self._pending_retry: List[ClusterTask] = []
-        self._max_retry_attempts = 3
+        self._max_retry_attempts = 1
         self._max_completed_tasks = 1000
         self._max_kv_cache = 500
+        # M3-03 选举
+        self._election: Optional[MasterElection] = None
+        self._is_leader = True
+        # M4-05 云端回退
+        self._cloud_client: Optional[CloudFallbackClient] = None
 
     # ── 节点管理 ──
 
@@ -176,17 +204,28 @@ class ClusterMaster:
             logger.info(f"节点离线: {node_id}")
 
     async def get_online_nodes(self) -> List[NodeInfo]:
-        """获取所有在线节点。"""
         now = time.time()
         online = []
         async with self._lock:
             for node in self.nodes.values():
                 if node.status == NodeStatus.ONLINE:
                     if now - node.last_heartbeat < self.heartbeat_timeout:
-                        online.append(node)
+                        if node.active_tasks >= node.max_tasks:
+                            node.status = NodeStatus.BUSY
+                            logger.info(f"节点任务满载: {node.hostname} ({node.active_tasks}/{node.max_tasks})")
+                        else:
+                            online.append(node)
                     else:
                         node.status = NodeStatus.OFFLINE
                         logger.warning(f"节点心跳超时: {node.hostname}")
+                elif node.status == NodeStatus.BUSY:
+                    if now - node.last_heartbeat >= self.heartbeat_timeout:
+                        node.status = NodeStatus.OFFLINE
+                        logger.warning(f"节点心跳超时(BUSY): {node.hostname}")
+                    elif node.active_tasks < node.max_tasks:
+                        node.status = NodeStatus.ONLINE
+                        online.append(node)
+                        logger.info(f"节点恢复空闲: {node.hostname}")
         return online
 
     async def check_heartbeat(self, node_id: str) -> bool:
@@ -343,6 +382,8 @@ class ClusterMaster:
 
         if len(nodes) < (len(task.model_shards) or 1):
             logger.error(f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)}")
+            if self._cloud_client:
+                logger.info(f"M4-05 尝试云端回退: {task.name}")
             return False
 
         async with self._lock:
@@ -358,9 +399,15 @@ class ClusterMaster:
         return True
 
     def _enqueue_retry(self, task: ClusterTask) -> None:
-        """将任务加入重试队列。"""
         retry_count = getattr(task, "_retry_count", 0)
         if retry_count >= self._max_retry_attempts:
+            if self._cloud_client and task.model_name:
+                task._cloud_fallback_pending = True
+                task.status = TaskStatus.PENDING
+                task.assigned_nodes = []
+                self._pending_retry.append(task)
+                logger.info(f"任务重试超限，转云端回退: {task.name} ({task.task_id})")
+                return
             task.status = TaskStatus.FAILED
             task.error = f"重试次数超限 ({self._max_retry_attempts})"
             logger.error(f"任务重试放弃: {task.name} ({task.task_id})")
@@ -412,10 +459,12 @@ class ClusterMaster:
                     node.active_tasks = max(0, node.active_tasks - 1)
             task.assigned_nodes = []
 
-            # 递归取消子任务
+            # 递归取消子任务（支持多层）
             cancelled_sub = []
             if cancel_sub_tasks and task.sub_tasks:
-                for sub_id in task.sub_tasks:
+                cancel_stack = list(task.sub_tasks)
+                while cancel_stack:
+                    sub_id = cancel_stack.pop()
                     sub = self.tasks.get(sub_id)
                     if sub and sub.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
                         for nid in sub.assigned_nodes:
@@ -427,6 +476,8 @@ class ClusterMaster:
                         sub.cancel_reason = f"父任务取消: {task_id}"
                         sub.error = sub.cancel_reason
                         cancelled_sub.append(sub_id)
+                        if sub.sub_tasks:
+                            cancel_stack.extend(sub.sub_tasks)
 
             task.status = TaskStatus.FAILED
             task.error = task.cancel_reason
@@ -490,7 +541,7 @@ class ClusterMaster:
         return ""
 
     async def check_timeouts(self) -> List[str]:
-        """检查并处理超时任务。"""
+        """检查并处理超时任务，自动入重试队列。"""
         now = time.time()
         timed_out = []
         async with self._lock:
@@ -500,7 +551,8 @@ class ClusterMaster:
                         task.status = TaskStatus.TIMEOUT
                         task.error = f"任务超时 ({task.timeout_seconds}s)"
                         timed_out.append(tid)
-                        logger.warning(f"任务超时: {task.name} ({tid})")
+                        logger.warning(f"任务超时: {task.name} ({tid}), 入重试队列")
+                        self._enqueue_retry(task)
         return timed_out
 
     MODEL_MEMORY_PROFILE = {
@@ -516,7 +568,7 @@ class ClusterMaster:
     _DEFAULT_MODEL_MEMORY_GB = 4.0
 
     # M4-02 轻量级模型阈值 (≤0.5B 强制本地)
-    _LOCAL_FORCE_MODEL_SIZES = {"0.5b", "1b"}
+    _LOCAL_FORCE_MODEL_SIZES = {"0.5b"}
     # M4-02 轻量级任务内存阈值 (GB)
     _LOCAL_FORCE_MEMORY_GB = 4.0
 
@@ -602,6 +654,84 @@ class ClusterMaster:
 
         return True
 
+    # ── M3-03 选举配置 ──
+
+    def setup_election(
+        self,
+        node_id: str,
+        priority: int = 0,
+        known_nodes: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self._election = MasterElection(
+            node_id=node_id,
+            priority=priority,
+            hostname="",
+            ip_address=self.host,
+            port=self.port,
+        )
+        if known_nodes:
+            for node in known_nodes:
+                self._election.add_known_node(ElectionCandidate(
+                    node_id=node.get("node_id", ""),
+                    priority=node.get("priority", 0),
+                    hostname=node.get("hostname", ""),
+                    ip_address=node.get("ip_address", ""),
+                    port=node.get("port", 0),
+                    term=0,
+                    voted_for="",
+                    last_heartbeat=time.time(),
+                ))
+        self._election.on_elected = self._on_elected_leader
+        self._election.on_demoted = self._on_demoted_from_leader
+        logger.info(f"M3-03 Master 选举已配置: node_id={node_id} priority={priority}")
+
+    def _on_elected_leader(self) -> None:
+        self._is_leader = True
+        logger.info("本节点被选举为 Leader")
+
+    def _on_demoted_from_leader(self) -> None:
+        self._is_leader = False
+        logger.warning("本节点从 Leader 降级")
+
+    # ── M4-05 云端回退 ──
+
+    def setup_cloud_fallback(
+        self,
+        provider: str = "openai",
+        api_key: str = "",
+        base_url: str = "",
+        max_cost_per_day: float = 10.0,
+        model: str = "",
+    ) -> None:
+        try:
+            cloud_provider = CloudProvider(provider)
+        except ValueError:
+            cloud_provider = CloudProvider.OPENAI
+        config = CloudConfig(
+            provider=cloud_provider,
+            api_key=api_key,
+            base_url=base_url,
+            max_cost_per_day=max_cost_per_day,
+            default_model=model or "gpt-4o-mini",
+        )
+        self._cloud_client = CloudFallbackClient(config)
+        logger.info(f"M4-05 云端回退已配置: provider={provider} model={model}")
+
+    async def fallback_to_cloud(self, task: ClusterTask, prompt: str) -> Optional[str]:
+        if not self._cloud_client:
+            logger.warning("云端回退未配置")
+            return None
+        try:
+            result = await self._cloud_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=self._cloud_client._config.default_model,
+            )
+            logger.info(f"M4-05 云端回退成功: {task.name} ({task.task_id})")
+            return result
+        except Exception as e:
+            logger.error(f"M4-05 云端回退失败: {task.name} - {e}")
+            return None
+
     # ── 生命周期 ──
 
     async def start(self, with_server: bool = True, with_mdns: bool = True) -> None:
@@ -635,9 +765,21 @@ class ClusterMaster:
         logger.info("Cluster Master 已停止")
 
     def _start_mdns(self) -> None:
-        """启动 mDNS 服务注册。"""
         try:
             from fusion_multi_node.discovery import MDNSDiscovery
+            import subprocess
+            device_model = ""
+            uma_size_gb = "0.0"
+            try:
+                out = subprocess.check_output(["sysctl", "-n", "hw.model"], text=True).strip()
+                device_model = out
+            except Exception:
+                pass
+            try:
+                out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
+                uma_size_gb = str(int(out) / (1024 ** 3))
+            except Exception:
+                pass
             self._mdns = MDNSDiscovery(node_id="fusion-master")
             ok = self._mdns.register(
                 port=self.port,
@@ -645,8 +787,10 @@ class ClusterMaster:
                     "role": "master",
                     "discovery_port": str(self.discovery_port),
                     "host": self.host,
-                    "device_model": "",
-                    "uma_size_gb": "0.0",
+                    "device_model": device_model,
+                    "uma_size_gb": uma_size_gb,
+                    "heartbeat_interval": "3",
+                    "heartbeat_timeout": "15",
                 },
             )
             if ok:
@@ -673,6 +817,18 @@ class ClusterMaster:
                 retry_tasks = self._pending_retry[:]
                 self._pending_retry.clear()
                 for task in retry_tasks:
+                    if getattr(task, "_cloud_fallback_pending", False):
+                        prompt = f"任务 {task.name} (model={task.model_name})"
+                        result = await self.fallback_to_cloud(task, prompt)
+                        if result:
+                            task.status = TaskStatus.COMPLETED
+                            task.completed_at = time.time()
+                            task.error = ""
+                            logger.info(f"云端回退完成: {task.name}")
+                        else:
+                            task.status = TaskStatus.FAILED
+                            task.error = "云端回退失败"
+                        continue
                     ok = await self.assign_task(task)
                     if not ok:
                         self._enqueue_retry(task)

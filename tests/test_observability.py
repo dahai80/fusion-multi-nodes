@@ -334,3 +334,55 @@ class TestClusterObservabilityLifecycle:
                 await task
             except asyncio.CancelledError:
                 pass
+
+
+class TestExportLogs:
+    def test_export_json(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="src", message="hello"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="ERROR", module="src2", message="fail"))
+        result = obs.export_logs(fmt="json")
+        assert len(result) == 2
+        assert result[0]["message"] == "hello"
+
+    def test_export_csv(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="src", message="hello"))
+        csv = obs.export_logs(fmt="csv")
+        assert "timestamp,level" in csv
+        assert "hello" in csv
+
+    def test_export_with_filters(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="src", message="msg1"))
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="ERROR", module="src", message="msg2"))
+        result = obs.export_logs(node_id="n2")
+        assert len(result) == 1
+        assert result[0]["node_id"] == "n2"
+
+
+class TestOptimizationSuggestions:
+    def test_suggestions_memory_alert(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        obs.alerts.append(Alert(alert_id="a1", severity="critical", title="mem", message="内存压力过高"))
+        suggestions = obs.generate_optimization_suggestions()
+        assert any(s["category"] == "resource" for s in suggestions)
+
+    def test_suggestions_offline_alert(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        obs.alerts.append(Alert(alert_id="a2", severity="critical", title="down", message="node offline"))
+        suggestions = obs.generate_optimization_suggestions()
+        assert any(s["category"] == "availability" for s in suggestions)
+
+    def test_suggestions_healthy(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        suggestions = obs.generate_optimization_suggestions()
+        assert len(suggestions) >= 1
+        assert suggestions[0]["category"] == "info"
+
+    def test_suggestions_error_logs(self):
+        obs = ClusterObservability(retention_hours=168.0)
+        for _ in range(5):
+            obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="inference_engine", message="crash"))
+        suggestions = obs.generate_optimization_suggestions()
+        assert any("inference_engine" in s["title"] for s in suggestions)

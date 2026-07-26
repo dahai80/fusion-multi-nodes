@@ -70,7 +70,7 @@ class Autoscaler:
     """自动伸缩器。
 
     定期检查集群负载，根据策略执行扩缩容。
-    通过回调与 ClusterMaster 集成。
+    优先使用回调；无回调时使用内建动作直接与 ClusterMaster 协同。
     """
 
     def __init__(
@@ -82,6 +82,7 @@ class Autoscaler:
         on_rebalance: Optional[Callable[[], Any]] = None,
         get_cluster_state: Optional[Callable[[], Dict[str, Any]]] = None,
         migrate_task: Optional[Callable[[str], Any]] = None,
+        cluster_master: Any = None,
     ):
         if policy and not config:
             defaults = POLICY_DEFAULTS.get(policy, AutoscalerConfig())
@@ -102,6 +103,7 @@ class Autoscaler:
         self._on_rebalance = on_rebalance
         self._get_cluster_state = get_cluster_state
         self._migrate_task = migrate_task
+        self._master = cluster_master
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -173,6 +175,8 @@ class Autoscaler:
                     await self._on_scale_up(target_count)
                 else:
                     self._on_scale_up(target_count)
+            else:
+                await self._builtin_scale_up(target_count)
 
         # 缩容: 负载低于阈值 + 有空闲节点 + 不在冷却期 + 未达最小节点数
         elif load_ratio < self.config.scale_down_threshold and not in_cooldown and num_online > self.config.min_nodes:
@@ -204,6 +208,8 @@ class Autoscaler:
                         await self._on_scale_down(victim_id)
                     else:
                         self._on_scale_down(victim_id)
+                else:
+                    await self._builtin_scale_down(victim_id)
 
         # 再平衡: 节点间负载差异过大
         elif online_nodes:
@@ -364,3 +370,85 @@ class Autoscaler:
         logger.info(f"强制缩容: {node_id}")
         if self._on_scale_down:
             self._on_scale_down(node_id)
+
+    def update_config(self, config: AutoscalerConfig) -> None:
+        """M10-04 热更新 Autoscaler 配置。"""
+        old = self.config
+        self.config = config
+        self._last_action_time = 0.0
+        logger.info(
+            f"M10-04 配置热更新: "
+            f"min={old.min_nodes}→{config.min_nodes} "
+            f"max={old.max_nodes}→{config.max_nodes} "
+            f"up_thresh={old.scale_up_threshold}→{config.scale_up_threshold} "
+            f"down_thresh={old.scale_down_threshold}→{config.scale_down_threshold} "
+            f"cooldown={old.cooldown_seconds}→{config.cooldown_seconds}"
+        )
+
+    def update_policy(self, policy: ScalePolicy) -> None:
+        """M10-04 通过策略名热更新配置。"""
+        defaults = POLICY_DEFAULTS.get(policy, AutoscalerConfig())
+        new_config = AutoscalerConfig(
+            min_nodes=defaults.min_nodes,
+            max_nodes=defaults.max_nodes,
+            scale_up_threshold=defaults.scale_up_threshold,
+            scale_down_threshold=defaults.scale_down_threshold,
+            cooldown_seconds=defaults.cooldown_seconds,
+            idle_timeout_seconds=defaults.idle_timeout_seconds,
+            policy=policy,
+            check_interval=self.config.check_interval,
+            rebalance_threshold=self.config.rebalance_threshold,
+        )
+        self.update_config(new_config)
+
+    async def _builtin_scale_up(self, target_count: int) -> None:
+        """M10-02 内建扩容: 激活 standby 节点使其上线。"""
+        if not self._master:
+            logger.warning("M10-02 内建扩容: 无 cluster_master 引用，跳过")
+            return
+        standby_nodes = []
+        try:
+            for nid, info in self._master.nodes.items():
+                if getattr(info, "role", "worker") == "standby":
+                    standby_nodes.append(nid)
+        except Exception as e:
+            logger.error(f"M10-02 内建扩容: 读取节点列表失败: {e}")
+            return
+        if not standby_nodes:
+            logger.info("M10-02 内建扩容: 无 standby 节点可激活")
+            return
+        online_count = sum(
+            1 for n in (self._master.nodes.values() if self._master else [])
+            if getattr(n, "status", None) and n.status.value == "online"
+        )
+        needed = min(target_count - online_count, len(standby_nodes))
+        activated = 0
+        for nid in standby_nodes[:needed]:
+            try:
+                info = self._master.nodes.get(nid)
+                if info:
+                    from fusion_multi_node.master.cluster_master import NodeStatus
+                    info.status = NodeStatus.ONLINE
+                    info.role = "worker"
+                    activated += 1
+                    logger.info(f"M10-02 激活 standby 节点: {nid}")
+            except Exception as e:
+                logger.error(f"M10-02 激活 standby 节点失败 {nid}: {e}")
+        logger.info(f"M10-02 内建扩容完成: 激活 {activated}/{needed} standby 节点")
+
+    async def _builtin_scale_down(self, node_id: str) -> None:
+        """M10-03 内建缩容: 先迁移任务，再设为 standby。"""
+        if not self._master:
+            logger.warning("M10-03 内建缩容: 无 cluster_master 引用，跳过")
+            return
+        migrated = await self.migrate_tasks_from_node(node_id)
+        logger.info(f"M10-03 内建缩容: 节点 {node_id} 迁移 {migrated} 个任务")
+        try:
+            info = self._master.nodes.get(node_id)
+            if info:
+                from fusion_multi_node.master.cluster_master import NodeStatus
+                info.status = NodeStatus.OFFLINE
+                info.role = "standby"
+                logger.info(f"M10-03 节点 {node_id} 已设为 standby")
+        except Exception as e:
+            logger.error(f"M10-03 内建缩容失败 {node_id}: {e}")

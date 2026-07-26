@@ -44,6 +44,15 @@ class TaskShard:
     created_at: float = 0.0
     completed_at: float = 0.0
     error: str = ""
+    timeout_seconds: float = 300.0
+
+    @property
+    def is_timed_out(self) -> bool:
+        if self.status in ("completed", "failed"):
+            return False
+        if self.timeout_seconds <= 0:
+            return False
+        return time.time() - self.created_at > self.timeout_seconds
 
     def __post_init__(self):
         if self.created_at == 0.0:

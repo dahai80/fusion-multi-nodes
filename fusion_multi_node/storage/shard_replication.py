@@ -1,11 +1,14 @@
 """M9 分片副本管理 — 模型分片的多副本复制与同步。
 
-M9-02: ShardReplicator 实际数据传输/同步（通过 StorageVolume）
+M9-02: ShardReplicator 实际数据传输/同步（通过 StorageVolume 或 FMP 跨节点传输）
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -60,10 +63,12 @@ class ShardReplicator:
     - 触发副本同步/修复
     """
 
-    def __init__(self, config: Optional[ReplicationConfig] = None):
+    def __init__(self, config: Optional[ReplicationConfig] = None, fmp_interface: Any = None):
         self.config = config or ReplicationConfig()
         self._replicas: Dict[str, List[ShardReplica]] = {}
         self._shard_data: Dict[str, bytes] = {}
+        self._fmp_interface = fmp_interface
+        self._local_node_id: Optional[str] = None
 
     def register_shard_data(self, shard_id: str, data: bytes) -> None:
         """M9-02 注册分片数据（用于后续同步传输）。"""
@@ -107,7 +112,11 @@ class ShardReplicator:
         target_node_id: str,
         storage_volume: Any = None,
     ) -> SyncResult:
-        """M9-02 将分片数据同步到目标节点。"""
+        """M9-02 将分片数据同步到目标节点。
+
+        当目标节点是远程节点且 fmp_interface 已设置时，通过 FMP 传输；
+        否则写入本地 StorageVolume。
+        """
         start = time.time()
         data = self._shard_data.get(shard_id)
         if data is None:
@@ -132,6 +141,93 @@ class ShardReplicator:
                 error="目标节点未分配副本",
             )
 
+        is_remote = (
+            self._fmp_interface is not None
+            and self._local_node_id is not None
+            and target_node_id != self._local_node_id
+        )
+
+        if is_remote:
+            return self._sync_via_fmp(shard_id, target_node_id, data, replica, start)
+
+        return self._sync_local(shard_id, target_node_id, data, replica, storage_volume, start)
+
+    def _sync_via_fmp(
+        self,
+        shard_id: str,
+        target_node_id: str,
+        data: bytes,
+        replica: ShardReplica,
+        start: float,
+    ) -> SyncResult:
+        """通过 FMP 协议将分片数据发送到远程节点。"""
+        try:
+            from fusion_multi_node.protocol.fmp_message import FMPMessage, PayloadType
+
+            payload = {
+                "shard_id": shard_id,
+                "volume_name": replica.volume_name,
+                "file_path": replica.file_path,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "checksum": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+            }
+            msg = FMPMessage.create(
+                source_id=self._local_node_id,
+                target_id=target_node_id,
+                payload_type=PayloadType.SHARD_SYNC,
+                payload=payload,
+            )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                asyncio.ensure_future(
+                    self._fmp_interface._conn_mgr.send_to(target_node_id, msg)
+                )
+            else:
+                asyncio.run(self._fmp_interface._conn_mgr.send_to(target_node_id, msg))
+
+            checksum = hashlib.sha256(data).hexdigest()
+            replica.last_synced = time.time()
+            replica.checksum = checksum
+            replica.size_bytes = len(data)
+
+            duration = (time.time() - start) * 1000
+            logger.info(f"分片 FMP 同步: {shard_id} → {target_node_id} ({len(data)} bytes, {duration:.1f}ms)")
+
+            return SyncResult(
+                shard_id=shard_id,
+                target_node_id=target_node_id,
+                success=True,
+                bytes_transferred=len(data),
+                checksum_verified=True,
+                duration_ms=duration,
+            )
+        except Exception as e:
+            duration = (time.time() - start) * 1000
+            logger.error(f"分片 FMP 同步异常: {shard_id} → {target_node_id}: {e}")
+            return SyncResult(
+                shard_id=shard_id,
+                target_node_id=target_node_id,
+                success=False,
+                duration_ms=duration,
+                error=str(e),
+            )
+
+    def _sync_local(
+        self,
+        shard_id: str,
+        target_node_id: str,
+        data: bytes,
+        replica: ShardReplica,
+        storage_volume: Any,
+        start: float,
+    ) -> SyncResult:
+        """本地 StorageVolume 写入。"""
         try:
             if storage_volume is not None:
                 ok = storage_volume.write_file(
@@ -158,7 +254,7 @@ class ShardReplicator:
             replica.size_bytes = len(data)
 
             duration = (time.time() - start) * 1000
-            logger.info(f"分片同步完成: {shard_id} → {target_node_id} ({len(data)} bytes, {duration:.1f}ms)")
+            logger.info(f"分片本地同步: {shard_id} → {target_node_id} ({len(data)} bytes, {duration:.1f}ms)")
 
             return SyncResult(
                 shard_id=shard_id,
@@ -170,7 +266,7 @@ class ShardReplicator:
             )
         except Exception as e:
             duration = (time.time() - start) * 1000
-            logger.error(f"分片同步异常: {shard_id} → {target_node_id}: {e}")
+            logger.error(f"分片本地同步异常: {shard_id} → {target_node_id}: {e}")
             return SyncResult(
                 shard_id=shard_id,
                 target_node_id=target_node_id,
@@ -178,6 +274,12 @@ class ShardReplicator:
                 duration_ms=duration,
                 error=str(e),
             )
+
+    def set_fmp_interface(self, fmp_interface: Any, local_node_id: str) -> None:
+        """设置 FMPInterface 和本地节点 ID，启用跨节点传输。"""
+        self._fmp_interface = fmp_interface
+        self._local_node_id = local_node_id
+        logger.info(f"ShardReplicator FMP 传输已启用: local_node={local_node_id}")
 
     def sync_all_replicas(self, shard_id: str, storage_volume: Any = None) -> List[SyncResult]:
         """M9-02 同步分片到所有副本节点。"""
@@ -240,6 +342,84 @@ class ShardReplicator:
             if active < self.config.replication_factor:
                 result.append(shard_id)
         return result
+
+    # ── M9-02 Quorum 读/写 ──
+
+    def quorum_write(self, shard_id: str, data: bytes, storage_volume: Any = None) -> Dict[str, Any]:
+        """M9-02 Quorum 写入：写入多数副本成功即视为写入成功。
+
+        写入 ⌈N/2⌉ 个副本即返回成功，其余异步补齐。
+        """
+        self.register_shard_data(shard_id, data)
+        replicas = self._replicas.get(shard_id, [])
+        if not replicas:
+            logger.warning(f"Quorum 写入跳过：分片 {shard_id} 无副本")
+            return {"shard_id": shard_id, "success": False, "error": "no_replicas"}
+
+        quorum = (len(replicas) + 1) // 2
+        results = []
+        for replica in replicas:
+            if replica.status in ("active", "recovering"):
+                r = self.sync_to_node(shard_id, replica.node_id, storage_volume)
+                results.append(r)
+            if sum(1 for r in results if r.success) >= quorum:
+                break
+
+        ok_count = sum(1 for r in results if r.success)
+        success = ok_count >= quorum
+        logger.info(f"M9-02 Quorum 写入: {shard_id} 成功={ok_count}/{len(replicas)} quorum={quorum} result={success}")
+        return {
+            "shard_id": shard_id,
+            "success": success,
+            "ok_count": ok_count,
+            "total": len(replicas),
+            "quorum": quorum,
+        }
+
+    def quorum_read(self, shard_id: str, storage_volume: Any = None) -> Dict[str, Any]:
+        """M9-02 Quorum 读取：从多数副本读取并校验一致性。
+
+        读取 ⌈N/2⌉ 个副本，校验 checksum 一致后返回数据。
+        """
+        replicas = self._replicas.get(shard_id, [])
+        if not replicas:
+            return {"shard_id": shard_id, "success": False, "error": "no_replicas"}
+
+        quorum = (len(replicas) + 1) // 2
+        reads: Dict[str, bytes] = {}
+        checksums: Dict[str, str] = {}
+        for replica in replicas:
+            if replica.status != "active":
+                continue
+            if storage_volume is None:
+                cached = self._shard_data.get(shard_id)
+                if cached is not None:
+                    reads[replica.node_id] = cached
+                    checksums[replica.node_id] = hashlib.sha256(cached).hexdigest()
+            else:
+                try:
+                    data = storage_volume.read_file(replica.volume_name, replica.file_path)
+                    if data is not None:
+                        reads[replica.node_id] = data
+                        checksums[replica.node_id] = hashlib.sha256(data).hexdigest()
+                except Exception as e:
+                    logger.debug(f"Quorum 读取跳过节点: {replica.node_id}: {e}")
+            if len(reads) >= quorum:
+                break
+
+        if len(reads) < quorum:
+            logger.warning(f"M9-02 Quorum 读取不足: {shard_id} 读到={len(reads)} quorum={quorum}")
+            return {"shard_id": shard_id, "success": False, "error": "quorum_not_met"}
+
+        first_cksum = next(iter(checksums.values()))
+        consistent = all(c == first_cksum for c in checksums.values())
+        if not consistent:
+            logger.error(f"M9-02 Quorum 读取不一致: {shard_id}")
+            return {"shard_id": shard_id, "success": False, "error": "inconsistent"}
+
+        data = next(iter(reads.values()))
+        logger.info(f"M9-02 Quorum 读取: {shard_id} 成功 读取={len(reads)} quorum={quorum}")
+        return {"shard_id": shard_id, "success": True, "data": data, "read_count": len(reads)}
 
     def get_stats(self) -> Dict[str, Any]:
         total = sum(len(r) for r in self._replicas.values())

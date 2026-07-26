@@ -15,7 +15,9 @@ import asyncio
 import logging
 import os
 import platform
+import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -297,6 +299,7 @@ class NodeAgent:
                     "device_model": info.get("device_model", ""),
                     "uma_size_gb": info.get("uma_size_gb", 0.0),
                     "mlx_version": info.get("mlx_version", ""),
+                    "role": "worker",
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
                     "active_tasks": 0,
                     "max_tasks": 4,
@@ -323,9 +326,11 @@ class NodeAgent:
         self._current_task = task
         task_id = task.get("task_id", "unknown")
         task_type = task.get("type", "inference")
+        temp_dir = os.path.join(tempfile.gettempdir(), f"fusion_task_{task_id}")
         logger.info(f"执行任务: {task_id} ({task_type})")
 
         try:
+            os.makedirs(temp_dir, exist_ok=True)
             if task_type == "inference":
                 result = await self._execute_inference(task)
             elif task_type == "embedding":
@@ -337,8 +342,16 @@ class NodeAgent:
         except Exception as e:
             result = {"error": str(e)}
             logger.error(f"任务执行失败: {task_id}: {e}")
+        finally:
+            self._current_task = None
+            # M6-01 Worker 临时数据自动删除
+            try:
+                if os.path.isdir(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    logger.info(f"M6-01 清理任务临时目录: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"M6-01 清理临时目录失败: {temp_dir} - {e}")
 
-        self._current_task = None
         return result
 
     async def _execute_inference(self, task: Dict[str, Any]) -> Dict[str, Any]:

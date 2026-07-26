@@ -33,6 +33,11 @@ class StoredLog:
     task_id: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def log_level(self):
+        from fusion_multi_node.observability.observability import LogLevel
+        return LogLevel.from_str(self.level)
+
 
 @dataclass
 class DiagnosisResult:
@@ -101,7 +106,7 @@ class LogStore:
         store_dir: str = "",
         max_memory_entries: int = 10000,
         persist_to_disk: bool = True,
-        retention_seconds: float = 86400.0,
+        retention_seconds: float = 604800.0,
     ):
         self._store_dir = store_dir or str(Path.home() / ".fusion" / "logs")
         self._max_memory = max_memory_entries
@@ -134,13 +139,14 @@ class LogStore:
         self,
         node_id: str = "",
         task_id: str = "",
-        level: str = "",
+        level: Optional[str] = None,
         source: str = "",
         start_time: float = 0.0,
         end_time: float = 0.0,
         keyword: str = "",
         limit: int = 100,
     ) -> List[StoredLog]:
+        from fusion_multi_node.observability.observability import LogLevel as _LogLevel
         results = self._entries
 
         if node_id:
@@ -148,7 +154,8 @@ class LogStore:
         if task_id:
             results = [e for e in results if e.task_id == task_id]
         if level:
-            results = [e for e in results if e.level == level]
+            level_str = level.value if isinstance(level, _LogLevel) else level
+            results = [e for e in results if e.level == level_str]
         if source:
             results = [e for e in results if e.source == source]
         if start_time:

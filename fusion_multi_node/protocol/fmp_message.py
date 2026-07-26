@@ -45,6 +45,12 @@ class PayloadType(Enum):
     CONTROL = "control"
     ACK = "ack"
     NACK = "nack"
+    SHARD_SYNC = "shard_sync"
+    SHARD_ACK = "shard_ack"
+    KV_GET = "kv_get"
+    KV_GET_RESP = "kv_get_resp"
+    KV_PUT = "kv_put"
+    KV_PUT_ACK = "kv_put_ack"
 
 
 class ControlType(Enum):

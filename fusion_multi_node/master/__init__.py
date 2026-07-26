@@ -10,6 +10,7 @@ from .cluster_master import (
     StandbyMaster,
     TaskStatus,
 )
+from .task_spec import TaskSpec, TaskPriority
 from .election import (
     ElectionCandidate,
     ElectionState,
@@ -53,6 +54,8 @@ __all__ = [
     "ParallelMode",
     "StandbyMaster",
     "TaskStatus",
+    "TaskSpec",
+    "TaskPriority",
     "ElectionCandidate",
     "ElectionState",
     "MasterElection",
