@@ -6,6 +6,7 @@ from .sandbox import WorkerSandbox, SandboxConfig, SandboxExecutor
 from .data_scrubber import DataScrubber, ScrubRule
 from .data_isolation import DataIsolationPolicy
 from .crypto import FMPCrypto, MetalCryptoBackend
+from .secure_transfer import SecureTransferPipeline
 
 __all__ = [
     "NodeApprovalManager",
@@ -21,4 +22,5 @@ __all__ = [
     "DataIsolationPolicy",
     "FMPCrypto",
     "MetalCryptoBackend",
+    "SecureTransferPipeline",
 ]

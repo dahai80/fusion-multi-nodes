@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-784%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-793%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -283,6 +283,12 @@ result = await executor.execute_in_sandbox("task-1", ["python", "script.py"])
 metal = MetalCryptoBackend()
 encrypted = metal.encrypt(key, plaintext)
 decrypted = metal.decrypt(key, encrypted)
+
+# Secure transfer pipeline (AST diff + PII scrubbing)
+from fusion_multi_node.security.secure_transfer import SecureTransferPipeline
+pipeline = SecureTransferPipeline()
+transfer = pipeline.prepare_transfer(old_ast, new_ast)  # diff + scrub
+restored = pipeline.apply_transfer(base_ast, transfer)   # rebuild
 ```
 
 ### 6. Observability (`fusion_multi_node.observability`)
@@ -423,7 +429,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (784 tests)
+# Run all tests (793 tests)
 pytest tests/ -v
 
 # With coverage
@@ -526,7 +532,7 @@ pytest tests/test_new_features.py -v
 - [x] P1: SandboxExecutor (macOS sandbox-exec / Linux unshare / python-resource fallback)
 - [x] P2: Metal AES-GCM acceleration (Apple Silicon CommonCrypto bridge + auto-fallback)
 - [x] P2: CLI --transport fmp wiring (FMPServer + FMPConnectionManager)
-- [x] 784 tests, 0 ruff errors
+- [x] 793 tests, 0 ruff errors
 
 ### Future
 - [ ] Distributed MLX operator bridge (mlx.distributed API)

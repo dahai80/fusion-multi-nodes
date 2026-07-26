@@ -52,6 +52,7 @@ class PayloadType(IntEnum):
     APPROVAL_RESPONSE = 17
     DEGRADE_TASK = 18
     CLOUD_FALLBACK = 19
+    DATA_SYNC = 24
 
 
 class ControlCode(IntEnum):
