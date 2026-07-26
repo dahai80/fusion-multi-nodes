@@ -6,5 +6,5 @@ MCP gateway, cluster observability, master election, cloud fallback,
 task auto-degradation, security sandbox, autoscaler, and storage volumes.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.1"
 __app_name__ = "Fusion-Multi-Node"
