@@ -42,43 +42,43 @@
 
 ### 1.3 P1 功能缺口 (6项)
 
-| # | 缺口 | 说明 |
-|---|------|------|
-| 1 | InspectorPanel 缺 `.node(id:)` 和 `.clusterTask(id:)` | 点击节点/任务时右侧面板无内容 |
-| 2 | NodeActionsView 无导航路由 | AppState.Module 枚举缺少对应 case |
-| 3 | 提交任务表单缺失 | Inspector 显示 "Custom content" 而非实际表单 |
-| 4 | 任务进度可视化缺失 | Engine 方法存在但无 UI |
-| 5 | 任务时间线可视化缺失 | Engine 方法存在但无 UI |
-| 6 | 任务迁移 UI 缺失 | Engine 方法存在但无 UI |
+| # | 缺口 | 说明 | 状态 |
+|---|------|------|------|
+| 1 | InspectorPanel 缺 `.node(id:)` 和 `.clusterTask(id:)` | 点击节点/任务时右侧面板无内容 | ✅ 已修复 |
+| 2 | NodeActionsView 无导航路由 | AppState.Module 枚举缺少对应 case | ✅ 已修复 |
+| 3 | 提交任务表单缺失 | Inspector 显示 "Custom content" 而非实际表单 | ✅ 已修复 (SubmitTaskView) |
+| 4 | 任务进度可视化缺失 | Engine 方法存在但无 UI | ✅ 已修复 (TaskProgressView) |
+| 5 | 任务时间线可视化缺失 | Engine 方法存在但无 UI | ✅ 已修复 (TaskProgressView) |
+| 6 | 任务迁移 UI 缺失 | Engine 方法存在但无 UI | ⚠️ 待实现 |
 
 ### 1.4 P2 API 覆盖缺口
 
 **Master Server 未被 GUI 消费的端点 (10个):**
 
-| 端点 | 功能 | 建议面板 |
-|------|------|----------|
-| `GET /api/health` | 健康检查 | 连接状态指示器 (已用于 checkHealth) |
-| `POST /api/join` | 节点加入 | 节点管理面板 |
-| `POST /api/routing/strategy` | 路由策略 | 路由策略面板 |
-| `GET /api/routing/summary` | 负载概要 | 集群概览 |
-| `GET /api/nodes/{id}` | 单节点详情 | Inspector 面板 |
-| `GET /api/tasks/{id}` | 单任务详情 | Inspector 面板 |
-| `POST /api/kv/register` | KV 注册 | KV 缓存面板 |
-| `GET /api/kv/find/{model}` | KV 查找 | KV 缓存面板 |
-| `GET /api/v1/observability/logs/export` | 日志导出 | 告警中心 |
-| `GET /api/v1/nodes/{id}/metrics` | 节点指标 | Inspector 面板 |
+| 端点 | 功能 | 建议面板 | 状态 |
+|------|------|----------|------|
+| `GET /api/health` | 健康检查 | 连接状态指示器 | ✅ 已用于 checkHealth |
+| `POST /api/join` | 节点加入 | 节点管理面板 | ✅ NodeActionsView |
+| `POST /api/routing/strategy` | 路由策略 | 路由策略面板 | ✅ RoutingStrategyView |
+| `GET /api/routing/summary` | 负载概要 | 路由策略面板 | ✅ RoutingStrategyView |
+| `GET /api/nodes/{id}` | 单节点详情 | Inspector 面板 | ⚠️ 待实现 |
+| `GET /api/tasks/{id}` | 单任务详情 | Inspector 面板 | ⚠️ 待实现 |
+| `POST /api/kv/register` | KV 注册 | KV 缓存面板 | ⚠️ 待实现 |
+| `GET /api/kv/find/{model}` | KV 查找 | KV 缓存面板 | ✅ KVCacheView |
+| `GET /api/v1/observability/logs/export` | 日志导出 | 告警中心 | ⚠️ 待实现 |
+| `GET /api/v1/nodes/{id}/metrics` | 节点指标 | Inspector 面板 | ✅ 已用于 fetchNodeMetrics |
 
-**Agent Server 完全未集成 (7个端点):**
+**Agent Server 集成状态 (7个端点):**
 
-| 端点 | 功能 | 说明 |
-|------|------|------|
-| `GET /api/health` | Agent 健康检查 | 需连接 Agent 9755 端口 |
-| `POST /api/execute` | 推理执行 | 高危操作，建议仅监控 |
-| `POST /api/kv/lookup` | KV 查找 | KV 面板 |
-| `POST /api/kv/transfer` | KV 迁移 | KV 面板 |
-| `POST /api/kv/warm` | KV 预热 | KV 面板 |
-| `GET /api/kv/stats` | KV 统计 | KV 面板 |
-| `GET /api/hardware` | 硬件信息 | Inspector 面板 |
+| 端点 | 功能 | 说明 | 状态 |
+|------|------|------|------|
+| `GET /api/health` | Agent 健康检查 | 需连接 Agent 9755 端口 | ⚠️ 待实现 |
+| `POST /api/execute` | 推理执行 | 高危操作，建议仅监控 | ❌ 不暴露 |
+| `POST /api/kv/lookup` | KV 查找 | KV 面板 | ⚠️ 待实现 |
+| `POST /api/kv/transfer` | KV 迁移 | KV 面板 | ⚠️ 待实现 |
+| `POST /api/kv/warm` | KV 预热 | KV 面板 | ⚠️ 待实现 |
+| `GET /api/kv/stats` | KV 统计 | KV 面板 | ✅ KVCacheView |
+| `GET /api/hardware` | 硬件信息 | KV 面板 | ✅ KVCacheView |
 
 ---
 
