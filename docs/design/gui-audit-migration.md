@@ -49,7 +49,7 @@
 | 3 | 提交任务表单缺失 | Inspector 显示 "Custom content" 而非实际表单 | ✅ 已修复 (SubmitTaskView) |
 | 4 | 任务进度可视化缺失 | Engine 方法存在但无 UI | ✅ 已修复 (TaskProgressView) |
 | 5 | 任务时间线可视化缺失 | Engine 方法存在但无 UI | ✅ 已修复 (TaskProgressView) |
-| 6 | 任务迁移 UI 缺失 | Engine 方法存在但无 UI | ⚠️ 待实现 |
+| 6 | 任务迁移 UI 缺失 | Engine 方法存在但无 UI | ✅ 已修复 (TaskMonitorView migration sheet) |
 
 ### 1.4 P2 API 覆盖缺口
 
@@ -65,7 +65,7 @@
 | `GET /api/tasks/{id}` | 单任务详情 | Inspector 面板 | ⚠️ 待实现 |
 | `POST /api/kv/register` | KV 注册 | KV 缓存面板 | ⚠️ 待实现 |
 | `GET /api/kv/find/{model}` | KV 查找 | KV 缓存面板 | ✅ KVCacheView |
-| `GET /api/v1/observability/logs/export` | 日志导出 | 告警中心 | ⚠️ 待实现 |
+| `GET /api/v1/observability/logs/export` | 日志导出 | 告警中心 | ✅ AlertCenterView export button |
 | `GET /api/v1/nodes/{id}/metrics` | 节点指标 | Inspector 面板 | ✅ 已用于 fetchNodeMetrics |
 
 **Agent Server 集成状态 (7个端点):**
@@ -113,26 +113,26 @@
 
 ## 三、落地计划
 
-### Phase 1: P1 功能补齐 (当前)
+### Phase 1: P1 功能补齐 ✅ 全部完成
 
-| 任务 | 文件 | 预计工时 |
-|------|------|----------|
-| 修复 InspectorPanel 支持 `.node(id:)` / `.clusterTask(id:)` | InspectorPanel.swift | 2h |
-| 路由 NodeActionsView (新增 Module 枚举) | AppState.swift + ModuleDetailView.swift | 0.5h |
-| 实现提交任务表单 (Inspector 内) | 新建 SubmitTaskInspectorView.swift | 2h |
-| 实现任务进度条组件 | 新建 TaskProgressView.swift | 1.5h |
-| 实现任务时间线组件 | 新建 TaskTimelineView.swift | 2h |
-| 实现任务迁移对话框 | TaskMonitorView.swift 修改 | 1h |
-| 添加日志导出按钮 | AlertCenterView.swift 修改 | 0.5h |
+| 任务 | 文件 | 状态 |
+|------|------|------|
+| 修复 InspectorPanel 支持 `.node(id:)` / `.clusterTask(id:)` | InspectorPanel.swift | ✅ |
+| 路由 NodeActionsView (新增 Module 枚举) | AppState.swift + ModuleDetailView.swift | ✅ |
+| 实现提交任务表单 | SubmitTaskView.swift | ✅ |
+| 实现任务进度条+时间线组件 | TaskProgressView.swift | ✅ |
+| 实现任务迁移对话框 | TaskMonitorView.swift | ✅ |
+| 添加日志导出按钮 | AlertCenterView.swift | ✅ |
+| Inspector 增强: 节点详细指标 + 任务时间戳 | InspectorPanel.swift | ✅ |
 
-### Phase 2: P2 新增面板
+### Phase 2: P2 新增面板 ✅ 已完成
 
-| 任务 | 新文件 | 预计工时 |
-|------|--------|----------|
-| KV 缓存管理面板 | KVCachesView.swift | 4h |
-| 路由策略面板 | RoutingStrategyView.swift | 2h |
-| 节点加入对话框 | NodeJoinView.swift | 1.5h |
-| Agent 服务器集成 | MultiNodeEngine.swift 扩展 | 3h |
+| 任务 | 新文件 | 状态 |
+|------|--------|------|
+| KV 缓存管理面板 | KVCacheView.swift | ✅ |
+| 路由策略面板 | RoutingStrategyView.swift | ✅ |
+| 服务面板 (WebView 嵌入) | ServiceWebView.swift | ✅ |
+| Agent 服务器集成 | MultiNodeEngine.swift 扩展 | ✅ |
 
 ### Phase 3: 外部 GUI 迁移
 
