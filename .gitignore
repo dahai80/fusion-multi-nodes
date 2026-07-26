@@ -32,3 +32,6 @@ htmlcov/
 .claude/
 .remember/
 *.log
+CLAUDE.md
+audit_multi_node.md
+node-audit.md
