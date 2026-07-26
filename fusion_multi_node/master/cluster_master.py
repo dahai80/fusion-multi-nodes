@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from fusion_multi_node.master.load_metrics import LoadMetrics, LoadRouter, RoutingStrategy
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +58,8 @@ class NodeInfo:
     cpu_cores: int = 0
     mlx_version: str = ""
     gpu_cores: int = 0
+    device_model: str = ""
+    uma_size_gb: float = 0.0
     status: NodeStatus = NodeStatus.OFFLINE
     last_heartbeat: float = 0.0
     tags: List[str] = field(default_factory=list)
@@ -88,6 +92,17 @@ class ClusterTask:
     timeout_seconds: float = 300.0
     error: str = ""
     user: str = ""
+    # M3-05 TaskSpec 结构化能力匹配
+    required_capability: str = ""
+    preferred_node_id: str = ""
+    priority: int = 0
+    # M4-04 任务自动降级
+    degraded_from_model: str = ""
+    degradation_count: int = 0
+    max_degradations: int = 2
+    # M5-04 任务全生命周期取消
+    sub_tasks: List[str] = field(default_factory=list)
+    cancel_reason: str = ""
 
 
 @dataclass
@@ -127,6 +142,9 @@ class ClusterMaster:
         self.tasks: Dict[str, ClusterTask] = {}
         self.kv_cache: Dict[str, KVCacheEntry] = {}
 
+        # M4-01 负载感知路由
+        self.load_router = LoadRouter(strategy=RoutingStrategy.BALANCED)
+
         # 内部状态
         self._running = False
         self._server: Optional[asyncio.AbstractServer] = None
@@ -146,12 +164,15 @@ class ClusterMaster:
             info.status = NodeStatus.ONLINE
             info.last_heartbeat = time.time()
             self.nodes[info.node_id] = info
+            # M4-01 同步负载指标到 LoadRouter
+            self._sync_node_metrics(info)
             logger.info(f"节点注册: {info.hostname} ({info.ip_address}:{info.port})")
 
     async def unregister_node(self, node_id: str) -> None:
         """注销节点。"""
         async with self._lock:
             self.nodes.pop(node_id, None)
+            self.load_router.remove_node(node_id)
             logger.info(f"节点离线: {node_id}")
 
     async def get_online_nodes(self) -> List[NodeInfo]:
@@ -180,6 +201,33 @@ class ClusterMaster:
                 return False
             return True
 
+    def _sync_node_metrics(self, info: NodeInfo) -> None:
+        """从 NodeInfo 同步基础指标到 LoadRouter。"""
+        uma_ratio = 1.0 - (info.available_memory_gb / max(info.total_memory_gb, 1))
+        metrics = LoadMetrics(
+            uma_used_ratio=uma_ratio,
+            cpu_percent=0.0,
+            metal_util=0.0,
+            task_queue_len=info.active_tasks,
+            net_rtt_ms=info.network_rtt_ms,
+            node_id=info.node_id,
+        )
+        self.load_router.update_metrics(info.node_id, metrics)
+
+    async def update_node_load(self, node_id: str, metrics: LoadMetrics) -> None:
+        """更新节点负载指标（由 Worker 上报调用）。"""
+        async with self._lock:
+            node = self.nodes.get(node_id)
+            if not node:
+                logger.warning(f"更新负载: 节点不存在 {node_id}")
+                return
+            self.load_router.update_metrics(node_id, metrics)
+            # 回写关键字段到 NodeInfo
+            node.available_memory_gb = node.total_memory_gb * (1.0 - metrics.uma_used_ratio)
+            node.active_tasks = metrics.task_queue_len
+            node.network_rtt_ms = metrics.net_rtt_ms
+            logger.debug(f"节点负载更新: {node_id} uma={metrics.uma_used_ratio:.2f}")
+
     # ── 资源调度 ──
 
     async def select_nodes(
@@ -187,12 +235,41 @@ class ClusterMaster:
         mode: ParallelMode,
         required_memory_gb: float = 0.0,
         count: int = 1,
+        required_capability: str = "",
+        preferred_node_id: str = "",
     ) -> List[NodeInfo]:
-        """根据策略选择最优节点。"""
+        """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。"""
         candidates = await self.get_online_nodes()
+
+        # M3-05 capability 过滤
+        if required_capability:
+            candidates = [n for n in candidates if required_capability in n.tags]
 
         if required_memory_gb > 0:
             candidates = [n for n in candidates if n.available_memory_gb >= required_memory_gb]
+
+        candidate_ids = [n.node_id for n in candidates]
+        required_uma = required_memory_gb / max(sum(n.total_memory_gb for n in candidates) or 1, 1)
+
+        # M4-01 优先使用 LoadRouter 结构化评分
+        results = self.load_router.select_n(
+            candidate_ids=candidate_ids,
+            count=count,
+            preferred_node_id=preferred_node_id,
+            required_uma_ratio=required_uma,
+        )
+
+        if results:
+            id_to_node = {n.node_id: n for n in candidates}
+            selected = [id_to_node[r.node_id] for r in results if r.node_id in id_to_node]
+            if selected:
+                return selected
+
+        # Fallback: 无 LoadMetrics 时退回旧逻辑
+        if preferred_node_id:
+            preferred = [n for n in candidates if n.node_id == preferred_node_id]
+            others = [n for n in candidates if n.node_id != preferred_node_id]
+            candidates = preferred + others
 
         if mode == ParallelMode.PIPELINE:
             candidates.sort(key=lambda n: n.score, reverse=True)
@@ -217,7 +294,11 @@ class ClusterMaster:
                     node.active_tasks = max(0, node.active_tasks - 1)
 
     async def assign_task(self, task: ClusterTask) -> bool:
-        """分配任务到节点 — 幂等: 已 RUNNING 的任务直接返回 True。"""
+        """分配任务到节点 — 幂等: 已 RUNNING 的任务直接返回 True。
+
+        M4-02: 轻量级任务/≤0.5B 模型强制本地执行。
+        M4-03: 大模型(≥13B) 使用 VRAM 优先策略。
+        """
         async with self._lock:
             existing = self.tasks.get(task.task_id)
             if existing and existing.status == TaskStatus.RUNNING:
@@ -225,7 +306,40 @@ class ClusterMaster:
                 return True
 
         required_mem = self._estimate_memory(task)
-        nodes = await self.select_nodes(task.mode, required_memory_gb=required_mem, count=len(task.model_shards) or 1)
+
+        # M4-02 本地强制门控: 轻量级任务强制本地
+        if self._is_local_force(task, required_mem):
+            preferred = task.preferred_node_id
+            if preferred and preferred in self.nodes:
+                node = self.nodes[preferred]
+                if node.status == NodeStatus.ONLINE and node.available_memory_gb >= required_mem:
+                    async with self._lock:
+                        task.assigned_nodes = [preferred]
+                        task.status = TaskStatus.RUNNING
+                        task.started_at = time.time()
+                        self.tasks[task.task_id] = task
+                        node.active_tasks += 1
+                    logger.info(f"M4-02 本地强制: {task.name} → {preferred} (轻量级任务)")
+                    return True
+            logger.info(f"M4-02 本地强制: {task.name} 首选节点不可用，退回普通调度")
+
+        # M4-03 VRAM 优先: 大模型切换路由策略
+        original_strategy = self.load_router.strategy
+        if self._is_vram_first(task):
+            self.load_router.set_strategy(RoutingStrategy.VRAM_FIRST)
+            logger.debug(f"M4-03 VRAM优先策略: {task.name} (model={task.model_name})")
+
+        try:
+            nodes = await self.select_nodes(
+                task.mode,
+                required_memory_gb=required_mem,
+                count=len(task.model_shards) or 1,
+                required_capability=task.required_capability,
+                preferred_node_id=task.preferred_node_id,
+            )
+        finally:
+            if self._is_vram_first(task) and self.load_router.strategy != original_strategy:
+                self.load_router.set_strategy(original_strategy)
 
         if len(nodes) < (len(task.model_shards) or 1):
             logger.error(f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)}")
@@ -279,6 +393,102 @@ class ClusterMaster:
             self._enqueue_retry(task)
         return ok
 
+    # M5-04 任务全生命周期取消
+    async def cancel_task(self, task_id: str, reason: str = "", cancel_sub_tasks: bool = True) -> bool:
+        """取消任务及其子任务。"""
+        async with self._lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                logger.warning(f"取消任务未找到: {task_id}")
+                return False
+            if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                logger.warning(f"任务无法取消 (状态: {task.status.value}): {task_id}")
+                return False
+
+            task.cancel_reason = reason or "用户取消"
+            for nid in task.assigned_nodes:
+                node = self.nodes.get(nid)
+                if node:
+                    node.active_tasks = max(0, node.active_tasks - 1)
+            task.assigned_nodes = []
+
+            # 递归取消子任务
+            cancelled_sub = []
+            if cancel_sub_tasks and task.sub_tasks:
+                for sub_id in task.sub_tasks:
+                    sub = self.tasks.get(sub_id)
+                    if sub and sub.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                        for nid in sub.assigned_nodes:
+                            node = self.nodes.get(nid)
+                            if node:
+                                node.active_tasks = max(0, node.active_tasks - 1)
+                        sub.assigned_nodes = []
+                        sub.status = TaskStatus.FAILED
+                        sub.cancel_reason = f"父任务取消: {task_id}"
+                        sub.error = sub.cancel_reason
+                        cancelled_sub.append(sub_id)
+
+            task.status = TaskStatus.FAILED
+            task.error = task.cancel_reason
+
+        logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
+        return True
+
+    # M4-04 任务自动降级
+    MODEL_DEGRADATION_CHAIN = {
+        "70b": "32b",
+        "32b": "13b",
+        "13b": "8b",
+        "8b": "3b",
+        "3b": "1b",
+    }
+
+    async def degrade_task(self, task_id: str) -> bool:
+        """将任务降级到更小的模型并重新分配。"""
+        async with self._lock:
+            task = self.tasks.get(task_id)
+            if not task or task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING, TaskStatus.FAILED):
+                return False
+
+            if task.degradation_count >= task.max_degradations:
+                logger.error(f"任务降级次数超限: {task_id} ({task.degradation_count})")
+                return False
+
+            current_size = self._extract_model_size(task.model_name)
+            next_size = self.MODEL_DEGRADATION_CHAIN.get(current_size)
+            if not next_size:
+                logger.warning(f"任务无法降级，无更小模型: {task.model_name}")
+                return False
+
+            # 释放原节点
+            for nid in task.assigned_nodes:
+                node = self.nodes.get(nid)
+                if node:
+                    node.active_tasks = max(0, node.active_tasks - 1)
+            task.assigned_nodes = []
+
+            # 降级模型
+            old_model = task.model_name
+            task.model_name = task.model_name.replace(current_size, next_size)
+            task.degraded_from_model = old_model
+            task.degradation_count += 1
+            task.status = TaskStatus.PENDING
+            task.error = ""
+
+        logger.info(f"任务降级: {task_id} {old_model} → {task.model_name} (第{task.degradation_count}次)")
+
+        ok = await self.assign_task(task)
+        if not ok:
+            self._enqueue_retry(task)
+        return ok
+
+    def _extract_model_size(self, model_name: str) -> str:
+        name_lower = model_name.lower()
+        for size_key in self.MODEL_DEGRADATION_CHAIN:
+            if size_key in name_lower:
+                return size_key
+        return ""
+
     async def check_timeouts(self) -> List[str]:
         """检查并处理超时任务。"""
         now = time.time()
@@ -300,9 +510,38 @@ class ClusterMaster:
         "8b": 8.0,
         "3b": 6.0,
         "1b": 4.0,
+        "0.5b": 2.0,
     }
     _BASE_MEMORY_GB = 2.0
     _DEFAULT_MODEL_MEMORY_GB = 4.0
+
+    # M4-02 轻量级模型阈值 (≤0.5B 强制本地)
+    _LOCAL_FORCE_MODEL_SIZES = {"0.5b", "1b"}
+    # M4-02 轻量级任务内存阈值 (GB)
+    _LOCAL_FORCE_MEMORY_GB = 4.0
+
+    # M4-03 大模型阈值 (≥13B 使用 VRAM 优先策略)
+    _VRAM_FIRST_MODEL_SIZES = {"70b", "32b", "13b"}
+
+    def _is_local_force(self, task: ClusterTask, required_mem: float) -> bool:
+        """M4-02 判断是否强制本地执行。"""
+        if not task.model_name:
+            return required_mem <= self._LOCAL_FORCE_MEMORY_GB
+        name_lower = task.model_name.lower()
+        for size in self._LOCAL_FORCE_MODEL_SIZES:
+            if size in name_lower:
+                return True
+        return required_mem <= self._LOCAL_FORCE_MEMORY_GB
+
+    def _is_vram_first(self, task: ClusterTask) -> bool:
+        """M4-03 判断是否使用 VRAM 优先策略。"""
+        if not task.model_name:
+            return False
+        name_lower = task.model_name.lower()
+        for size in self._VRAM_FIRST_MODEL_SIZES:
+            if size in name_lower:
+                return True
+        return False
 
     def _estimate_memory(self, task: ClusterTask) -> float:
         """估算任务所需内存。"""
@@ -340,6 +579,28 @@ class ClusterMaster:
                 if now - entry.created_at > entry.ttl_seconds:
                     self.kv_cache.pop(cid, None)
         return None
+
+    async def sync_kv_cache(self, cache_id: str, model_name: str, source_node_id: str, size_mb: float) -> bool:
+        """通过 FMP 协议同步 KV 缓存元数据到集群。"""
+        from fusion_multi_node.protocol import KVCacheSyncMessage
+
+        sync_msg = KVCacheSyncMessage(
+            cache_id=cache_id,
+            model_name=model_name,
+            source_node_id=source_node_id,
+            size_mb=size_mb,
+            protocol="fmp",
+        )
+        logger.info(f"M9-04 FMP KV 缓存同步: cache_id={cache_id} model={model_name} "
+                    f"source={source_node_id} size={size_mb:.1f}MB protocol={sync_msg.protocol}")
+
+        async with self._lock:
+            entry = self.kv_cache.get(cache_id)
+            if not entry:
+                logger.warning(f"M9-04 KV 缓存同步: cache_id={cache_id} 未注册，跳过同步")
+                return False
+
+        return True
 
     # ── 生命周期 ──
 
@@ -384,6 +645,8 @@ class ClusterMaster:
                     "role": "master",
                     "discovery_port": str(self.discovery_port),
                     "host": self.host,
+                    "device_model": "",
+                    "uma_size_gb": "0.0",
                 },
             )
             if ok:
@@ -462,7 +725,7 @@ class ClusterMaster:
         """获取集群统计信息。"""
         online_nodes = await self.get_online_nodes()
         async with self._lock:
-            return {
+            stats = {
                 "total_nodes": len(self.nodes),
                 "online_nodes": len(online_nodes),
                 "total_tasks": len(self.tasks),
@@ -473,6 +736,8 @@ class ClusterMaster:
                 "total_memory_gb": sum(n.total_memory_gb for n in online_nodes),
                 "available_memory_gb": sum(n.available_memory_gb for n in online_nodes),
             }
+            stats["load_summary"] = self.load_router.get_cluster_load_summary()
+            return stats
 
 
 # ── HA Standby ──
@@ -540,7 +805,7 @@ class StandbyMaster:
         """监控主节点心跳，超时后接管。"""
         try:
             while self._running:
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 now = time.time()
                 if self._last_master_heartbeat == 0.0:
                     continue

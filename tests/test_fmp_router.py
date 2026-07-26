@@ -1,6 +1,5 @@
 """FMP Router 测试。"""
 
-import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,11 +7,7 @@ import pytest
 
 from fusion_multi_node.protocol.fmp_message import (
     FMPMessage,
-    FMPLinkLayer,
-    FMPBusinessLayer,
-    FMPControlLayer,
     PayloadType,
-    ControlType,
     MAX_HOP_COUNT,
     MAX_ROUNDS,
 )

@@ -293,6 +293,34 @@ class FMPMessage:
         return cls.from_dict(d)
 
 
+@dataclass
+class KVCacheSyncMessage:
+    cache_id: str
+    model_name: str
+    source_node_id: str
+    size_mb: float
+    protocol: str = "fmp"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "cache_id": self.cache_id,
+            "model_name": self.model_name,
+            "source_node_id": self.source_node_id,
+            "size_mb": self.size_mb,
+            "protocol": self.protocol,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> KVCacheSyncMessage:
+        return cls(
+            cache_id=d["cache_id"],
+            model_name=d["model_name"],
+            source_node_id=d["source_node_id"],
+            size_mb=d["size_mb"],
+            protocol=d.get("protocol", "fmp"),
+        )
+
+
 class FMPCrypto:
     """AES-GCM 加密器。"""
 

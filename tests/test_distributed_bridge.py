@@ -1,6 +1,5 @@
 """Distributed MLX Bridge 测试。"""
 
-import asyncio
 
 import pytest
 import httpx

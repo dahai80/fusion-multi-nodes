@@ -23,7 +23,7 @@ class ClusterConfig:
             "agent_port": 9755,
             "mcp_port": 9756,
             "heartbeat_timeout": 15.0,
-            "heartbeat_interval": 5.0,
+            "heartbeat_interval": 3.0,
             "report_interval": 15.0,
         },
         "parallel": {
@@ -78,10 +78,16 @@ class ClusterConfig:
         """保存配置。"""
         path = Path(self.config_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
         with open(path, "w") as f:
             json.dump(self._data, f, indent=2, ensure_ascii=False)
-        os.chmod(path, 0o600)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置项。"""
@@ -123,6 +129,6 @@ class ClusterConfig:
             agent_port=self.get("cluster.agent_port"),
             fusion_desk_port=self.get("mlx.fusion_desk_port"),
             fusion_mlx_port=self.get("mlx.fusion_mlx_port"),
-            heartbeat_interval=float(self.get("cluster.heartbeat_interval", 5.0)),
+            heartbeat_interval=float(self.get("cluster.heartbeat_interval", 3.0)),
             report_interval=float(self.get("cluster.report_interval", 15.0)),
         )

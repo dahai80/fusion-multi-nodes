@@ -5,12 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.4.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-585%20passed-brightgreen" alt="Tests">
-  <img src="https://img.shields.io/badge/coverage-96%25-brightgreen" alt="Coverage">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
+  <img src="https://img.shields.io/badge/tests-765%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -26,17 +25,20 @@
 | **Pipeline Parallelism** | Split large models (70B+) across multiple Macs, each handling a subset of layers | Run超大本地模型 |
 | **Data Parallelism** | Load the same model on multiple Macs, distribute batch requests for higher throughput | High-throughput batch inference |
 
-### Seven Core Modules
+### Core Modules
 
-| Module | Responsibility | Coverage |
-|--------|---------------|----------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance | 95% |
-| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery | 90% |
-| **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, service registration/browsing | 86% |
-| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker | 95% |
-| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing | 97% |
-| **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration | 100% |
-| **Cluster Observability** | Metrics, logs, alerts, cluster health dashboard | 100% |
+| Module | Responsibility |
+|--------|---------------|
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, master election, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync |
+| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery |
+| **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
+| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count |
+| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing |
+| **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration |
+| **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, data scrubbing |
+| **Observability** | Metrics, logs, alerts, log store & export, intelligent fault diagnosis |
+| **Autoscaler** | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance |
+| **Storage Volumes** | Volume abstraction, shard replication, checkpoint persistence, capacity monitoring, LRU eviction, shard distribution |
 
 ### Architecture
 
@@ -45,7 +47,8 @@
 │                    Claude Code / API / fusion-desk UI         │
 │                           ↓                                  │
 │              fusion-multi-node Cluster Master                 │
-│     (Auto-discovery, Scheduler, KV Pool, Fault Tolerance)     │
+│  (Discovery, Scheduler, KV Pool, Election, Autoscaler,       │
+│   Cloud Fallback, Degradation, Security, Observability)      │
 │                           ↓                                  │
 │     ┌──────────────┬──────────────┬──────────────┐           │
 │     │  Node Agent   │  Node Agent  │  Node Agent  │           │
@@ -123,69 +126,11 @@ fusion-multi-node kv stats/warm                # KV cache management
 
 ---
 
-## 📖 Command Reference
-
-### Global Options
-
-| Option | Description |
-|--------|-------------|
-| `--verbose`, `-v` | Verbose debug output |
-| `--version` | Show version and exit |
-
-### Cluster Management
-
-| Command | Description |
-|---------|-------------|
-| `cluster start --mode master` | Start Cluster Master (port 9753) |
-| `cluster start --mode agent` | Start Node Agent (port 9755) |
-| `cluster start --mode both` | Start both Master and Agent |
-| `cluster stop` | Stop all cluster services |
-| `cluster status` | Show cluster summary |
-
-### Node Management
-
-| Command | Description |
-|---------|-------------|
-| `node list` | List all registered nodes |
-| `node list --online` | Show only online nodes |
-| `node info <node_id>` | Show detailed node info |
-| `node start --role master` | Start as master node |
-| `node start --role agent` | Start as agent node |
-| `node discover` | mDNS discover LAN nodes |
-
-### Task Management
-
-| Command | Description |
-|---------|-------------|
-| `task submit -n <name> -m <model> --mode pipeline` | Submit pipeline task |
-| `task submit -n <name> -m <model> --mode data` | Submit data-parallel task |
-| `task list` | List all tasks |
-| `task cancel <task_id>` | Cancel a task |
-
-### Configuration
-
-| Command | Description |
-|---------|-------------|
-| `config list` | Show all configuration |
-| `config get <key>` | Get a config value |
-| `config set <key> <value>` | Set a config value |
-
-### Network & Compression
-
-| Command | Description |
-|---------|-------------|
-| `network detect` | Detect network topology and link types |
-| `caveman test [data]` | Test Caveman compression |
-| `kv stats` | Show KV cache statistics |
-| `kv warm --prompt <text> --nodes <id>` | Warm KV cache |
-
----
-
 ## 🏗️ Module Architecture
 
 ### 1. Cluster Master (`fusion_multi_node.master`)
 
-The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache.
+The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache, master election, cloud fallback, task auto-degradation.
 
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
@@ -196,12 +141,40 @@ node = NodeInfo(node_id="node_1", hostname="mac-studio-1", ip_address="10.0.0.1"
                 port=9755, total_memory_gb=64.0, available_memory_gb=48.0)
 master.register_node(node)
 
-task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA)
+task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA,
+                   required_capability="inference", preferred_node_id="node_1", priority=5)
 master.assign_task(task)
+await master.cancel_task("task_1", reason="user request", cancel_sub_tasks=True)
+await master.degrade_task("task_1")  # 70b→32b→13b→8b→3b→1b
 master.complete_task("task_1")
 ```
 
-**Key capabilities**: Score-based node selection, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT), migration, KV cache pool, heartbeat timeout.
+**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize), heartbeat timeout.
+
+### Master Election (`fusion_multi_node.master.election`)
+
+Raft-simplified leader election with priority-based voting:
+
+```python
+from fusion_multi_node.master.election import MasterElection, ElectionState
+
+election = MasterElection(node_id="node-1", priority=5, known_nodes=["node-2", "node-3"])
+await election.start()
+resp = await election.handle_vote_request(req)
+await election.receive_heartbeat("leader-id", term=2)
+```
+
+### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`)
+
+OpenAI/Anthropic fallback with daily cost limits:
+
+```python
+from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
+
+client = CloudFallbackClient(config=CloudConfig(provider="openai", api_key="sk-...", max_cost_per_day=10.0))
+result = await client.chat(messages=[{"role": "user", "content": "Hello"}])
+usage = client.get_usage()  # total_requests, daily_cost, etc.
+```
 
 ### 2. Node Agent (`fusion_multi_node.agent`)
 
@@ -220,21 +193,28 @@ result = await agent.execute_task({"task_id": "t1", "type": "inference", "model"
 
 ### 3. mDNS Discovery (`fusion_multi_node.discovery`)
 
-Zero-config Bonjour/mDNS node discovery. Master registers; Agents browse.
+Zero-config Bonjour/mDNS node discovery with manual IP join fallback.
 
 ```python
 from fusion_multi_node.discovery import MDNSDiscovery
+from fusion_multi_node.discovery.manual_join import ManualJoinClient, ManualJoinManager
 
+# mDNS auto-discovery
 mdns = MDNSDiscovery(node_id="fusion-master")
 mdns.register(port=9753, properties={"role": "master"})
-
 master = await mdns.find_master_async(timeout=5.0)
-mdns.unregister()
+
+# Manual IP join (mDNS fallback)
+client = ManualJoinClient()
+resp = await client.join(master_host="10.0.0.1", master_port=9753, node_id="node-1")
+
+mgr = ManualJoinManager(cluster_secret="my-secret", auto_approve=True)
+result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": "my-secret"})
 ```
 
 ### 4. FMP Protocol (`fusion_multi_node.protocol`)
 
-Three-layer binary protocol with AES-GCM encryption and circuit breaker.
+Three-layer binary protocol with AES-GCM encryption, circuit breaker, and hop_count broadcast limit.
 
 ```python
 from fusion_multi_node.protocol import (
@@ -258,29 +238,112 @@ if cb.allow_request():
 
 **Three layers**: LinkLayer (routing, hop_count), BusinessLayer (payload, rounds), ControlLayer (heartbeat, ACK, flow control).
 
-### 5. Distributed MLX Bridge (`fusion_multi_node.distributed_mlx`)
+### 5. Security (`fusion_multi_node.security`)
 
-Three sub-modules for distributed inference:
+Node approval, Master/Worker permission isolation, Worker sandbox, data scrubbing.
 
 ```python
-from fusion_multi_node.distributed_mlx import DistributedMLXBridge, CavemanManager, KVSharingManager
+from fusion_multi_node.security.permission import PermissionManager, NodeRole, Permission
+from fusion_multi_node.security.node_approval import NodeApprovalManager
+from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig
+from fusion_multi_node.security.data_scrubber import DataScrubber
 
-# Model sharding & pipeline
-bridge = DistributedMLXBridge()
-shards = await bridge.shard_model("llama-70b", num_shards=4)
-result = await bridge.pipeline_inference("llama-70b", "What is AI?", ["n1", "n2", "n3", "n4"])
+# Permission isolation
+pm = PermissionManager()
+pm.assign_role("master-1", NodeRole.MASTER)
+pm.assign_role("worker-1", NodeRole.WORKER)
+pm.has_permission("worker-1", Permission.TASK_EXECUTE)  # True
+pm.has_permission("worker-1", Permission.TASK_SUBMIT)    # False
+pm.check_path_access("worker-1", "/api/execute", "POST") # True
 
-# Caveman compression (40-60% bandwidth savings)
-manager = CavemanManager()
-compressed, method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
+# Node approval
+mgr = NodeApprovalManager(auto_approve_patterns=["192.168."])
+req = mgr.request_join(node_id="n1", hostname="mac-1", ip_address="192.168.1.10", port=9755)
+mgr.approve("n1", approved_by="admin")
 
-# KV cache sharing
-kv = KVSharingManager(max_local_cache_mb=4096.0)
-kv.store_local(entry)
-found = kv.lookup_local("qwen", "abc123")
+# Worker sandbox
+sandbox = WorkerSandbox(config=SandboxConfig(
+    allowed_paths=["/tmp", "/data"],
+    allowed_network_hosts=["api.openai.com"],
+))
+sandbox.check_path_access("/tmp/out", write=True)        # True
+sandbox.check_network_access("api.openai.com")            # True
+sandbox.filter_environment({"HOME": "/u", "SECRET": "x"}) # SECRET removed
+
+# Data scrubbing (phone, email, API key, ID card, etc.)
+scrubber = DataScrubber()
+text, hits = scrubber.scrub_text("Call 13912345678, key=sk-abc123...")
 ```
 
-### 6. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
+### 6. Observability (`fusion_multi_node.observability`)
+
+Metrics, logs, alerts, log store with export, intelligent fault diagnosis.
+
+```python
+from fusion_multi_node.observability import ClusterObservability, LogEntry
+from fusion_multi_node.observability.log_store import LogStore, StoredLog, FaultDiagnoser
+
+# Metrics & alerts
+obs = ClusterObservability(retention_hours=24.0)
+obs.record_metric("node_1", "memory_used_gb", 16.0, tags={"gpu": "m4_ultra"})
+obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "Task completed"))
+
+# Log store & export
+store = LogStore()
+store.store(StoredLog(timestamp=time.time(), level="error", source="master", message="heartbeat timeout"))
+results = store.query(level="error")
+json_data = store.export_json()
+csv_data = store.export_csv()
+
+# Fault diagnosis (pattern matching + root cause analysis)
+diagnoser = FaultDiagnoser()
+results = diagnoser.diagnose(logs)
+freq = diagnoser.analyze_frequency(logs, group_by="source")
+```
+
+### 7. Autoscaler (`fusion_multi_node.autoscaler`)
+
+Conservative/Balanced/Aggressive scale policies.
+
+```python
+from fusion_multi_node.autoscaler import Autoscaler, AutoscalerConfig, ScalePolicy, ScaleAction
+
+scaler = Autoscaler(
+    policy=ScalePolicy.BALANCED,
+    on_scale_up=lambda n: print(f"scale up {n}"),
+    on_scale_down=lambda n: print(f"scale down {n}"),
+    get_cluster_state=lambda: {"nodes": [...], "tasks": [...]},
+)
+action = await scaler.evaluate()  # SCALE_UP, SCALE_DOWN, REBALANCE, NOOP
+```
+
+### 8. Storage Volumes (`fusion_multi_node.storage`)
+
+Volume abstraction, shard replication, checkpoint persistence.
+
+```python
+from fusion_multi_node.storage import StorageVolume, VolumeSpec, VolumeType
+from fusion_multi_node.storage import ShardReplicator, ReplicationConfig
+from fusion_multi_node.storage import CheckpointManager, CheckpointEntry
+
+# Volume management
+sv = StorageVolume(base_dir="/data/volumes")
+sv.create_volume(VolumeSpec(name="models", volume_type=VolumeType.LOCAL))
+sv.write_file("models", "config.json", b'{"model": "llama-70b"}')
+data = sv.read_file("models", "config.json")
+
+# Shard replication
+replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
+replicas = replicator.assign_replicas("shard-1", "/models/llama.bin", 1024, nodes)
+healthy = replicator.get_healthy_replica("shard-1")
+
+# Checkpoint persistence
+cp = CheckpointManager(checkpoint_dir="/data/checkpoints")
+cp.save(CheckpointEntry(checkpoint_id="cp-1", task_id="t1", node_id="n1", step=5, state_data={...}))
+latest = cp.load_latest("t1")
+```
+
+### 9. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
 
 Unified MCP endpoint for Claude Desktop/Code, aggregating tools from all nodes.
 
@@ -292,20 +355,6 @@ tool = MCPTool(name="code_review", description="Review code",
                parameters={"type": "object", "properties": {"code": {"type": "string"}}})
 gateway.register_tool(tool)
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
-```
-
-### 7. Cluster Observability (`fusion_multi_node.observability`)
-
-Metrics, logs, alerts with retention and auto-cleanup.
-
-```python
-from fusion_multi_node.observability import ClusterObservability, LogEntry
-
-obs = ClusterObservability(retention_hours=24.0)
-obs.record_metric("node_1", "memory_used_gb", 16.0, tags={"gpu": "m4_ultra"})
-obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "Task completed"))
-alert = obs.create_alert("warning", "High memory", "node_1 at 90% utilization")
-await obs.check_alert_rules(nodes)
 ```
 
 ---
@@ -322,7 +371,7 @@ Default config at `~/.fusion/multi-node/config.json`:
     "discovery_port": 9754,
     "agent_port": 9755,
     "heartbeat_timeout": 15.0,
-    "heartbeat_interval": 5.0
+    "heartbeat_interval": 3.0
   },
   "parallel": {
     "default_mode": "pipeline",
@@ -350,15 +399,16 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (585 tests)
+# Run all tests (663 tests)
 pytest tests/ -v
 
-# With coverage (96.1%)
+# With coverage
 pytest tests/ --cov=fusion_multi_node --cov-report=html
 
 # Run specific module
 pytest tests/test_cluster_master.py -v
 pytest tests/test_protocol.py -v
+pytest tests/test_new_features.py -v
 ```
 
 ---
@@ -375,12 +425,13 @@ pytest tests/test_protocol.py -v
 | Task timeout | 300.0s | Default task timeout |
 | KV cache TTL | 3600.0s | Default KV cache expiry |
 | Token budget | 10,000,000 | MCP gateway token limit |
+| Degradation chain | 70b→32b→13b→8b→3b→1b | Model auto-degradation |
 
 ---
 
 ## 🛣️ Roadmap
 
-### v0.1.0 ✅ (Current)
+### v0.1.0 ✅
 - [x] Cluster Master — node discovery, scheduler, task lifecycle, fault tolerance
 - [x] Node Agent — hardware reporting, heartbeat, task execution, mDNS auto-discovery
 - [x] mDNS Discovery — Bonjour zero-config service registration and browsing
@@ -389,7 +440,40 @@ pytest tests/test_protocol.py -v
 - [x] MCP Gateway — unified MCP endpoint for Claude integration
 - [x] Observability — metrics, logs, alerts, cluster reports
 - [x] CLI — 15+ commands for cluster/node/task/config/network/caveman/kv management
-- [x] 96.1% test coverage (585 tests)
+
+### v0.3.0 ✅
+- [x] Full audit remediation (P0-P3), 585 tests, 0 ruff errors
+
+### v0.4.0 ✅ (Current)
+- [x] M1-02 device_model + UMA size in mDNS discovery & NodeInfo
+- [x] M1-03 Heartbeat interval 5s→3s
+- [x] M1-05 Manual IP join fallback (mDNS failure scenario)
+- [x] M2-04 hop_count broadcast storm prevention
+- [x] M3-01 Master/Worker permission isolation
+- [x] M3-02 Node approval mechanism
+- [x] M3-03 Master election (Raft-simplified with priority)
+- [x] M4-01 LoadMetrics + LoadRouter structured load-aware routing
+- [x] M4-02 Local-force gate (≤0.5B models forced local)
+- [x] M4-03 VRAM-first scheduling (≥13B models)
+- [x] M4-04 Task auto-degradation (70b→32b→13b→8b→3b→1b)
+- [x] M4-05 Cloud API fallback (OpenAI/Anthropic, daily cost limits)
+- [x] M5-01/02/05 Task sharding (inference/AST/vectorize, by_file/by_document/by_batch, result merge)
+- [x] M5-04 Task full-lifecycle cancel (recursive sub-task)
+- [x] M6-01 Master data isolation enforcement
+- [x] M6-02 Worker sandbox (resource limits, path/network filtering)
+- [x] M6-04 AST diff-only transmission
+- [x] M6-04 Data scrubbing (phone, email, API key, ID card, etc.)
+- [x] M8 Log store & export (JSON/CSV/text)
+- [x] M8 Intelligent fault diagnosis (pattern matching + root cause)
+- [x] M9-02/03 Storage data transfer + capacity monitoring + LRU eviction
+- [x] M9-04 FMP protocol KV cache sync
+- [x] M9 Storage volumes (local/shared/distributed)
+- [x] M9 Shard replication with health tracking
+- [x] M9 Checkpoint persistence
+- [x] M9 Model shard distribution
+- [x] M10 Autoscaler (conservative/balanced/aggressive policies)
+- [x] M10 Task migration on scale-down
+- [x] 765 tests, 0 ruff errors
 
 ### Future
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
@@ -403,7 +487,10 @@ pytest tests/test_protocol.py -v
 ## 🔒 Security
 
 - **100% local offline** — Zero external network dependencies
-- **Node authentication** — All agents must register with Master
+- **Node approval** — New nodes require approval or pattern-based auto-approval
+- **Master/Worker isolation** — Role-based permission, API path access control
+- **Worker sandbox** — CPU/memory/disk limits, path & network whitelisting
+- **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards)
 - **AES-GCM encryption** — FMP protocol encrypted communication
 - **Circuit breaker** — Automatic fault isolation for failing nodes
 - **No telemetry** — No analytics, no phoning home
@@ -412,7 +499,7 @@ pytest tests/test_protocol.py -v
 
 ## 📄 License
 
-MIT License. See [LICENSE](LICENSE) for details.
+Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 ---
 
@@ -421,7 +508,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 Contributions welcome! Please ensure:
 
 1. Tests pass: `pytest tests/ -v`
-2. Coverage ≥ 90%: `pytest --cov=fusion_multi_node`
+2. Lint passes: `ruff check fusion_multi_node/`
 3. 4-space indentation, no docstrings (self-documenting names)
 4. All classes use `logging.getLogger(__name__)`
 

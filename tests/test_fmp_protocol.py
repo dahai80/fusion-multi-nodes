@@ -1,6 +1,5 @@
 """FMP 协议模块测试。"""
 
-import json
 import time
 
 import pytest
@@ -8,7 +7,7 @@ import pytest
 from fusion_multi_node.protocol.fmp_message import (
     FMPMessage, FMPLinkLayer, FMPBusinessLayer, FMPControlLayer,
     FMPCrypto, PayloadType, ControlType,
-    FMP_MAGIC, FMP_VERSION, MAX_HOP_COUNT, MAX_ROUNDS,
+    FMP_MAGIC, MAX_HOP_COUNT,
 )
 from fusion_multi_node.protocol.circuit_breaker import CircuitBreaker, CircuitState
 

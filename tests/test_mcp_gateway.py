@@ -1,7 +1,5 @@
 """MCP Gateway 测试。"""
 
-import asyncio
-import time
 
 import pytest
 import httpx
@@ -87,7 +85,8 @@ class TestMCPClusterGateway:
 
     def test_set_node_selector(self):
         gw = MCPClusterGateway()
-        selector = lambda tool: "n1"
+        def selector(tool):
+            return "n1"
         gw.set_node_selector(selector)
         assert gw._node_selector is selector
 
@@ -197,7 +196,7 @@ class TestMCPClusterGateway:
             source="claude_code", assigned_node="localhost",
         )
         try:
-            result = await gw._forward_to_node(request, tool)
+            await gw._forward_to_node(request, tool)
         except Exception:
             pass
 

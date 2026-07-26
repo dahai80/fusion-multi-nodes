@@ -3,8 +3,6 @@
 用户指令：要求测试覆盖率90%+。
 """
 
-import asyncio
-import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,7 +27,6 @@ from fusion_multi_node.master.cluster_master import (
     NodeInfo,
     NodeStatus,
     ParallelMode,
-    TaskStatus,
 )
 
 
@@ -123,7 +120,7 @@ class TestNodeCommands:
         mock_master = AsyncMock()
         mock_master.stop = AsyncMock()
         with patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master):
-            with patch("fusion_multi_node.cli._async_node_start", new_callable=AsyncMock) as mock_fn:
+            with patch("fusion_multi_node.cli._async_node_start", new_callable=AsyncMock):
                 result = runner.invoke(cli, ["node", "start", "--role", "master"])
                 assert result.exit_code == 0
 

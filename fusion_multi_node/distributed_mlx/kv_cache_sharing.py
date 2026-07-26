@@ -20,9 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from fusion_multi_node.protocol import KVCacheSyncMessage
 from fusion_multi_node.utils.auth import sanitize_node_url_part
 
 logger = logging.getLogger(__name__)
+
+KV_SYNC_PROTOCOL = "fmp"
 
 ALLOWED_SHARD_KEYS = {
     "shard_id", "model_name", "layer_index", "node_id",
@@ -224,12 +227,35 @@ class KVSharingManager:
                     "cache_id": cache_id,
                     "target_node": target_node,
                     "compress": self.enable_compression,
+                    "protocol": KV_SYNC_PROTOCOL,
                 },
             )
             return resp.status_code == 200
         except Exception as e:
             logger.error(f"KV 传输失败 {source_node} → {target_node}: {e}")
             return False
+
+    def sync_to_cluster(self, cache_id: str, model_name: str, source_node_id: str) -> KVCacheSyncMessage:
+        """生成 FMP 协议 KV 缓存同步消息。"""
+        with self._cache_lock:
+            entry = self._local_cache.get(cache_id)
+            if not entry:
+                logger.warning(f"KV 缓存同步: cache_id={cache_id} 未找到本地缓存")
+                size_mb = 0.0
+            else:
+                size_mb = entry.total_size_bytes / (1024 * 1024)
+
+        sync_msg = KVCacheSyncMessage(
+            cache_id=cache_id,
+            model_name=model_name,
+            source_node_id=source_node_id,
+            size_mb=size_mb,
+            protocol=KV_SYNC_PROTOCOL,
+        )
+        logger.info(f"M9-04 FMP KV 缓存同步消息: cache_id={cache_id} "
+                    f"model={model_name} source={source_node_id} "
+                    f"size={size_mb:.1f}MB protocol={sync_msg.protocol}")
+        return sync_msg
 
     # ── 缓存预热 ──
 

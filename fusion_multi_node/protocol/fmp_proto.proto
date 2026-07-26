@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package fusion_multi_node.protocol;
+
+message FMPFrame {
+    string payload_json = 1;
+}

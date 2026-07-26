@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from fusion_multi_node.discovery.mdns_discovery import (
-    DEFAULT_DISCOVERY_PORT,
     SERVICE_TYPE,
     DiscoveryInfo,
     MDNSDiscovery,

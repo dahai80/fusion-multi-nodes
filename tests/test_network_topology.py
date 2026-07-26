@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from fusion_multi_node.utils.network_topology import (
     LinkInfo,

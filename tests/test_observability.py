@@ -6,7 +6,6 @@ import time
 from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch, MagicMock
 
 from fusion_multi_node.observability.observability import (
     Alert,

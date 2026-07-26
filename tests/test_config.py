@@ -4,12 +4,9 @@
 用户指令：要求测试覆盖率90%+。
 """
 
-import json
 import os
 import tempfile
-from unittest.mock import patch
 
-import pytest
 
 from fusion_multi_node.config.config import ClusterConfig
 

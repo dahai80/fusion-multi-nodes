@@ -1,7 +1,5 @@
 """Node Agent coverage tests."""
 
-import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -76,11 +74,12 @@ class TestNodeAgentHardware:
         version = agent._get_mlx_version()
         assert isinstance(version, str)
 
-    def test_get_gpu_cores(self):
+    def test_get_gpu_info(self):
         agent = NodeAgent()
-        cores = agent._get_gpu_cores()
+        cores, model = agent._get_gpu_info()
         assert isinstance(cores, int)
         assert cores >= 0
+        assert isinstance(model, str)
 
     def test_check_service_not_running(self):
         agent = NodeAgent()

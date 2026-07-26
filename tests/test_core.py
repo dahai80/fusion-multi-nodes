@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import time
-from pathlib import Path
 
 import pytest
 
@@ -13,7 +10,7 @@ from fusion_multi_node.master import (
     ClusterMaster, ClusterTask, NodeInfo, NodeStatus, ParallelMode, TaskStatus,
 )
 from fusion_multi_node.agent import NodeAgent, AgentConfig
-from fusion_multi_node.distributed_mlx import DistributedMLXBridge, ModelShard, DistMode
+from fusion_multi_node.distributed_mlx import DistributedMLXBridge, ModelShard
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 from fusion_multi_node.observability import ClusterObservability, LogEntry
 
@@ -398,7 +395,7 @@ class TestKVSharing:
         assert found.cache_id == "test_1"
 
     def test_cache_expiry(self):
-        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry, KVShard
+        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry
         import time
         manager = KVSharingManager()
 
@@ -417,7 +414,7 @@ class TestKVSharing:
         assert found is None  # 已过期
 
     def test_lru_eviction(self):
-        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry, KVShard
+        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry
         import time
 
         manager = KVSharingManager(max_local_cache_mb=0.001)  # 极小缓存

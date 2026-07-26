@@ -16,8 +16,8 @@ from fusion_multi_node.master import (
     NodeInfo,
     NodeStatus,
     ParallelMode,
-    TaskStatus,
 )
+from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
 from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,8 @@ class NodeRegisterRequest(BaseModel):
     available_memory_gb: float = 0.0
     cpu_cores: int = 0
     gpu_cores: int = 0
+    device_model: str = ""
+    uma_size_gb: float = 0.0
     mlx_version: str = ""
     tags: List[str] = []
     active_tasks: int = 0
@@ -66,6 +68,9 @@ class TaskSubmitRequest(BaseModel):
     model_name: str = ""
     timeout_seconds: float = 300.0
     user: str = ""
+    required_capability: str = ""
+    preferred_node_id: str = ""
+    priority: int = 0
 
 
 class TaskCancelRequest(BaseModel):
@@ -78,6 +83,15 @@ class KVRegisterRequest(BaseModel):
     node_id: str
     size_mb: float
     ttl_seconds: float = 3600.0
+
+
+class LoadUpdateRequest(BaseModel):
+    node_id: str
+    uma_used_ratio: float = 0.0
+    cpu_percent: float = 0.0
+    metal_util: float = 0.0
+    task_queue_len: int = 0
+    net_rtt_ms: float = 0.0
 
 
 class TaskResponse(BaseModel):
@@ -103,6 +117,8 @@ class NodeResponse(BaseModel):
     available_memory_gb: float
     cpu_cores: int
     gpu_cores: int
+    device_model: str
+    uma_size_gb: float
     active_tasks: int
     max_tasks: int
     score: float
@@ -129,6 +145,29 @@ class MasterServer:
         async def health():
             return {"status": "ok", "role": "master"}
 
+        # M1-05 手动 IP 加入
+        @app.post("/api/join")
+        async def manual_join(req: dict):
+            from fusion_multi_node.discovery.manual_join import ManualJoinManager
+            if not hasattr(self, "_join_manager"):
+                cluster_secret = getattr(self.master, "_cluster_secret", "")
+                self._join_manager = ManualJoinManager(cluster_secret=cluster_secret)
+            result = self._join_manager.handle_join_request(req)
+            if result.get("status") != "ok":
+                raise HTTPException(status_code=400, detail=result.get("detail", "加入失败"))
+            # 注册节点到集群
+            if result.get("auto_approved", True):
+                node = NodeInfo(
+                    node_id=req.get("node_id", ""),
+                    hostname=req.get("hostname", ""),
+                    ip_address=req.get("ip_address", ""),
+                    port=req.get("port", 9755),
+                    status=NodeStatus.ONLINE,
+                    last_heartbeat=time.time(),
+                )
+                await self.master.register_node(node)
+            return result
+
         # ── 节点管理 ──
 
         @app.post("/api/nodes/register")
@@ -143,6 +182,8 @@ class MasterServer:
                 available_memory_gb=req.available_memory_gb,
                 cpu_cores=req.cpu_cores,
                 gpu_cores=req.gpu_cores,
+                device_model=req.device_model,
+                uma_size_gb=req.uma_size_gb,
                 mlx_version=req.mlx_version,
                 status=NodeStatus.ONLINE,
                 tags=req.tags,
@@ -178,6 +219,32 @@ class MasterServer:
                 node.status = NodeStatus.ERROR
             return {"status": "ok"}
 
+        @app.post("/api/nodes/load")
+        async def update_load(req: LoadUpdateRequest):
+            metrics = LoadMetrics(
+                uma_used_ratio=req.uma_used_ratio,
+                cpu_percent=req.cpu_percent,
+                metal_util=req.metal_util,
+                task_queue_len=req.task_queue_len,
+                net_rtt_ms=req.net_rtt_ms,
+                node_id=req.node_id,
+            )
+            await self.master.update_node_load(req.node_id, metrics)
+            return {"status": "ok"}
+
+        @app.post("/api/routing/strategy")
+        async def set_routing_strategy(strategy: str):
+            try:
+                rs = RoutingStrategy(strategy)
+                self.master.load_router.set_strategy(rs)
+                return {"status": "ok", "strategy": rs.value}
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"无效策略: {strategy}")
+
+        @app.get("/api/routing/summary")
+        async def routing_summary():
+            return self.master.load_router.get_cluster_load_summary()
+
         @app.get("/api/nodes")
         async def list_nodes():
             online = await self.master.get_online_nodes()
@@ -212,6 +279,9 @@ class MasterServer:
                 timeout_seconds=req.timeout_seconds,
                 user=req.user,
                 created_at=time.time(),
+                required_capability=req.required_capability,
+                preferred_node_id=req.preferred_node_id,
+                priority=req.priority,
             )
             ok = await self.master.assign_task(task)
             if not ok:
@@ -234,12 +304,19 @@ class MasterServer:
 
         @app.post("/api/tasks/{task_id}/cancel")
         async def cancel_task(task_id: str, req: TaskCancelRequest):
-            task = self.master.tasks.get(task_id)
-            if not task:
+            if task_id not in self.master.tasks:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
-            if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                raise HTTPException(status_code=400, detail=f"任务 {task_id} 无法取消（状态: {task.status.value}）")
-            await self.master.complete_task(task_id, error=f"用户取消: {req.reason}")
+            ok = await self.master.cancel_task(task_id, reason=req.reason, cancel_sub_tasks=True)
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"任务 {task_id} 取消失败")
+            return {"status": "ok", "task_id": task_id}
+
+        # M4-04 任务降级
+        @app.post("/api/tasks/{task_id}/degrade")
+        async def degrade_task(task_id: str):
+            ok = await self.master.degrade_task(task_id)
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"任务 {task_id} 降级失败")
             return {"status": "ok", "task_id": task_id}
 
         @app.post("/api/tasks/{task_id}/migrate")
@@ -308,6 +385,8 @@ def _node_to_resp(n: NodeInfo) -> Dict[str, Any]:
         "available_memory_gb": n.available_memory_gb,
         "cpu_cores": n.cpu_cores,
         "gpu_cores": n.gpu_cores,
+        "device_model": n.device_model,
+        "uma_size_gb": n.uma_size_gb,
         "active_tasks": n.active_tasks,
         "max_tasks": n.max_tasks,
         "score": n.score,
@@ -327,4 +406,10 @@ def _task_to_resp(t: ClusterTask) -> Dict[str, Any]:
         "started_at": t.started_at,
         "completed_at": t.completed_at,
         "error": t.error,
+        "required_capability": t.required_capability,
+        "priority": t.priority,
+        "degraded_from_model": t.degraded_from_model,
+        "degradation_count": t.degradation_count,
+        "cancel_reason": t.cancel_reason,
+        "sub_tasks": t.sub_tasks,
     }

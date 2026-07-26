@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 
-from fusion_multi_node.agent import AgentConfig, NodeAgent
-from fusion_multi_node.distributed_mlx import KVCacheEntry, KVSharingManager, KVShard
+from fusion_multi_node.agent import AgentConfig
+from fusion_multi_node.distributed_mlx import KVCacheEntry, KVShard
 from fusion_multi_node.server.agent_server import AgentServer
 
 TEST_TOKEN = "test-cluster-token"

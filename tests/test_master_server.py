@@ -1,11 +1,10 @@
 """Master Server FastAPI coverage tests."""
 
-import time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, NodeStatus, ParallelMode, TaskStatus
+from fusion_multi_node.master import ClusterMaster, NodeStatus
 from fusion_multi_node.server.master_server import MasterServer
 
 TEST_TOKEN = "test-cluster-token"

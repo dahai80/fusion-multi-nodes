@@ -6,12 +6,11 @@ import time
 
 import pytest
 
-from fusion_multi_node.protocol.circuit_breaker import CircuitBreaker, CircuitState
+from fusion_multi_node.protocol.circuit_breaker import CircuitState
 from fusion_multi_node.protocol.fmp_connection import (
     ConnectionInfo,
     FMPConnection,
     FMPConnectionManager,
-    DEFAULT_READ_TIMEOUT,
     DEFAULT_RECONNECT_INTERVAL,
 )
 from fusion_multi_node.protocol.fmp_message import (
@@ -322,7 +321,6 @@ class TestFMPConnection:
             ok = await conn.connect()
             assert ok
 
-            original_wait_closed = conn._writer.wait_closed
 
             async def bad_wait_closed():
                 raise OSError("broken pipe")

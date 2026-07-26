@@ -122,7 +122,7 @@ class AgentConfig:
     agent_port: int = 9755
     fusion_desk_port: int = 9000
     fusion_mlx_port: int = 8000
-    heartbeat_interval: float = 5.0
+    heartbeat_interval: float = 3.0
     report_interval: float = 15.0
 
 
@@ -162,7 +162,7 @@ class NodeAgent:
 
         # 尝试获取 MLX 信息
         mlx_version = self._get_mlx_version()
-        gpu_cores = self._get_gpu_cores()
+        gpu_cores, device_model = self._get_gpu_info()
 
         return {
             "node_id": self.config.node_id,
@@ -177,6 +177,8 @@ class NodeAgent:
             "cpu_cores": cpu_count,
             "cpu_percent": psutil.cpu_percent(interval=0.5),
             "gpu_cores": gpu_cores,
+            "device_model": device_model,
+            "uma_size_gb": round(mem.total / (1024**3), 1) if is_apple_silicon else 0.0,
             "mlx_version": mlx_version,
             "is_apple_silicon": is_apple_silicon,
             "fusion_desk_running": self._check_service(self.config.fusion_desk_port),
@@ -219,19 +221,24 @@ class NodeAgent:
             pass
         return ""
 
-    def _get_gpu_cores(self) -> int:
-        """获取 Apple Silicon GPU 核心数。"""
+    def _get_gpu_info(self) -> tuple:
         try:
             result = subprocess.run(
                 ["system_profiler", "SPDisplaysDataType"],
                 capture_output=True, text=True, timeout=5,
             )
+            gpu_cores = 0
+            device_model = ""
             for line in result.stdout.split("\n"):
                 if "Total Number of Cores" in line:
-                    return int(line.split(":")[1].strip())
-        except Exception:
-            pass
-        return 0
+                    gpu_cores = int(line.split(":")[1].strip())
+                if "Chipset Model" in line:
+                    device_model = line.split(":")[1].strip()
+            logger.debug(f"GPU 信息: cores={gpu_cores}, model={device_model}")
+            return gpu_cores, device_model
+        except Exception as e:
+            logger.debug(f"获取 GPU 信息失败: {e}")
+            return 0, ""
 
     def _check_service(self, port: int) -> bool:
         """检查本地服务是否运行。"""
@@ -287,6 +294,8 @@ class NodeAgent:
                     "available_memory_gb": info["available_memory_gb"],
                     "cpu_cores": info["cpu_cores"],
                     "gpu_cores": info["gpu_cores"],
+                    "device_model": info.get("device_model", ""),
+                    "uma_size_gb": info.get("uma_size_gb", 0.0),
                     "mlx_version": info.get("mlx_version", ""),
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
                     "active_tasks": 0,

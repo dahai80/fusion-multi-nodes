@@ -1,4 +1,13 @@
-from .fmp_message import FMPMessage, FMPLinkLayer, FMPBusinessLayer, FMPControlLayer, FMPCrypto
+from .fmp_message import (
+    FMPMessage,
+    FMPLinkLayer,
+    FMPBusinessLayer,
+    FMPControlLayer,
+    FMPCrypto,
+    KVCacheSyncMessage,
+    PayloadType,
+    ControlType,
+)
 from .fmp_connection import FMPConnection, FMPConnectionManager
 from .fmp_router import FMPRouter
 from .circuit_breaker import CircuitBreaker, CircuitState
@@ -10,6 +19,9 @@ __all__ = [
     "FMPBusinessLayer",
     "FMPControlLayer",
     "FMPCrypto",
+    "KVCacheSyncMessage",
+    "PayloadType",
+    "ControlType",
     "FMPConnection",
     "FMPConnectionManager",
     "FMPRouter",
