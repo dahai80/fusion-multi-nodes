@@ -588,6 +588,29 @@ class MasterServer:
             except Exception as e:
                 return {"suggestions": [], "error": str(e)}
 
+        # M8 活跃告警查询
+        @app.get("/api/v1/observability/alerts")
+        async def get_active_alerts(severity: str = ""):
+            obs = getattr(self.master, "_observability", None)
+            if not obs:
+                return {"alerts": [], "error": "observability not initialized"}
+            try:
+                raw_alerts = obs.get_active_alerts(severity=severity)
+                alerts = []
+                for a in raw_alerts:
+                    alerts.append({
+                        "alert_id": a.alert_id,
+                        "severity": a.severity,
+                        "title": a.title,
+                        "message": a.message,
+                        "node_id": a.node_id,
+                        "created_at": a.created_at,
+                        "resolved": a.resolved,
+                    })
+                return {"alerts": alerts, "count": len(alerts)}
+            except Exception as e:
+                return {"alerts": [], "error": str(e)}
+
     async def start(self, host: str = "127.0.0.1", port: int = 9753) -> None:
         import uvicorn
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
@@ -609,6 +632,7 @@ def _node_to_resp(n: NodeInfo) -> Dict[str, Any]:
         "ip_address": n.ip_address,
         "port": n.port,
         "status": n.status.value,
+        "role": n.role,
         "total_memory_gb": n.total_memory_gb,
         "available_memory_gb": n.available_memory_gb,
         "cpu_cores": n.cpu_cores,
