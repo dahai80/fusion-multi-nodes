@@ -95,11 +95,11 @@
 
 ### 2.2 中优先级嵌入 (WebView 容器)
 
-| 项目 | 技术 | 功能 | 嵌入方式 | 工作量 |
-|------|------|------|----------|--------|
-| **fusion-bench bench-site** | Next.js 16 + React 19 | Benchmarks/Compare/Performance | WebViewContainer | 0.5天 |
-| **fusion-security frontend** | React 18 + Ant Design | Dashboard/Projects/Scans | WebViewContainer | 0.5天 |
-| **fusion-doc gateway** | Node.js SPA | 文档浏览 | WebViewContainer | 0.5天 |
+| 项目 | 技术 | 功能 | 嵌入方式 | 状态 |
+|------|------|------|----------|------|
+| **fusion-bench bench-site** | Next.js 16 + React 19 | Benchmarks/Compare/Performance | BenchView WebView tab (localhost:3000) | ✅ 已完成 |
+| **fusion-security frontend** | React 18 + Ant Design | Dashboard/Projects/Scans | SecurityView WebView tab (localhost:3000) | ✅ 已完成 |
+| **fusion-doc gateway** | Node.js SPA | 文档浏览 | WebViewContainer | ⏳ 待定 |
 
 ### 2.3 低优先级 (复杂/第三方)
 
@@ -136,14 +136,15 @@
 
 ### Phase 3: 外部 GUI 迁移
 
-| 任务 | 来源 | 目标模块 | 预计工时 |
-|------|------|----------|----------|
-| 合并 fusion-mac | fusion-mlx/apps/fusion-mac | ModelHub + MLXOptimizer | 3-5天 |
-| 嵌入 bench-site | fusion-bench/bench-site | Bench WebView | 0.5天 |
-| 嵌入 security frontend | fusion-security/frontend | SafetyView WebView | 0.5天 |
-| 合并 FusionComfyUI | fusion-comfyui/FusionComfyUI | 新 ComfyUI 模块 | 1-2天 |
-| 合并 fusion-desk browser | fusion-desk/browser | Desk 增强 | 2-3天 |
-| 嵌入 fusion-doc gateway | fusion-doc/gateway | Doc WebView | 0.5天 |
+| 任务 | 来源 | 目标模块 | 状态 |
+|------|------|----------|------|
+| 合并 fusion-mac | fusion-mlx/apps/fusion-mac | ModelHub + MLXOptimizer | ⏳ 待定 |
+| 嵌入 bench-site | fusion-bench/bench-site | BenchView WebView tab | ✅ 已完成 |
+| 嵌入 security frontend | fusion-security/frontend | SecurityView WebView tab | ✅ 已完成 |
+| 修正 ServiceWebView URL | ServiceWebView.swift | bench→3000, security→3000 | ✅ 已完成 |
+| 合并 FusionComfyUI | fusion-comfyui/FusionComfyUI | 新 ComfyUI 模块 | ⏳ 用户决定暂缓 |
+| 合并 fusion-desk browser | fusion-desk/browser | Desk 增强 | ⏳ 待定 |
+| 嵌入 fusion-doc gateway | fusion-doc/gateway | Doc WebView | ⏳ 待定 |
 
 ### Phase 4: admin web 迁移 (可选)
 
