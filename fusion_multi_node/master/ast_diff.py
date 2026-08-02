@@ -40,6 +40,7 @@ def _collect_nodes(tree: dict[str, Any], prefix: str = "") -> dict[str, dict[str
 
 def compute_ast_diff(old_ast: dict[str, Any], new_ast: dict[str, Any]) -> dict[str, Any]:
     import warnings
+
     warnings.warn(
         "ast_diff 将迁移至 fusion-cowork，后续版本移除 (AR审计 P2)",
         DeprecationWarning,

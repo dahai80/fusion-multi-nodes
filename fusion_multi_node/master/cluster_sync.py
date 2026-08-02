@@ -58,8 +58,7 @@ class ModelManifest:
             "total_size": self.total_size,
             "created_at": self.created_at,
             "files": [
-                {"path": f.path, "size": f.size, "sha256": f.sha256, "modified_at": f.modified_at}
-                for f in self.files
+                {"path": f.path, "size": f.size, "sha256": f.sha256, "modified_at": f.modified_at} for f in self.files
             ],
         }
 
@@ -131,12 +130,14 @@ def build_manifest(model_name: str, model_dir: str, model_id: str = "") -> Model
             try:
                 stat = os.stat(fpath)
                 sha256 = compute_file_sha256(fpath)
-                files.append(FileEntry(
-                    path=rel_path,
-                    size=stat.st_size,
-                    sha256=sha256,
-                    modified_at=stat.st_mtime,
-                ))
+                files.append(
+                    FileEntry(
+                        path=rel_path,
+                        size=stat.st_size,
+                        sha256=sha256,
+                        modified_at=stat.st_mtime,
+                    )
+                )
                 total_size += stat.st_size
             except Exception as e:
                 logger.error(f"扫描文件失败: {fpath}, {e}")
@@ -296,7 +297,11 @@ class ClusterSyncManager:
         return build_manifest(model_name, model_dir)
 
     async def incremental_sync(
-        self, model_name: str, remote_manifest: ModelManifest, source_host: str, source_port: int = 11452,
+        self,
+        model_name: str,
+        remote_manifest: ModelManifest,
+        source_host: str,
+        source_port: int = 11452,
     ) -> dict[str, Any]:
         """增量同步: 对比 manifest，仅下载差异文件。"""
         local_manifest = self.get_manifest(model_name)
@@ -335,9 +340,7 @@ class ClusterSyncManager:
     async def _sync_loop(self) -> None:
         while self._running:
             try:
-                model_name, source_host, source_port = await asyncio.wait_for(
-                    self._sync_queue.get(), timeout=5.0
-                )
+                model_name, source_host, source_port = await asyncio.wait_for(self._sync_queue.get(), timeout=5.0)
             except TimeoutError:
                 continue
             try:
@@ -356,6 +359,7 @@ class ClusterSyncManager:
         """采集本节点硬件负载。"""
         try:
             import psutil
+
             ram = psutil.virtual_memory()
             disk = psutil.disk_usage("/")
             cpu = psutil.cpu_percent(interval=0.1)
@@ -366,9 +370,12 @@ class ClusterSyncManager:
         gpu_used = 0.0
         try:
             import subprocess
+
             result = subprocess.run(
                 ["system_profiler", "SPDisplaysDataType"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             for line in result.stdout.splitlines():
                 if "VRAM" in line or "Total Number of Cores" in line:

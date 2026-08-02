@@ -66,6 +66,7 @@ class MCPClusterGateway:
 
     def __init__(self, host: str = "127.0.0.1", port: int = 11446):
         import warnings
+
         warnings.warn(
             "MCPClusterGateway 将迁移至 fusion-gateway，后续版本移除 (AR审计 P2)",
             DeprecationWarning,

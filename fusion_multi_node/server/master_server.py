@@ -189,10 +189,12 @@ class MasterServer:
                 sync_mgr = ClusterSyncManager(node_id="master")
                 self._sync_manager = sync_mgr
             from fusion_multi_node.master.cluster_sync import ModelManifest
+
             remote_manifest = ModelManifest.from_dict(remote_manifest_data) if remote_manifest_data else None
             if not remote_manifest:
                 try:
                     import httpx
+
                     client = httpx.AsyncClient(timeout=30.0)
                     safe_host = source_host.replace("/", "").replace("..", "")
                     resp = await client.get(f"http://{safe_host}:{source_port}/api/models/{model_name}/manifest")
