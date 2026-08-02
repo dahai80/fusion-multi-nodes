@@ -4,7 +4,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
 from fusion_multi_node.agent import AgentConfig
 from fusion_multi_node.distributed_mlx import KVCacheEntry, KVShard
@@ -116,13 +116,17 @@ class TestExecuteEndpoint:
     @pytest.mark.asyncio
     async def test_execute_task_success(self, client, mock_agent):
         mock_agent.execute_task.return_value = {"content": "hello world"}
-        resp = await client.post("/api/execute", json={
-            "task_type": "inference",
-            "model_name": "llama-3b",
-            "prompt": "say hello",
-            "max_tokens": 2048,
-            "temperature": 0.7,
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/execute",
+            json={
+                "task_type": "inference",
+                "model_name": "llama-3b",
+                "prompt": "say hello",
+                "max_tokens": 2048,
+                "temperature": 0.7,
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -136,11 +140,15 @@ class TestExecuteEndpoint:
 
     @pytest.mark.asyncio
     async def test_execute_task_with_extra(self, client, mock_agent):
-        resp = await client.post("/api/execute", json={
-            "task_type": "inference",
-            "model_name": "llama-3b",
-            "extra": {"top_p": 0.9},
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/execute",
+            json={
+                "task_type": "inference",
+                "model_name": "llama-3b",
+                "extra": {"top_p": 0.9},
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         call_args = mock_agent.execute_task.call_args[0][0]
         assert call_args["top_p"] == 0.9
@@ -148,10 +156,14 @@ class TestExecuteEndpoint:
     @pytest.mark.asyncio
     async def test_execute_task_failure(self, client, mock_agent):
         mock_agent.execute_task.side_effect = RuntimeError("model not found")
-        resp = await client.post("/api/execute", json={
-            "task_type": "inference",
-            "model_name": "missing-model",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/execute",
+            json={
+                "task_type": "inference",
+                "model_name": "missing-model",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 500
         assert "内部错误" in resp.json()["detail"]
 
@@ -161,10 +173,14 @@ class TestKVLookupEndpoint:
     async def test_kv_lookup_found(self, client, mock_kv_manager):
         entry = _make_kv_entry()
         mock_kv_manager.lookup_local.return_value = entry
-        resp = await client.post("/api/kv/lookup", json={
-            "model_name": "llama-3b",
-            "prompt_hash": "abc123",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/lookup",
+            json={
+                "model_name": "llama-3b",
+                "prompt_hash": "abc123",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["cache_id"] == "kv1"
@@ -183,10 +199,14 @@ class TestKVLookupEndpoint:
     @pytest.mark.asyncio
     async def test_kv_lookup_not_found(self, client, mock_kv_manager):
         mock_kv_manager.lookup_local.return_value = None
-        resp = await client.post("/api/kv/lookup", json={
-            "model_name": "llama-3b",
-            "prompt_hash": "missing",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/lookup",
+            json={
+                "model_name": "llama-3b",
+                "prompt_hash": "missing",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 404
 
 
@@ -194,10 +214,14 @@ class TestKVTransferEndpoint:
     @pytest.mark.asyncio
     async def test_kv_transfer_success(self, client, mock_kv_manager):
         mock_kv_manager.transfer_from_remote.return_value = True
-        resp = await client.post("/api/kv/transfer", json={
-            "cache_id": "kv1",
-            "target_node": "node_2",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/transfer",
+            json={
+                "cache_id": "kv1",
+                "target_node": "node_2",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -205,20 +229,28 @@ class TestKVTransferEndpoint:
     @pytest.mark.asyncio
     async def test_kv_transfer_failure(self, client, mock_kv_manager):
         mock_kv_manager.transfer_from_remote.return_value = False
-        resp = await client.post("/api/kv/transfer", json={
-            "cache_id": "kv1",
-            "target_node": "node_2",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/transfer",
+            json={
+                "cache_id": "kv1",
+                "target_node": "node_2",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 500
 
     @pytest.mark.asyncio
     async def test_kv_transfer_with_custom_port(self, client, mock_kv_manager):
         mock_kv_manager.transfer_from_remote.return_value = True
-        resp = await client.post("/api/kv/transfer", json={
-            "cache_id": "kv1",
-            "target_node": "node_2",
-            "target_port": 8765,
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/transfer",
+            json={
+                "cache_id": "kv1",
+                "target_node": "node_2",
+                "target_port": 8765,
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
 
 
@@ -226,10 +258,14 @@ class TestKVWarmEndpoint:
     @pytest.mark.asyncio
     async def test_kv_warm(self, client, mock_kv_manager):
         mock_kv_manager.warm_cache.return_value = {"warmed": 3}
-        resp = await client.post("/api/kv/warm", json={
-            "model_name": "llama-3b",
-            "prompts": ["hello", "world", "test"],
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/warm",
+            json={
+                "model_name": "llama-3b",
+                "prompts": ["hello", "world", "test"],
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
@@ -238,10 +274,14 @@ class TestKVWarmEndpoint:
     @pytest.mark.asyncio
     async def test_kv_warm_no_results(self, client, mock_kv_manager):
         mock_kv_manager.warm_cache.return_value = {}
-        resp = await client.post("/api/kv/warm", json={
-            "model_name": "llama-3b",
-            "prompts": ["hello"],
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/kv/warm",
+            json={
+                "model_name": "llama-3b",
+                "prompts": ["hello"],
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["warmed"] == 0
@@ -284,7 +324,10 @@ class TestAgentServerStart:
         with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
             await agent_server.start(host="127.0.0.1", port=9999)
         mock_uvicorn.Config.assert_called_once_with(
-            agent_server.app, host="127.0.0.1", port=9999, log_level="warning",
+            agent_server.app,
+            host="127.0.0.1",
+            port=9999,
+            log_level="warning",
         )
         mock_uvicorn.Server.assert_called_once_with(mock_config)
         assert agent_server._started_at > 0

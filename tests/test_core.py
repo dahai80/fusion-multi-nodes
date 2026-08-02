@@ -6,16 +6,21 @@ import time
 
 import pytest
 
-from fusion_multi_node.master import (
-    ClusterMaster, ClusterTask, NodeInfo, NodeStatus, ParallelMode, TaskStatus,
-)
-from fusion_multi_node.agent import NodeAgent, AgentConfig
+from fusion_multi_node.agent import AgentConfig, NodeAgent
 from fusion_multi_node.distributed_mlx import DistributedMLXBridge, ModelShard
+from fusion_multi_node.master import (
+    ClusterMaster,
+    ClusterTask,
+    NodeInfo,
+    NodeStatus,
+    ParallelMode,
+    TaskStatus,
+)
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 from fusion_multi_node.observability import ClusterObservability, LogEntry
 
-
 # ── Cluster Master 测试 ──
+
 
 class TestClusterMaster:
     def setup_method(self):
@@ -59,35 +64,39 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_select_nodes_data_parallel(self):
         for i in range(3):
-            await self.master.register_node(NodeInfo(
-                node_id=f"node_{i}",
-                hostname=f"mac-{i}",
-                ip_address=f"192.168.1.{100+i}",
-                port=11445,
-                total_memory_gb=32.0,
-                available_memory_gb=16.0 + i * 8.0,
-                cpu_cores=12,
-                gpu_cores=40,
-                status=NodeStatus.ONLINE,
-                last_heartbeat=time.time(),
-            ))
+            await self.master.register_node(
+                NodeInfo(
+                    node_id=f"node_{i}",
+                    hostname=f"mac-{i}",
+                    ip_address=f"192.168.1.{100 + i}",
+                    port=11445,
+                    total_memory_gb=32.0,
+                    available_memory_gb=16.0 + i * 8.0,
+                    cpu_cores=12,
+                    gpu_cores=40,
+                    status=NodeStatus.ONLINE,
+                    last_heartbeat=time.time(),
+                )
+            )
         nodes = await self.master.select_nodes(ParallelMode.DATA, count=2)
         assert len(nodes) == 2
 
     @pytest.mark.asyncio
     async def test_assign_task(self):
-        await self.master.register_node(NodeInfo(
-            node_id="worker_1",
-            hostname="worker-1",
-            ip_address="192.168.1.10",
-            port=11445,
-            total_memory_gb=32.0,
-            available_memory_gb=24.0,
-            cpu_cores=12,
-            gpu_cores=40,
-            status=NodeStatus.ONLINE,
-            last_heartbeat=time.time(),
-        ))
+        await self.master.register_node(
+            NodeInfo(
+                node_id="worker_1",
+                hostname="worker-1",
+                ip_address="192.168.1.10",
+                port=11445,
+                total_memory_gb=32.0,
+                available_memory_gb=24.0,
+                cpu_cores=12,
+                gpu_cores=40,
+                status=NodeStatus.ONLINE,
+                last_heartbeat=time.time(),
+            )
+        )
         task = ClusterTask(
             task_id="test_task_1",
             name="test-inference",
@@ -136,6 +145,7 @@ class TestClusterMaster:
 
 # ── Node Agent 测试 ──
 
+
 class TestNodeAgent:
     def test_agent_config(self):
         config = AgentConfig(
@@ -158,6 +168,7 @@ class TestNodeAgent:
 
 # ── Distributed MLX 测试 ──
 
+
 class TestDistributedMLX:
     @pytest.mark.asyncio
     async def test_shard_model(self):
@@ -176,6 +187,7 @@ class TestDistributedMLX:
 
 
 # ── MCP Gateway 测试 ──
+
 
 class TestMCPGateway:
     def setup_method(self):
@@ -212,6 +224,7 @@ class TestMCPGateway:
 
 # ── Observability 测试 ──
 
+
 class TestObservability:
     def setup_method(self):
         self.obs = ClusterObservability(retention_hours=1.0)
@@ -240,13 +253,15 @@ class TestObservability:
         assert self.obs.get_active_alerts() == []
 
     def test_add_log(self):
-        self.obs.add_log(LogEntry(
-            timestamp=time.time(),
-            node_id="node_1",
-            level="INFO",
-            module="test",
-            message="Test log entry",
-        ))
+        self.obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="node_1",
+                level="INFO",
+                module="test",
+                message="Test log entry",
+            )
+        )
         logs = self.obs.get_logs(node_id="node_1", limit=10)
         assert len(logs) >= 1
         assert logs[0].message == "Test log entry"
@@ -262,9 +277,11 @@ class TestObservability:
 
 # ── 配置测试 ──
 
+
 class TestClusterConfig:
     def test_default_config(self, tmp_path):
         from fusion_multi_node.config import ClusterConfig
+
         config_path = str(tmp_path / "test_config.json")
         config = ClusterConfig(config_path=config_path)
         assert config.get("cluster.master_port") == 11452
@@ -273,6 +290,7 @@ class TestClusterConfig:
 
     def test_set_and_get(self, tmp_path):
         from fusion_multi_node.config import ClusterConfig
+
         config = ClusterConfig(config_path=str(tmp_path / "test2.json"))
         config.set("cluster.master_port", 19753)
         assert config.get("cluster.master_port") == 19753
@@ -280,9 +298,11 @@ class TestClusterConfig:
 
 # ── Phase 5: Caveman 压缩测试 ──
 
+
 class TestCaveman:
     def test_compress_zlib(self):
         from fusion_multi_node.distributed_mlx import CavemanCompressor
+
         compressor = CavemanCompressor()
         data = b"Hello Fusion-Multi-Node! " * 100
         compressed, stats = compressor.compress(data, method="zlib")
@@ -293,6 +313,7 @@ class TestCaveman:
 
     def test_compress_diff(self):
         from fusion_multi_node.distributed_mlx import CavemanCompressor
+
         compressor = CavemanCompressor()
         data = bytes(range(256)) * 10
         compressed, stats = compressor.compress(data, method="diff")
@@ -302,6 +323,7 @@ class TestCaveman:
 
     def test_compress_dict(self):
         from fusion_multi_node.distributed_mlx import CavemanCompressor
+
         compressor = CavemanCompressor()
         # 使用 zlib 无损压缩测试
         data = b"ABCABCABCABCABCABCABC" * 10
@@ -312,18 +334,20 @@ class TestCaveman:
 
     def test_auto_select_method(self):
         from fusion_multi_node.distributed_mlx import CavemanCompressor
+
         compressor = CavemanCompressor()
         # 小数据
         small = b"hello"
-        compressed, stats = compressor.compress(small, method="auto")
+        _compressed, stats = compressor.compress(small, method="auto")
         assert stats.method == "dict"
 
     @pytest.mark.asyncio
     async def test_caveman_manager(self):
         from fusion_multi_node.distributed_mlx import CavemanManager
+
         manager = CavemanManager()
         data = b"Test data for Caveman compression. " * 50
-        compressed, method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
+        _compressed, _method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
         assert stats.original_bytes > stats.compressed_bytes
         stats = manager.get_stats()
         assert stats["total_original_bytes"] > 0
@@ -331,6 +355,7 @@ class TestCaveman:
 
     def test_compression_configs(self):
         from fusion_multi_node.distributed_mlx import CavemanManager
+
         manager = CavemanManager()
         tb5 = manager.get_compression_config("thunderbolt_5")
         assert tb5["method"] == "dict"
@@ -340,10 +365,12 @@ class TestCaveman:
 
 # ── Phase 5: 网络拓扑测试 ──
 
+
 class TestNetworkTopology:
     @pytest.mark.asyncio
     async def test_detect(self):
         from fusion_multi_node.utils import NetworkTopologyDetector
+
         detector = NetworkTopologyDetector()
         interfaces = await detector.detect()
         assert len(interfaces) >= 1
@@ -351,16 +378,28 @@ class TestNetworkTopology:
 
     def test_get_best_link(self):
         from fusion_multi_node.utils import NetworkTopologyDetector
+
         detector = NetworkTopologyDetector()
         # 手动添加接口
-        detector._interfaces["lo0"] = type("Link", (), {"type": "thunderbolt_5", "bandwidth_mbps": 40000,
-                                                          "latency_ms": 0.01, "interface": "lo0",
-                                                          "is_rdma": False, "is_active": True, "priority": 0})()
+        detector._interfaces["lo0"] = type(
+            "Link",
+            (),
+            {
+                "type": "thunderbolt_5",
+                "bandwidth_mbps": 40000,
+                "latency_ms": 0.01,
+                "interface": "lo0",
+                "is_rdma": False,
+                "is_active": True,
+                "priority": 0,
+            },
+        )()
         best = detector.get_best_link()
         assert best is not None
 
     def test_link_type_classification(self):
-        from fusion_multi_node.utils import NetworkTopologyDetector, LinkType
+        from fusion_multi_node.utils import LinkType, NetworkTopologyDetector
+
         detector = NetworkTopologyDetector()
         assert detector._classify_thunderbolt(40000) == LinkType.THUNDERBOLT_5
         assert detector._classify_ethernet(1000) == LinkType.ETHERNET_1G
@@ -369,10 +408,17 @@ class TestNetworkTopology:
 
 # ── Phase 5: KV 缓存共享测试 ──
 
+
 class TestKVSharing:
     def test_store_and_lookup(self):
         import time
-        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry, KVShard
+
+        from fusion_multi_node.distributed_mlx import (
+            KVCacheEntry,
+            KVShard,
+            KVSharingManager,
+        )
+
         manager = KVSharingManager(max_local_cache_mb=64.0)
 
         entry = KVCacheEntry(
@@ -383,11 +429,17 @@ class TestKVSharing:
             total_tokens=100,
             total_size_bytes=1024,
             created_at=time.time(),
-            shards=[KVShard(
-                shard_id="s1", model_name="qwen3.5-9b", layer_index=0,
-                node_id="node_1", token_count=100, size_bytes=1024,
-                created_at=time.time(),
-            )],
+            shards=[
+                KVShard(
+                    shard_id="s1",
+                    model_name="qwen3.5-9b",
+                    layer_index=0,
+                    node_id="node_1",
+                    token_count=100,
+                    size_bytes=1024,
+                    created_at=time.time(),
+                )
+            ],
         )
         assert manager.store_local(entry)
         found = manager.lookup_local("qwen3.5-9b", "abc123")
@@ -395,8 +447,10 @@ class TestKVSharing:
         assert found.cache_id == "test_1"
 
     def test_cache_expiry(self):
-        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry
         import time
+
+        from fusion_multi_node.distributed_mlx import KVCacheEntry, KVSharingManager
+
         manager = KVSharingManager()
 
         entry = KVCacheEntry(
@@ -414,8 +468,9 @@ class TestKVSharing:
         assert found is None  # 已过期
 
     def test_lru_eviction(self):
-        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry
         import time
+
+        from fusion_multi_node.distributed_mlx import KVCacheEntry, KVSharingManager
 
         manager = KVSharingManager(max_local_cache_mb=0.001)  # 极小缓存
 
@@ -435,8 +490,10 @@ class TestKVSharing:
         assert stats["local_entries"] < 10  # 应该淘汰了一些
 
     def test_prefix_match(self):
-        from fusion_multi_node.distributed_mlx import KVSharingManager, KVCacheEntry
         import time
+
+        from fusion_multi_node.distributed_mlx import KVCacheEntry, KVSharingManager
+
         manager = KVSharingManager()
 
         entry = KVCacheEntry(

@@ -12,7 +12,6 @@ import fnmatch
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import List
 
 from .permission import NodeRole
 
@@ -21,17 +20,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DataIsolationPolicy:
-    master_only_patterns: List[str] = field(default_factory=lambda: [
-        "*.db",
-        "*.sqlite",
-        "soul.md",
-        "memory.md",
-        ".fusion/master/*",
-    ])
+    master_only_patterns: list[str] = field(
+        default_factory=lambda: [
+            "*.db",
+            "*.sqlite",
+            "soul.md",
+            "memory.md",
+            ".fusion/master/*",
+        ]
+    )
 
-    master_only_paths: List[str] = field(default_factory=lambda: [
-        ".fusion/master",
-    ])
+    master_only_paths: list[str] = field(
+        default_factory=lambda: [
+            ".fusion/master",
+        ]
+    )
 
     def is_master_only(self, path: str) -> bool:
         norm = os.path.normpath(path)
@@ -54,27 +57,22 @@ class DataIsolationPolicy:
         return False
 
     def is_transfer_allowed(self, source_path: str, target_role: str) -> bool:
-        if isinstance(target_role, NodeRole):
-            role_value = target_role.value
-        else:
-            role_value = str(target_role).lower()
+        role_value = target_role.value if isinstance(target_role, NodeRole) else str(target_role).lower()
 
         if role_value != "worker":
             return True
 
         if self.is_master_only(source_path):
-            logger.warning(
-                f"数据隔离拦截: Master 专有数据 {source_path} 禁止传输到 Worker 节点"
-            )
+            logger.warning(f"数据隔离拦截: Master 专有数据 {source_path} 禁止传输到 Worker 节点")
             return False
 
         return True
 
     def filter_transferable_paths(
         self,
-        paths: List[str],
+        paths: list[str],
         target_role: str,
-    ) -> List[str]:
+    ) -> list[str]:
         allowed = []
         blocked = []
         for p in paths:
@@ -83,10 +81,7 @@ class DataIsolationPolicy:
             else:
                 blocked.append(p)
         if blocked:
-            logger.info(
-                f"数据隔离: 过滤 {len(blocked)} 条 Master 专有路径, "
-                f"放行 {len(allowed)} 条"
-            )
+            logger.info(f"数据隔离: 过滤 {len(blocked)} 条 Master 专有路径, 放行 {len(allowed)} 条")
         return allowed
 
     def add_pattern(self, pattern: str) -> None:

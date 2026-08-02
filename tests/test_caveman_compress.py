@@ -91,6 +91,7 @@ class TestCavemanCompressorSelectMethod:
     def test_large_no_repeat_selects_zlib(self):
         c = CavemanCompressor()
         import os
+
         data = os.urandom(256)
         method = c._select_method(data)
         assert method in ("zlib", "diff")
@@ -233,6 +234,7 @@ class TestCavemanCompressorAutoMethod:
     def test_auto_zlib(self):
         c = CavemanCompressor()
         import os
+
         data = os.urandom(256)
         compressed, stats = c.compress(data, method="auto")
         decompressed = c.decompress(compressed, stats.method)
@@ -244,7 +246,7 @@ class TestCavemanManager:
     async def test_compress_tensor_default_link(self):
         m = CavemanManager()
         data = b"test data " * 100
-        compressed, method, stats = await m.compress_tensor(data)
+        _compressed, method, stats = await m.compress_tensor(data)
         assert method == "zlib"
         assert stats.original_bytes == len(data)
 
@@ -284,14 +286,14 @@ class TestCavemanManager:
     async def test_compress_tensor_thunderbolt(self):
         m = CavemanManager()
         data = b"test data " * 50
-        compressed, method, stats = await m.compress_tensor(data, link_type="thunderbolt_5")
+        _compressed, method, _stats = await m.compress_tensor(data, link_type="thunderbolt_5")
         assert method == "dict"
 
     @pytest.mark.asyncio
     async def test_compress_tensor_100m(self):
         m = CavemanManager()
         data = b"AAAAAAAA" * 200
-        compressed, method, stats = await m.compress_tensor(data, link_type="ethernet_100m")
+        _compressed, method, _stats = await m.compress_tensor(data, link_type="ethernet_100m")
         assert method == "diff"
 
     def test_unknown_link_type(self):

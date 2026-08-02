@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
+from ..master.ast_diff import apply_ast_diff, compute_ast_diff
 from .data_scrubber import DataScrubber
-from ..master.ast_diff import compute_ast_diff, apply_ast_diff
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +19,14 @@ logger = logging.getLogger(__name__)
 class SecureTransferPipeline:
     """安全传输管线 — AST差分提取变更 → PII脱敏 → 传输。"""
 
-    def __init__(self, scrubber: Optional[DataScrubber] = None):
+    def __init__(self, scrubber: DataScrubber | None = None):
         self._scrubber = scrubber or DataScrubber()
 
     def prepare_transfer(
         self,
-        old_ast: Dict[str, Any],
-        new_ast: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        old_ast: dict[str, Any],
+        new_ast: dict[str, Any],
+    ) -> dict[str, Any]:
         diff = compute_ast_diff(old_ast, new_ast)
         scrubbed_diff, hits = self._scrubber.scrub_dict(diff)
         old_size = len(json.dumps(old_ast, ensure_ascii=False))
@@ -51,9 +51,9 @@ class SecureTransferPipeline:
 
     def apply_transfer(
         self,
-        base_ast: Dict[str, Any],
-        transfer_data: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        base_ast: dict[str, Any],
+        transfer_data: dict[str, Any],
+    ) -> dict[str, Any]:
         transfer_type = transfer_data.get("type", "")
         if transfer_type != "ast_diff_scrubbed":
             logger.error(f"未知传输类型: {transfer_type}")
@@ -66,14 +66,12 @@ class SecureTransferPipeline:
         )
         return result
 
-    def prepare_text_transfer(self, text: str) -> Tuple[str, List[str]]:
+    def prepare_text_transfer(self, text: str) -> tuple[str, list[str]]:
         scrubbed, hits = self._scrubber.scrub_text(text)
         logger.info(f"文本脱敏传输: hits={hits}")
         return scrubbed, hits
 
-    def prepare_dict_transfer(
-        self, data: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], List[str]]:
+    def prepare_dict_transfer(self, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         scrubbed, hits = self._scrubber.scrub_dict(data)
         logger.info(f"字典脱敏传输: hits={hits}")
         return scrubbed, hits

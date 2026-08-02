@@ -14,9 +14,10 @@ import asyncio
 import logging
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +63,16 @@ class MasterElection:
         self,
         node_id: str,
         priority: int = 0,
-        known_nodes: Optional[List[str]] = None,
+        known_nodes: list[str] | None = None,
         election_timeout_range: tuple = (5.0, 10.0),
         heartbeat_interval: float = 3.0,
-        on_elected: Optional[Callable[[], Any]] = None,
-        on_demoted: Optional[Callable[[], Any]] = None,
-        send_vote_request: Optional[Callable[[VoteRequest, str], Any]] = None,
+        on_elected: Callable[[], Any] | None = None,
+        on_demoted: Callable[[], Any] | None = None,
+        send_vote_request: Callable[[VoteRequest, str], Any] | None = None,
     ):
         self.node_id = node_id
         self.priority = priority
-        self._known_nodes: Set[str] = set(known_nodes or [])
+        self._known_nodes: set[str] = set(known_nodes or [])
         self._election_timeout_range = election_timeout_range
         self._heartbeat_interval = heartbeat_interval
         self._on_elected = on_elected
@@ -80,13 +81,13 @@ class MasterElection:
 
         self.state = ElectionState.FOLLOWER
         self.current_term = 0
-        self.voted_for: Optional[str] = None
-        self._votes_received: Set[str] = set()
+        self.voted_for: str | None = None
+        self._votes_received: set[str] = set()
         self._last_heartbeat = time.time()
         self._election_timeout = self._random_timeout()
         self._running = False
-        self._task: Optional[asyncio.Task] = None
-        self._leader_id: Optional[str] = None
+        self._task: asyncio.Task | None = None
+        self._leader_id: str | None = None
         self._lock = asyncio.Lock()
 
     def _random_timeout(self) -> float:
@@ -188,12 +189,13 @@ class MasterElection:
 
             vote_granted = False
             if req.term >= self.current_term:
-                if self.voted_for is None or self.voted_for == req.candidate_id:
-                    if req.candidate_priority >= self.priority or req.term > self.current_term:
-                        vote_granted = True
-                        self.voted_for = req.candidate_id
-                        self._last_heartbeat = time.time()
-                        self._election_timeout = self._random_timeout()
+                if (self.voted_for is None or self.voted_for == req.candidate_id) and (
+                    req.candidate_priority >= self.priority or req.term > self.current_term
+                ):
+                    vote_granted = True
+                    self.voted_for = req.candidate_id
+                    self._last_heartbeat = time.time()
+                    self._election_timeout = self._random_timeout()
 
             return VoteResponse(
                 term=self.current_term,
@@ -233,7 +235,7 @@ class MasterElection:
             else:
                 self._on_demoted()
 
-    def get_state(self) -> Dict[str, Any]:
+    def get_state(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
             "state": self.state.value,

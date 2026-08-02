@@ -8,43 +8,60 @@ import time
 
 import pytest
 
+from fusion_multi_node.master.cluster_master import (
+    ClusterMaster,
+    ClusterTask,
+    NodeInfo,
+    NodeStatus,
+    ParallelMode,
+)
 from fusion_multi_node.master.load_metrics import (
+    STRATEGY_WEIGHTS,
     LoadMetrics,
     LoadRouter,
     RoutingStrategy,
     RoutingWeights,
-    STRATEGY_WEIGHTS,
 )
-from fusion_multi_node.master.cluster_master import ClusterMaster, ClusterTask, NodeInfo, NodeStatus, ParallelMode
-from fusion_multi_node.storage.storage_volume import StorageVolume, VolumeSpec, VolumeType
-from fusion_multi_node.storage.shard_replication import ShardReplicator, ReplicationConfig
 from fusion_multi_node.master.task_sharding import (
     MergedResult,
-    ShardMerger,
     ShardingStrategy,
     ShardingType,
+    ShardMerger,
     TaskShard,
     TaskSharder,
+)
+from fusion_multi_node.storage.shard_replication import (
+    ReplicationConfig,
+    ShardReplicator,
+)
+from fusion_multi_node.storage.storage_volume import (
+    StorageVolume,
+    VolumeSpec,
+    VolumeType,
 )
 
 # ── M3-03 Master Election ──
 
+
 class TestMasterElection:
     def test_election_state_enum(self):
         from fusion_multi_node.master.election import ElectionState
+
         assert ElectionState.FOLLOWER.value == "follower"
         assert ElectionState.CANDIDATE.value == "candidate"
         assert ElectionState.LEADER.value == "leader"
 
     def test_vote_request_response(self):
         from fusion_multi_node.master.election import VoteRequest, VoteResponse
+
         req = VoteRequest(term=1, candidate_id="node-1", candidate_priority=5)
         assert req.term == 1
         resp = VoteResponse(term=1, vote_granted=True, voter_id="node-2")
         assert resp.vote_granted is True
 
     def test_election_init(self):
-        from fusion_multi_node.master.election import MasterElection, ElectionState
+        from fusion_multi_node.master.election import ElectionState, MasterElection
+
         e = MasterElection(node_id="node-1", priority=5, known_nodes=["node-2", "node-3"])
         assert e.node_id == "node-1"
         assert e.priority == 5
@@ -54,6 +71,7 @@ class TestMasterElection:
     @pytest.mark.asyncio
     async def test_election_start_stop(self):
         from fusion_multi_node.master.election import MasterElection
+
         e = MasterElection(node_id="node-1", priority=1)
         await e.start()
         assert e._running is True
@@ -63,6 +81,7 @@ class TestMasterElection:
     @pytest.mark.asyncio
     async def test_handle_vote_request(self):
         from fusion_multi_node.master.election import MasterElection, VoteRequest
+
         e = MasterElection(node_id="node-1", priority=3)
         req = VoteRequest(term=1, candidate_id="node-2", candidate_priority=5)
         resp = await e.handle_vote_request(req)
@@ -72,6 +91,7 @@ class TestMasterElection:
     @pytest.mark.asyncio
     async def test_receive_heartbeat(self):
         from fusion_multi_node.master.election import MasterElection
+
         e = MasterElection(node_id="node-1", priority=3)
         await e.receive_heartbeat("leader-1", term=1)
         assert e._leader_id == "leader-1"
@@ -79,6 +99,7 @@ class TestMasterElection:
 
     def test_get_state(self):
         from fusion_multi_node.master.election import MasterElection
+
         e = MasterElection(node_id="node-1", priority=5, known_nodes=["node-2"])
         state = e.get_state()
         assert state["node_id"] == "node-1"
@@ -87,6 +108,7 @@ class TestMasterElection:
 
     def test_add_remove_known_node(self):
         from fusion_multi_node.master.election import MasterElection
+
         e = MasterElection(node_id="node-1")
         e.add_known_node("node-2")
         assert "node-2" in e._known_nodes
@@ -96,14 +118,17 @@ class TestMasterElection:
 
 # ── M4-05 Cloud Fallback ──
 
+
 class TestCloudFallback:
     def test_cloud_provider_enum(self):
         from fusion_multi_node.master.cloud_fallback import CloudProvider
+
         assert CloudProvider.OPENAI.value == "openai"
         assert CloudProvider.ANTHROPIC.value == "anthropic"
 
     def test_cloud_config_defaults(self):
         from fusion_multi_node.master.cloud_fallback import CloudConfig, CloudProvider
+
         config = CloudConfig()
         assert config.provider == CloudProvider.OPENAI
         assert config.enabled is True
@@ -111,23 +136,35 @@ class TestCloudFallback:
 
     def test_cloud_usage(self):
         from fusion_multi_node.master.cloud_fallback import CloudUsage
-        usage = CloudUsage(total_requests=5, total_input_tokens=1000, total_output_tokens=500, total_cost=0.05)
+
+        usage = CloudUsage(
+            total_requests=5,
+            total_input_tokens=1000,
+            total_output_tokens=500,
+            total_cost=0.05,
+        )
         assert usage.total_requests == 5
 
     def test_available_models(self):
         from fusion_multi_node.master.cloud_fallback import AVAILABLE_MODELS
+
         assert len(AVAILABLE_MODELS) >= 2
         model_ids = [m.model_id for m in AVAILABLE_MODELS]
         assert "gpt-4o-mini" in model_ids
 
     def test_cloud_client_init(self):
         from fusion_multi_node.master.cloud_fallback import CloudFallbackClient
+
         client = CloudFallbackClient()
         assert client.config.enabled is True
 
     @pytest.mark.asyncio
     async def test_cloud_chat_disabled(self):
-        from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
+        from fusion_multi_node.master.cloud_fallback import (
+            CloudConfig,
+            CloudFallbackClient,
+        )
+
         config = CloudConfig(enabled=False)
         client = CloudFallbackClient(config=config)
         result = await client.chat(messages=[{"role": "user", "content": "hi"}])
@@ -135,7 +172,11 @@ class TestCloudFallback:
 
     @pytest.mark.asyncio
     async def test_cloud_chat_no_key(self):
-        from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
+        from fusion_multi_node.master.cloud_fallback import (
+            CloudConfig,
+            CloudFallbackClient,
+        )
+
         config = CloudConfig(api_key="")
         client = CloudFallbackClient(config=config)
         result = await client.chat(messages=[{"role": "user", "content": "hi"}])
@@ -143,6 +184,7 @@ class TestCloudFallback:
 
     def test_get_usage(self):
         from fusion_multi_node.master.cloud_fallback import CloudFallbackClient
+
         client = CloudFallbackClient()
         usage = client.get_usage()
         assert "total_requests" in usage
@@ -151,9 +193,11 @@ class TestCloudFallback:
 
 # ── M4-04 Task Auto-degradation & M5-04 Cancel ──
 
+
 class TestClusterTaskNewFields:
     def test_task_new_fields(self):
         from fusion_multi_node.master.cluster_master import ClusterTask, ParallelMode
+
         task = ClusterTask(
             task_id="t1",
             name="test",
@@ -171,7 +215,13 @@ class TestClusterTaskNewFields:
 
     @pytest.mark.asyncio
     async def test_cancel_task(self):
-        from fusion_multi_node.master.cluster_master import ClusterMaster, ClusterTask, ParallelMode, TaskStatus
+        from fusion_multi_node.master.cluster_master import (
+            ClusterMaster,
+            ClusterTask,
+            ParallelMode,
+            TaskStatus,
+        )
+
         master = ClusterMaster()
         task = ClusterTask(
             task_id="t-cancel",
@@ -188,12 +238,27 @@ class TestClusterTaskNewFields:
 
     @pytest.mark.asyncio
     async def test_cancel_task_with_sub_tasks(self):
-        from fusion_multi_node.master.cluster_master import ClusterMaster, ClusterTask, ParallelMode, TaskStatus
+        from fusion_multi_node.master.cluster_master import (
+            ClusterMaster,
+            ClusterTask,
+            ParallelMode,
+            TaskStatus,
+        )
+
         master = ClusterMaster()
-        sub = ClusterTask(task_id="sub-1", name="sub", mode=ParallelMode.DATA, status=TaskStatus.RUNNING, started_at=time.time())
+        sub = ClusterTask(
+            task_id="sub-1",
+            name="sub",
+            mode=ParallelMode.DATA,
+            status=TaskStatus.RUNNING,
+            started_at=time.time(),
+        )
         parent = ClusterTask(
-            task_id="parent-1", name="parent", mode=ParallelMode.DATA,
-            status=TaskStatus.RUNNING, started_at=time.time(),
+            task_id="parent-1",
+            name="parent",
+            mode=ParallelMode.DATA,
+            status=TaskStatus.RUNNING,
+            started_at=time.time(),
             sub_tasks=["sub-1"],
         )
         master.tasks["sub-1"] = sub
@@ -205,6 +270,7 @@ class TestClusterTaskNewFields:
 
     def test_model_degradation_chain(self):
         from fusion_multi_node.master.cluster_master import ClusterMaster
+
         chain = ClusterMaster.MODEL_DEGRADATION_CHAIN
         assert chain["70b"] == "32b"
         assert chain["32b"] == "13b"
@@ -212,6 +278,7 @@ class TestClusterTaskNewFields:
 
     def test_extract_model_size(self):
         from fusion_multi_node.master.cluster_master import ClusterMaster
+
         master = ClusterMaster()
         assert master._extract_model_size("llama-70b-chat") == "70b"
         assert master._extract_model_size("qwen-8b") == "8b"
@@ -220,15 +287,22 @@ class TestClusterTaskNewFields:
 
 # ── M6 Security ──
 
+
 class TestPermissionManager:
     def test_assign_role(self):
-        from fusion_multi_node.security.permission import PermissionManager, NodeRole
+        from fusion_multi_node.security.permission import NodeRole, PermissionManager
+
         pm = PermissionManager()
         pm.assign_role("node-1", NodeRole.MASTER)
         assert pm.get_role("node-1") == NodeRole.MASTER
 
     def test_master_permissions(self):
-        from fusion_multi_node.security.permission import PermissionManager, NodeRole, Permission
+        from fusion_multi_node.security.permission import (
+            NodeRole,
+            Permission,
+            PermissionManager,
+        )
+
         pm = PermissionManager()
         pm.assign_role("master-1", NodeRole.MASTER)
         assert pm.has_permission("master-1", Permission.TASK_SUBMIT) is True
@@ -236,7 +310,12 @@ class TestPermissionManager:
         assert pm.has_permission("master-1", Permission.TASK_EXECUTE) is False
 
     def test_worker_permissions(self):
-        from fusion_multi_node.security.permission import PermissionManager, NodeRole, Permission
+        from fusion_multi_node.security.permission import (
+            NodeRole,
+            Permission,
+            PermissionManager,
+        )
+
         pm = PermissionManager()
         pm.assign_role("worker-1", NodeRole.WORKER)
         assert pm.has_permission("worker-1", Permission.TASK_EXECUTE) is True
@@ -245,7 +324,8 @@ class TestPermissionManager:
         assert pm.has_permission("worker-1", Permission.CLUSTER_STATS) is False
 
     def test_check_path_access(self):
-        from fusion_multi_node.security.permission import PermissionManager, NodeRole
+        from fusion_multi_node.security.permission import NodeRole, PermissionManager
+
         pm = PermissionManager()
         pm.assign_role("worker-1", NodeRole.WORKER)
         assert pm.check_path_access("worker-1", "/api/execute", "POST") is True
@@ -253,19 +333,22 @@ class TestPermissionManager:
         assert pm.check_path_access("worker-1", "/api/health", "GET") is True
 
     def test_unknown_node_denied(self):
-        from fusion_multi_node.security.permission import PermissionManager, Permission
+        from fusion_multi_node.security.permission import Permission, PermissionManager
+
         pm = PermissionManager()
         assert pm.has_permission("unknown", Permission.TASK_SUBMIT) is False
 
     def test_remove_assignment(self):
-        from fusion_multi_node.security.permission import PermissionManager, NodeRole
+        from fusion_multi_node.security.permission import NodeRole, PermissionManager
+
         pm = PermissionManager()
         pm.assign_role("node-1", NodeRole.MASTER)
         pm.remove_assignment("node-1")
         assert pm.get_role("node-1") is None
 
     def test_get_permissions(self):
-        from fusion_multi_node.security.permission import PermissionManager, NodeRole
+        from fusion_multi_node.security.permission import NodeRole, PermissionManager
+
         pm = PermissionManager()
         pm.assign_role("master-1", NodeRole.MASTER)
         perms = pm.get_permissions("master-1")
@@ -275,6 +358,7 @@ class TestPermissionManager:
 class TestNodeApproval:
     def test_request_join(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
+
         mgr = NodeApprovalManager()
         req = mgr.request_join(
             node_id="node-1",
@@ -287,6 +371,7 @@ class TestNodeApproval:
 
     def test_approve(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
+
         mgr = NodeApprovalManager()
         mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         mgr.approve("node-1", approved_by="admin")
@@ -294,6 +379,7 @@ class TestNodeApproval:
 
     def test_reject(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
+
         mgr = NodeApprovalManager()
         mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         mgr.reject("node-1", reason="untrusted")
@@ -301,12 +387,14 @@ class TestNodeApproval:
 
     def test_auto_approve_patterns(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
+
         mgr = NodeApprovalManager(auto_approve_patterns=["192.168."])
         mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         assert mgr.is_approved("node-1") is True
 
     def test_revoke(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
+
         mgr = NodeApprovalManager(auto_approve_patterns=["192.168.*"])
         mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         mgr.revoke_approval("node-1")
@@ -316,12 +404,14 @@ class TestNodeApproval:
 class TestWorkerSandbox:
     def test_sandbox_config_defaults(self):
         from fusion_multi_node.security.sandbox import SandboxConfig
+
         config = SandboxConfig()
         assert config.max_cpu_seconds == 300
         assert config.max_memory_mb == 8192
 
     def test_check_path_access(self):
-        from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
         config = SandboxConfig(allowed_paths=["/tmp", "/data"], read_only_paths=["/models"])
         sandbox = WorkerSandbox(config=config)
         assert sandbox.check_path_access("/tmp/output", write=True) is True
@@ -330,7 +420,8 @@ class TestWorkerSandbox:
         assert sandbox.check_path_access("/etc/passwd", write=False) is False
 
     def test_check_network_access(self):
-        from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
         config = SandboxConfig(allowed_network_hosts=["api.openai.com", "internal"])
         sandbox = WorkerSandbox(config=config)
         assert sandbox.check_network_access("api.openai.com") is True
@@ -338,12 +429,14 @@ class TestWorkerSandbox:
         assert sandbox.check_network_access("evil.com") is False
 
     def test_check_network_no_whitelist(self):
-        from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
         sandbox = WorkerSandbox(config=SandboxConfig(allowed_network_hosts=[]))
         assert sandbox.check_network_access("any-host.com") is True
 
     def test_filter_environment(self):
         from fusion_multi_node.security.sandbox import WorkerSandbox
+
         sandbox = WorkerSandbox()
         env = {
             "HOME": "/Users/test",
@@ -363,6 +456,7 @@ class TestWorkerSandbox:
 class TestDataScrubber:
     def test_scrub_phone(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber
+
         scrubber = DataScrubber()
         text, hits = scrubber.scrub_text("请联系 13912345678")
         assert "13912345678" not in text
@@ -370,6 +464,7 @@ class TestDataScrubber:
 
     def test_scrub_email(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber
+
         scrubber = DataScrubber()
         text, hits = scrubber.scrub_text("email: test@example.com")
         assert "test@example.com" not in text
@@ -377,6 +472,7 @@ class TestDataScrubber:
 
     def test_scrub_dict(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber
+
         scrubber = DataScrubber()
         data = {"user": "张三", "phone": "13912345678", "note": "call me"}
         result, hits = scrubber.scrub_dict(data)
@@ -385,6 +481,7 @@ class TestDataScrubber:
 
     def test_scrub_api_key(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber
+
         scrubber = DataScrubber()
         text, hits = scrubber.scrub_text('api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"')
         assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in text
@@ -392,33 +489,44 @@ class TestDataScrubber:
 
     def test_custom_rule(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber, ScrubRule
-        scrubber = DataScrubber(custom_rules=[
-            ScrubRule(name="test_id", pattern=r"ID-\d{6}", replacement="[ID]")
-        ])
+
+        scrubber = DataScrubber(custom_rules=[ScrubRule(name="test_id", pattern=r"ID-\d{6}", replacement="[ID]")])
         text, hits = scrubber.scrub_text("Your ID-123456 is ready")
         assert "ID-123456" not in text
         assert "test_id" in hits
 
     def test_active_rules(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber
+
         scrubber = DataScrubber()
         assert scrubber.rule_count >= 7
         assert "phone_cn" in scrubber.active_rules
 
     def test_no_hits(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber
+
         scrubber = DataScrubber()
-        text, hits = scrubber.scrub_text("hello world")
+        _text, hits = scrubber.scrub_text("hello world")
         assert hits == []
 
 
 # ── M8 Log Store & Diagnosis ──
 
+
 class TestLogStore:
     def test_store_and_query(self):
         from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
-        store.store(StoredLog(timestamp=time.time(), level="error", source="master", message="节点心跳超时", node_id="node-1"))
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="error",
+                source="master",
+                message="节点心跳超时",
+                node_id="node-1",
+            )
+        )
         store.store(StoredLog(timestamp=time.time(), level="info", source="agent", message="任务完成"))
         results = store.query(level="error")
         assert len(results) == 1
@@ -426,22 +534,49 @@ class TestLogStore:
 
     def test_query_by_node(self):
         from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
-        store.store(StoredLog(timestamp=time.time(), level="info", source="a", message="m1", node_id="n1"))
-        store.store(StoredLog(timestamp=time.time(), level="info", source="a", message="m2", node_id="n2"))
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="info",
+                source="a",
+                message="m1",
+                node_id="n1",
+            )
+        )
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="info",
+                source="a",
+                message="m2",
+                node_id="n2",
+            )
+        )
         results = store.query(node_id="n1")
         assert len(results) == 1
 
     def test_query_by_keyword(self):
         from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
-        store.store(StoredLog(timestamp=time.time(), level="error", source="a", message="OOM out of memory"))
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="error",
+                source="a",
+                message="OOM out of memory",
+            )
+        )
         results = store.query(keyword="memory")
         assert len(results) == 1
 
     def test_export_json(self):
-        from fusion_multi_node.observability.log_store import LogStore, StoredLog
         import json
+
+        from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
         store.store(StoredLog(timestamp=time.time(), level="info", source="a", message="test"))
         data = json.loads(store.export_json())
@@ -449,6 +584,7 @@ class TestLogStore:
 
     def test_export_csv(self):
         from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
         store.store(StoredLog(timestamp=time.time(), level="info", source="a", message="test"))
         csv_text = store.export_csv()
@@ -457,14 +593,24 @@ class TestLogStore:
 
     def test_export_text(self):
         from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
-        store.store(StoredLog(timestamp=time.time(), level="error", source="master", message="fail", node_id="n1"))
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="error",
+                source="master",
+                message="fail",
+                node_id="n1",
+            )
+        )
         text = store.export_text()
         assert "ERROR" in text
         assert "fail" in text
 
     def test_get_stats(self):
         from fusion_multi_node.observability.log_store import LogStore, StoredLog
+
         store = LogStore(persist_to_disk=False)
         store.store(StoredLog(timestamp=time.time(), level="info", source="a", message="m1"))
         store.store(StoredLog(timestamp=time.time(), level="error", source="b", message="m2"))
@@ -474,25 +620,55 @@ class TestLogStore:
 
 class TestFaultDiagnoser:
     def test_diagnose_heartbeat_timeout(self):
-        from fusion_multi_node.observability.log_store import LogStore, StoredLog, FaultDiagnoser
+        from fusion_multi_node.observability.log_store import (
+            FaultDiagnoser,
+            LogStore,
+            StoredLog,
+        )
+
         store = LogStore(persist_to_disk=False)
         diagnoser = FaultDiagnoser()
-        store.store(StoredLog(timestamp=time.time(), level="warning", source="master", message="节点心跳超时: node-1", node_id="node-1"))
-        store.store(StoredLog(timestamp=time.time(), level="warning", source="master", message="节点心跳超时: node-2", node_id="node-2"))
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="warning",
+                source="master",
+                message="节点心跳超时: node-1",
+                node_id="node-1",
+            )
+        )
+        store.store(
+            StoredLog(
+                timestamp=time.time(),
+                level="warning",
+                source="master",
+                message="节点心跳超时: node-2",
+                node_id="node-2",
+            )
+        )
         results = diagnoser.diagnose(store._entries)
         assert len(results) >= 1
         names = [r.pattern for r in results]
         assert "node_heartbeat_timeout" in names
 
     def test_diagnose_oom(self):
-        from fusion_multi_node.observability.log_store import StoredLog, FaultDiagnoser
+        from fusion_multi_node.observability.log_store import FaultDiagnoser, StoredLog
+
         diagnoser = FaultDiagnoser()
-        logs = [StoredLog(timestamp=time.time(), level="error", source="agent", message="任务执行失败: OOM")]
+        logs = [
+            StoredLog(
+                timestamp=time.time(),
+                level="error",
+                source="agent",
+                message="任务执行失败: OOM",
+            )
+        ]
         results = diagnoser.diagnose(logs)
         assert any(r.pattern == "task_execution_failure" for r in results)
 
     def test_analyze_frequency(self):
-        from fusion_multi_node.observability.log_store import StoredLog, FaultDiagnoser
+        from fusion_multi_node.observability.log_store import FaultDiagnoser, StoredLog
+
         diagnoser = FaultDiagnoser()
         logs = [
             StoredLog(timestamp=time.time(), level="info", source="master", message="a"),
@@ -506,9 +682,11 @@ class TestFaultDiagnoser:
 
 # ── M9 Storage ──
 
+
 class TestStorageVolume:
     def test_create_and_delete_volume(self):
         from fusion_multi_node.storage.storage_volume import StorageVolume, VolumeSpec
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sv = StorageVolume(base_dir=tmpdir)
             spec = VolumeSpec(name="test-vol", volume_type=VolumeType.LOCAL)
@@ -520,6 +698,7 @@ class TestStorageVolume:
 
     def test_write_read_file(self):
         from fusion_multi_node.storage.storage_volume import StorageVolume, VolumeSpec
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sv = StorageVolume(base_dir=tmpdir)
             spec = VolumeSpec(name="data-vol", volume_type=VolumeType.LOCAL)
@@ -530,6 +709,7 @@ class TestStorageVolume:
 
     def test_delete_file(self):
         from fusion_multi_node.storage.storage_volume import StorageVolume, VolumeSpec
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sv = StorageVolume(base_dir=tmpdir)
             sv.create_volume(VolumeSpec(name="vol1"))
@@ -539,6 +719,7 @@ class TestStorageVolume:
 
     def test_list_files(self):
         from fusion_multi_node.storage.storage_volume import StorageVolume, VolumeSpec
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sv = StorageVolume(base_dir=tmpdir)
             sv.create_volume(VolumeSpec(name="v2"))
@@ -549,6 +730,7 @@ class TestStorageVolume:
 
     def test_list_volumes(self):
         from fusion_multi_node.storage.storage_volume import StorageVolume, VolumeSpec
+
         with tempfile.TemporaryDirectory() as tmpdir:
             sv = StorageVolume(base_dir=tmpdir)
             sv.create_volume(VolumeSpec(name="v1"))
@@ -560,6 +742,7 @@ class TestStorageVolume:
 class TestShardReplicator:
     def test_assign_replicas(self):
         from fusion_multi_node.storage.shard_replication import ShardReplicator
+
         replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
         nodes = [{"node_id": "n1"}, {"node_id": "n2"}, {"node_id": "n3"}]
         replicas = replicator.assign_replicas("shard-1", "/models/llama.bin", 1024, nodes)
@@ -567,6 +750,7 @@ class TestShardReplicator:
 
     def test_get_healthy_replica(self):
         from fusion_multi_node.storage.shard_replication import ShardReplicator
+
         replicator = ShardReplicator()
         nodes = [{"node_id": "n1"}]
         replicator.assign_replicas("s1", "file.bin", 100, nodes)
@@ -575,6 +759,7 @@ class TestShardReplicator:
 
     def test_mark_failed(self):
         from fusion_multi_node.storage.shard_replication import ShardReplicator
+
         replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
         nodes = [{"node_id": "n1"}, {"node_id": "n2"}]
         replicator.assign_replicas("s1", "f", 100, nodes)
@@ -584,6 +769,7 @@ class TestShardReplicator:
 
     def test_under_replicated(self):
         from fusion_multi_node.storage.shard_replication import ShardReplicator
+
         replicator = ShardReplicator(config=ReplicationConfig(replication_factor=3))
         nodes = [{"node_id": "n1"}]
         replicator.assign_replicas("s1", "f", 100, nodes)
@@ -592,7 +778,11 @@ class TestShardReplicator:
 
 class TestCheckpointManager:
     def test_save_and_load(self):
-        from fusion_multi_node.storage.checkpoint import CheckpointManager, CheckpointEntry
+        from fusion_multi_node.storage.checkpoint import (
+            CheckpointEntry,
+            CheckpointManager,
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mgr = CheckpointManager(checkpoint_dir=tmpdir, max_checkpoints=10)
             entry = CheckpointEntry(
@@ -608,7 +798,11 @@ class TestCheckpointManager:
             assert loaded.step == 5
 
     def test_load_latest(self):
-        from fusion_multi_node.storage.checkpoint import CheckpointManager, CheckpointEntry
+        from fusion_multi_node.storage.checkpoint import (
+            CheckpointEntry,
+            CheckpointManager,
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mgr = CheckpointManager(checkpoint_dir=tmpdir)
             mgr.save(CheckpointEntry(checkpoint_id="cp-1", task_id="t1", node_id="n1", step=3))
@@ -618,7 +812,11 @@ class TestCheckpointManager:
             assert latest.step == 7
 
     def test_delete(self):
-        from fusion_multi_node.storage.checkpoint import CheckpointManager, CheckpointEntry
+        from fusion_multi_node.storage.checkpoint import (
+            CheckpointEntry,
+            CheckpointManager,
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mgr = CheckpointManager(checkpoint_dir=tmpdir)
             mgr.save(CheckpointEntry(checkpoint_id="cp-1", task_id="t1", node_id="n1", step=1))
@@ -626,7 +824,11 @@ class TestCheckpointManager:
             assert mgr.load("cp-1") is None
 
     def test_list_by_task(self):
-        from fusion_multi_node.storage.checkpoint import CheckpointManager, CheckpointEntry
+        from fusion_multi_node.storage.checkpoint import (
+            CheckpointEntry,
+            CheckpointManager,
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mgr = CheckpointManager(checkpoint_dir=tmpdir)
             mgr.save(CheckpointEntry(checkpoint_id="cp-1", task_id="t1", node_id="n1", step=1))
@@ -638,9 +840,14 @@ class TestCheckpointManager:
 
 # ── M10 Autoscaler ──
 
+
 class TestAutoscaler:
     def test_config_defaults(self):
-        from fusion_multi_node.autoscaler.autoscaler import AutoscalerConfig, ScalePolicy
+        from fusion_multi_node.autoscaler.autoscaler import (
+            AutoscalerConfig,
+            ScalePolicy,
+        )
+
         config = AutoscalerConfig()
         assert config.min_nodes == 1
         assert config.max_nodes == 10
@@ -648,11 +855,13 @@ class TestAutoscaler:
 
     def test_policy_enum(self):
         from fusion_multi_node.autoscaler.autoscaler import ScalePolicy
+
         assert ScalePolicy.CONSERVATIVE.value == "conservative"
         assert ScalePolicy.AGGRESSIVE.value == "aggressive"
 
     def test_autoscaler_init(self):
         from fusion_multi_node.autoscaler.autoscaler import Autoscaler, ScalePolicy
+
         scaler = Autoscaler(policy=ScalePolicy.AGGRESSIVE)
         assert scaler.config.policy == ScalePolicy.AGGRESSIVE
         assert scaler.config.scale_up_threshold == 0.6
@@ -660,8 +869,19 @@ class TestAutoscaler:
     @pytest.mark.asyncio
     async def test_evaluate_noop(self):
         from fusion_multi_node.autoscaler.autoscaler import Autoscaler, ScaleAction
+
         scaler = Autoscaler(
-            get_cluster_state=lambda: {"nodes": [{"status": "online", "active_tasks": 1, "max_tasks": 4, "last_heartbeat": time.time()}], "tasks": []}
+            get_cluster_state=lambda: {
+                "nodes": [
+                    {
+                        "status": "online",
+                        "active_tasks": 1,
+                        "max_tasks": 4,
+                        "last_heartbeat": time.time(),
+                    }
+                ],
+                "tasks": [],
+            }
         )
         action = await scaler.evaluate()
         assert action == ScaleAction.NOOP
@@ -669,13 +889,22 @@ class TestAutoscaler:
     @pytest.mark.asyncio
     async def test_evaluate_scale_up(self):
         from fusion_multi_node.autoscaler.autoscaler import Autoscaler, ScaleAction
+
         scale_up_called = False
 
         def on_scale_up(count):
             nonlocal scale_up_called
             scale_up_called = True
 
-        nodes = [{"status": "online", "active_tasks": 4, "max_tasks": 4, "last_heartbeat": time.time(), "node_id": "n1"}]
+        nodes = [
+            {
+                "status": "online",
+                "active_tasks": 4,
+                "max_tasks": 4,
+                "last_heartbeat": time.time(),
+                "node_id": "n1",
+            }
+        ]
         tasks = [{"status": "pending"}, {"status": "pending"}]
 
         scaler = Autoscaler(
@@ -690,6 +919,7 @@ class TestAutoscaler:
 
     def test_get_stats(self):
         from fusion_multi_node.autoscaler.autoscaler import Autoscaler
+
         scaler = Autoscaler()
         stats = scaler.get_stats()
         assert "policy" in stats
@@ -698,37 +928,46 @@ class TestAutoscaler:
 
 # ── M1-05 Manual Join ──
 
+
 class TestManualJoin:
     def test_manual_join_manager(self):
         from fusion_multi_node.discovery.manual_join import ManualJoinManager
+
         mgr = ManualJoinManager(cluster_secret="test-secret", auto_approve=True)
-        result = mgr.handle_join_request({
-            "node_id": "node-1",
-            "hostname": "mac-1",
-            "ip_address": "192.168.1.10",
-            "port": 11445,
-            "cluster_secret": "test-secret",
-        })
+        result = mgr.handle_join_request(
+            {
+                "node_id": "node-1",
+                "hostname": "mac-1",
+                "ip_address": "192.168.1.10",
+                "port": 11445,
+                "cluster_secret": "test-secret",
+            }
+        )
         assert result["status"] == "ok"
         assert result["node_id"] == "node-1"
 
     def test_manual_join_wrong_secret(self):
         from fusion_multi_node.discovery.manual_join import ManualJoinManager
+
         mgr = ManualJoinManager(cluster_secret="secret", auto_approve=True)
-        result = mgr.handle_join_request({
-            "node_id": "node-1",
-            "cluster_secret": "wrong",
-        })
+        result = mgr.handle_join_request(
+            {
+                "node_id": "node-1",
+                "cluster_secret": "wrong",
+            }
+        )
         assert result["status"] == "error"
 
     def test_manual_join_no_node_id(self):
         from fusion_multi_node.discovery.manual_join import ManualJoinManager
+
         mgr = ManualJoinManager()
         result = mgr.handle_join_request({})
         assert result["status"] == "error"
 
     def test_join_history(self):
         from fusion_multi_node.discovery.manual_join import ManualJoinManager
+
         mgr = ManualJoinManager()
         mgr.handle_join_request({"node_id": "n1", "hostname": "h1", "ip_address": "1.1.1.1", "port": 11445})
         history = mgr.get_join_history()
@@ -737,6 +976,7 @@ class TestManualJoin:
 
     def test_join_request_response_dataclass(self):
         from fusion_multi_node.discovery.manual_join import JoinRequest, JoinResponse
+
         req = JoinRequest(node_id="n1", hostname="h1", ip_address="1.1.1.1", port=11445)
         assert req.node_id == "n1"
         resp = JoinResponse(success=True, master_host="1.2.3.4", master_port=11452)
@@ -744,6 +984,7 @@ class TestManualJoin:
 
 
 # ── M4-01 LoadMetrics + LoadRouter Tests ──
+
 
 class TestLoadMetrics:
     def test_defaults(self):
@@ -766,7 +1007,14 @@ class TestLoadMetrics:
         assert not m2.is_stale
 
     def test_to_dict_roundtrip(self):
-        m = LoadMetrics(uma_used_ratio=0.5, cpu_percent=30.0, metal_util=0.1, task_queue_len=3, net_rtt_ms=10.0, node_id="n1")
+        m = LoadMetrics(
+            uma_used_ratio=0.5,
+            cpu_percent=30.0,
+            metal_util=0.1,
+            task_queue_len=3,
+            net_rtt_ms=10.0,
+            node_id="n1",
+        )
         d = m.to_dict()
         m2 = LoadMetrics.from_dict(d)
         assert m2.uma_used_ratio == 0.5
@@ -781,20 +1029,59 @@ class TestLoadMetrics:
 class TestLoadRouter:
     def _make_router(self):
         router = LoadRouter(strategy=RoutingStrategy.BALANCED)
-        router.update_metrics("n1", LoadMetrics(uma_used_ratio=0.2, cpu_percent=20.0, metal_util=0.1, task_queue_len=1, net_rtt_ms=5.0))
-        router.update_metrics("n2", LoadMetrics(uma_used_ratio=0.8, cpu_percent=90.0, metal_util=0.9, task_queue_len=7, net_rtt_ms=80.0))
-        router.update_metrics("n3", LoadMetrics(uma_used_ratio=0.4, cpu_percent=40.0, metal_util=0.3, task_queue_len=2, net_rtt_ms=15.0))
+        router.update_metrics(
+            "n1",
+            LoadMetrics(
+                uma_used_ratio=0.2,
+                cpu_percent=20.0,
+                metal_util=0.1,
+                task_queue_len=1,
+                net_rtt_ms=5.0,
+            ),
+        )
+        router.update_metrics(
+            "n2",
+            LoadMetrics(
+                uma_used_ratio=0.8,
+                cpu_percent=90.0,
+                metal_util=0.9,
+                task_queue_len=7,
+                net_rtt_ms=80.0,
+            ),
+        )
+        router.update_metrics(
+            "n3",
+            LoadMetrics(
+                uma_used_ratio=0.4,
+                cpu_percent=40.0,
+                metal_util=0.3,
+                task_queue_len=2,
+                net_rtt_ms=15.0,
+            ),
+        )
         return router
 
     def test_compute_score_high(self):
         router = LoadRouter()
-        m = LoadMetrics(uma_used_ratio=0.1, cpu_percent=10.0, metal_util=0.1, task_queue_len=0, net_rtt_ms=1.0)
+        m = LoadMetrics(
+            uma_used_ratio=0.1,
+            cpu_percent=10.0,
+            metal_util=0.1,
+            task_queue_len=0,
+            net_rtt_ms=1.0,
+        )
         score = router.compute_score(m)
         assert score > 0.8
 
     def test_compute_score_low(self):
         router = LoadRouter()
-        m = LoadMetrics(uma_used_ratio=0.9, cpu_percent=95.0, metal_util=0.9, task_queue_len=8, net_rtt_ms=90.0)
+        m = LoadMetrics(
+            uma_used_ratio=0.9,
+            cpu_percent=95.0,
+            metal_util=0.9,
+            task_queue_len=8,
+            net_rtt_ms=90.0,
+        )
         score = router.compute_score(m)
         assert score < 0.2
 
@@ -850,7 +1137,13 @@ class TestLoadRouter:
 
     def test_score_breakdown(self):
         router = LoadRouter()
-        m = LoadMetrics(uma_used_ratio=0.5, cpu_percent=50.0, metal_util=0.5, task_queue_len=4, net_rtt_ms=50.0)
+        m = LoadMetrics(
+            uma_used_ratio=0.5,
+            cpu_percent=50.0,
+            metal_util=0.5,
+            task_queue_len=4,
+            net_rtt_ms=50.0,
+        )
         bd = router.score_breakdown(m)
         assert "uma" in bd
         assert "cpu" in bd
@@ -880,7 +1173,13 @@ class TestRoutingWeights:
         assert STRATEGY_WEIGHTS[RoutingStrategy.LOW_LATENCY].validate()
 
     def test_invalid_weights(self):
-        w = RoutingWeights(uma_weight=0.5, cpu_weight=0.5, metal_weight=0.5, queue_weight=0.5, net_weight=0.5)
+        w = RoutingWeights(
+            uma_weight=0.5,
+            cpu_weight=0.5,
+            metal_weight=0.5,
+            queue_weight=0.5,
+            net_weight=0.5,
+        )
         assert not w.validate()
 
 
@@ -894,29 +1193,46 @@ class TestLoadRouterIntegration:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=11445,
-                total_memory_gb=16.0, available_memory_gb=12.0,
-                active_tasks=1, network_rtt_ms=5.0,
+                node_id="n1",
+                hostname="mac1",
+                ip_address="192.168.1.10",
+                port=11445,
+                total_memory_gb=16.0,
+                available_memory_gb=12.0,
+                active_tasks=1,
+                network_rtt_ms=5.0,
             )
             await cm.register_node(info)
             m = cm.load_router.get_metrics("n1")
             assert m is not None
             assert abs(m.uma_used_ratio - 0.25) < 0.01
+
         asyncio.run(_test())
 
     def test_update_node_load(self):
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=11445,
-                total_memory_gb=16.0, available_memory_gb=12.0,
+                node_id="n1",
+                hostname="mac1",
+                ip_address="192.168.1.10",
+                port=11445,
+                total_memory_gb=16.0,
+                available_memory_gb=12.0,
             )
             await cm.register_node(info)
-            metrics = LoadMetrics(uma_used_ratio=0.6, cpu_percent=50.0, metal_util=0.3, task_queue_len=3, net_rtt_ms=10.0)
+            metrics = LoadMetrics(
+                uma_used_ratio=0.6,
+                cpu_percent=50.0,
+                metal_util=0.3,
+                task_queue_len=3,
+                net_rtt_ms=10.0,
+            )
             await cm.update_node_load("n1", metrics)
             m = cm.load_router.get_metrics("n1")
             assert m.uma_used_ratio == 0.6
             assert cm.nodes["n1"].active_tasks == 3
+
         asyncio.run(_test())
 
     def test_unregister_removes_from_router(self):
@@ -927,6 +1243,7 @@ class TestLoadRouterIntegration:
             assert cm.load_router.get_metrics("n1") is not None
             await cm.unregister_node("n1")
             assert cm.load_router.get_metrics("n1") is None
+
         asyncio.run(_test())
 
     def test_stats_includes_load_summary(self):
@@ -935,78 +1252,112 @@ class TestLoadRouterIntegration:
             stats = await cm.get_stats()
             assert "load_summary" in stats
             assert stats["load_summary"]["node_count"] == 0
+
         asyncio.run(_test())
 
 
 # ── M4-02/03 本地强制门控 + VRAM优先调度 Tests ──
+
 
 class TestLocalForceGate:
     def test_lightweight_model_forced_local(self):
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=11445,
-                total_memory_gb=16.0, available_memory_gb=14.0,
+                node_id="local",
+                hostname="mac1",
+                ip_address="127.0.0.1",
+                port=11445,
+                total_memory_gb=16.0,
+                available_memory_gb=14.0,
             )
             await cm.register_node(info)
             task = ClusterTask(
-                task_id="t1", name="tiny", mode=ParallelMode.DATA,
-                model_name="qwen-0.5b", preferred_node_id="local",
+                task_id="t1",
+                name="tiny",
+                mode=ParallelMode.DATA,
+                model_name="qwen-0.5b",
+                preferred_node_id="local",
             )
             ok = await cm.assign_task(task)
             assert ok
             assert task.assigned_nodes == ["local"]
+
         asyncio.run(_test())
 
     def test_1b_model_forced_local(self):
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=11445,
-                total_memory_gb=16.0, available_memory_gb=14.0,
+                node_id="local",
+                hostname="mac1",
+                ip_address="127.0.0.1",
+                port=11445,
+                total_memory_gb=16.0,
+                available_memory_gb=14.0,
             )
             await cm.register_node(info)
             task = ClusterTask(
-                task_id="t2", name="small", mode=ParallelMode.DATA,
-                model_name="qwen-1b", preferred_node_id="local",
+                task_id="t2",
+                name="small",
+                mode=ParallelMode.DATA,
+                model_name="qwen-1b",
+                preferred_node_id="local",
             )
             ok = await cm.assign_task(task)
             assert ok
             assert task.assigned_nodes == ["local"]
+
         asyncio.run(_test())
 
     def test_local_force_fallback_when_preferred_unavailable(self):
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="remote", hostname="mac2", ip_address="192.168.1.11", port=11445,
-                total_memory_gb=32.0, available_memory_gb=28.0,
+                node_id="remote",
+                hostname="mac2",
+                ip_address="192.168.1.11",
+                port=11445,
+                total_memory_gb=32.0,
+                available_memory_gb=28.0,
             )
             await cm.register_node(info)
             task = ClusterTask(
-                task_id="t3", name="tiny", mode=ParallelMode.DATA,
-                model_name="qwen-0.5b", preferred_node_id="missing_node",
+                task_id="t3",
+                name="tiny",
+                mode=ParallelMode.DATA,
+                model_name="qwen-0.5b",
+                preferred_node_id="missing_node",
             )
             ok = await cm.assign_task(task)
             assert ok
             assert "remote" in task.assigned_nodes
+
         asyncio.run(_test())
 
     def test_large_model_not_forced_local(self):
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=11445,
-                total_memory_gb=64.0, available_memory_gb=60.0,
+                node_id="local",
+                hostname="mac1",
+                ip_address="127.0.0.1",
+                port=11445,
+                total_memory_gb=64.0,
+                available_memory_gb=60.0,
             )
             await cm.register_node(info)
             task = ClusterTask(
-                task_id="t4", name="big", mode=ParallelMode.DATA,
-                model_name="llama-70b", preferred_node_id="local",
+                task_id="t4",
+                name="big",
+                mode=ParallelMode.DATA,
+                model_name="llama-70b",
+                preferred_node_id="local",
             )
             ok = await cm.assign_task(task)
             assert ok
             assert "local" in task.assigned_nodes
+
         asyncio.run(_test())
 
 
@@ -1015,22 +1366,33 @@ class TestVRAMFirstScheduling:
         async def _test():
             cm = ClusterMaster()
             low_vram = NodeInfo(
-                node_id="n_low", hostname="low", ip_address="10.0.0.1", port=11445,
-                total_memory_gb=16.0, available_memory_gb=14.0,
+                node_id="n_low",
+                hostname="low",
+                ip_address="10.0.0.1",
+                port=11445,
+                total_memory_gb=16.0,
+                available_memory_gb=14.0,
             )
             high_vram = NodeInfo(
-                node_id="n_high", hostname="high", ip_address="10.0.0.2", port=11445,
-                total_memory_gb=64.0, available_memory_gb=58.0,
+                node_id="n_high",
+                hostname="high",
+                ip_address="10.0.0.2",
+                port=11445,
+                total_memory_gb=64.0,
+                available_memory_gb=58.0,
             )
             await cm.register_node(low_vram)
             await cm.register_node(high_vram)
             task = ClusterTask(
-                task_id="t_big", name="big_model", mode=ParallelMode.DATA,
+                task_id="t_big",
+                name="big_model",
+                mode=ParallelMode.DATA,
                 model_name="llama-32b",
             )
             ok = await cm.assign_task(task)
             assert ok
             assert "n_high" in task.assigned_nodes
+
         asyncio.run(_test())
 
     def test_strategy_restored_after_vram_first(self):
@@ -1038,32 +1400,46 @@ class TestVRAMFirstScheduling:
             cm = ClusterMaster()
             assert cm.load_router.strategy == RoutingStrategy.BALANCED
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-                total_memory_gb=64.0, available_memory_gb=60.0,
+                node_id="n1",
+                hostname="mac1",
+                ip_address="10.0.0.1",
+                port=11445,
+                total_memory_gb=64.0,
+                available_memory_gb=60.0,
             )
             await cm.register_node(info)
             task = ClusterTask(
-                task_id="t_big", name="big", mode=ParallelMode.DATA,
+                task_id="t_big",
+                name="big",
+                mode=ParallelMode.DATA,
                 model_name="llama-70b",
             )
             await cm.assign_task(task)
             assert cm.load_router.strategy == RoutingStrategy.BALANCED
+
         asyncio.run(_test())
 
     def test_small_model_uses_balanced_strategy(self):
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-                total_memory_gb=16.0, available_memory_gb=14.0,
+                node_id="n1",
+                hostname="mac1",
+                ip_address="10.0.0.1",
+                port=11445,
+                total_memory_gb=16.0,
+                available_memory_gb=14.0,
             )
             await cm.register_node(info)
             task = ClusterTask(
-                task_id="t_small", name="small", mode=ParallelMode.DATA,
+                task_id="t_small",
+                name="small",
+                mode=ParallelMode.DATA,
                 model_name="qwen-3b",
             )
             await cm.assign_task(task)
             assert cm.load_router.strategy == RoutingStrategy.BALANCED
+
         asyncio.run(_test())
 
 
@@ -1160,8 +1536,11 @@ class TestTaskSharder:
 class TestTaskShard:
     def test_auto_timestamp(self):
         s = TaskShard(
-            shard_id="s1", parent_task_id="t1",
-            sharding_type=ShardingType.INFERENCE, shard_index=0, total_shards=1,
+            shard_id="s1",
+            parent_task_id="t1",
+            sharding_type=ShardingType.INFERENCE,
+            shard_index=0,
+            total_shards=1,
         )
         assert s.created_at > 0
 
@@ -1171,8 +1550,11 @@ class TestShardMerger:
         shards = []
         for i in range(count):
             s = TaskShard(
-                shard_id=f"s{i}", parent_task_id="t1",
-                sharding_type=sharding_type, shard_index=i, total_shards=count,
+                shard_id=f"s{i}",
+                parent_task_id="t1",
+                sharding_type=sharding_type,
+                shard_index=i,
+                total_shards=count,
             )
             s.status = "completed"
             s.result = {"results": [f"result_{i}"]}
@@ -1225,15 +1607,33 @@ class TestShardMerger:
 
 class TestMergedResult:
     def test_is_complete(self):
-        r = MergedResult(task_id="t1", sharding_type=ShardingType.INFERENCE, total_shards=3, success_count=2, fail_count=1)
+        r = MergedResult(
+            task_id="t1",
+            sharding_type=ShardingType.INFERENCE,
+            total_shards=3,
+            success_count=2,
+            fail_count=1,
+        )
         assert r.is_complete
 
     def test_not_complete(self):
-        r = MergedResult(task_id="t1", sharding_type=ShardingType.INFERENCE, total_shards=3, success_count=2, fail_count=0)
+        r = MergedResult(
+            task_id="t1",
+            sharding_type=ShardingType.INFERENCE,
+            total_shards=3,
+            success_count=2,
+            fail_count=0,
+        )
         assert not r.is_complete
 
     def test_success_rate(self):
-        r = MergedResult(task_id="t1", sharding_type=ShardingType.INFERENCE, total_shards=4, success_count=3, fail_count=1)
+        r = MergedResult(
+            task_id="t1",
+            sharding_type=ShardingType.INFERENCE,
+            total_shards=4,
+            success_count=3,
+            fail_count=1,
+        )
         assert abs(r.success_rate - 0.75) < 0.01
 
 
@@ -1324,7 +1724,9 @@ class TestShardReplicatorSync:
         data = b"shard_data_content"
         replicator.register_shard_data("s1", data)
         replicator.assign_replicas(
-            "s1", "model/shard.bin", len(data),
+            "s1",
+            "model/shard.bin",
+            len(data),
             [{"node_id": "n1"}, {"node_id": "n2"}],
         )
         result = replicator.sync_to_node("s1", "n1", storage_volume=sv)
@@ -1345,7 +1747,9 @@ class TestShardReplicatorSync:
         data = b"all_shard_data"
         replicator.register_shard_data("s2", data)
         replicator.assign_replicas(
-            "s2", "model/s2.bin", len(data),
+            "s2",
+            "model/s2.bin",
+            len(data),
             [{"node_id": "n1"}, {"node_id": "n2"}],
         )
         results = replicator.sync_all_replicas("s2", storage_volume=sv)
@@ -1359,7 +1763,9 @@ class TestShardReplicatorSync:
         data = b"repair_data"
         replicator.register_shard_data("s3", data)
         replicator.assign_replicas(
-            "s3", "model/s3.bin", len(data),
+            "s3",
+            "model/s3.bin",
+            len(data),
             [{"node_id": "n1"}],
         )
         replicator.mark_replica_failed("s3", "n1")
@@ -1383,9 +1789,11 @@ class TestShardReplicatorSync:
 
 # ── M6-04 AST Diff-only ──
 
+
 class TestASTDiff:
     def test_compute_empty_diff(self):
         from fusion_multi_node.master.ast_diff import compute_ast_diff
+
         old = {"id": "root", "type": "module", "children": []}
         new = {"id": "root", "type": "module", "children": []}
         diff = compute_ast_diff(old, new)
@@ -1396,55 +1804,76 @@ class TestASTDiff:
 
     def test_compute_added_nodes(self):
         from fusion_multi_node.master.ast_diff import compute_ast_diff
+
         old = {"id": "root", "type": "module", "children": []}
-        new = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "children": []}
-        ]}
+        new = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "children": []}],
+        }
         diff = compute_ast_diff(old, new)
         assert diff["stats"]["added"] == 1
         assert any("fn1" in n.get("path", "") or n.get("id") == "fn1" for n in diff["added_nodes"])
 
     def test_compute_removed_nodes(self):
         from fusion_multi_node.master.ast_diff import compute_ast_diff
-        old = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "children": []}
-        ]}
+
+        old = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "children": []}],
+        }
         new = {"id": "root", "type": "module", "children": []}
         diff = compute_ast_diff(old, new)
         assert diff["stats"]["removed"] == 1
 
     def test_compute_modified_nodes(self):
         from fusion_multi_node.master.ast_diff import compute_ast_diff
-        old = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "value": "old", "children": []}
-        ]}
-        new = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "value": "new", "children": []}
-        ]}
+
+        old = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "value": "old", "children": []}],
+        }
+        new = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "value": "new", "children": []}],
+        }
         diff = compute_ast_diff(old, new)
         assert diff["stats"]["modified"] == 1
 
     def test_apply_diff_identity(self):
-        from fusion_multi_node.master.ast_diff import compute_ast_diff, apply_ast_diff
-        old = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "value": "hello", "children": []}
-        ]}
-        new = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "value": "world", "children": []}
-        ]}
+        from fusion_multi_node.master.ast_diff import apply_ast_diff, compute_ast_diff
+
+        old = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "value": "hello", "children": []}],
+        }
+        new = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "value": "world", "children": []}],
+        }
         diff = compute_ast_diff(old, new)
         result = apply_ast_diff(old, diff)
         fn1 = result["children"][0]
         assert fn1["value"] == "world"
 
     def test_apply_diff_add_and_remove(self):
-        from fusion_multi_node.master.ast_diff import compute_ast_diff, apply_ast_diff
-        old = {"id": "root", "type": "module", "children": [
-            {"id": "fn1", "type": "function", "children": []}
-        ]}
-        new = {"id": "root", "type": "module", "children": [
-            {"id": "fn2", "type": "class", "children": []}
-        ]}
+        from fusion_multi_node.master.ast_diff import apply_ast_diff, compute_ast_diff
+
+        old = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn1", "type": "function", "children": []}],
+        }
+        new = {
+            "id": "root",
+            "type": "module",
+            "children": [{"id": "fn2", "type": "class", "children": []}],
+        }
         diff = compute_ast_diff(old, new)
         result = apply_ast_diff(old, diff)
         child_ids = [c["id"] for c in result.get("children", [])]
@@ -1453,9 +1882,11 @@ class TestASTDiff:
 
 # ── M9-04 FMP Protocol Messages ──
 
+
 class TestFMPMessage:
     def test_fmp_create(self):
         from fusion_multi_node.protocol import FMPMessage, PayloadType
+
         msg = FMPMessage.create(
             source_id="node1",
             target_id="node2",
@@ -1470,6 +1901,7 @@ class TestFMPMessage:
 
     def test_fmp_link_layer_forward(self):
         from fusion_multi_node.protocol import FMPLinkLayer
+
         link = FMPLinkLayer(source_id="a", target_id="b", max_hops=3)
         assert link.can_forward()
         link.forward("c")
@@ -1478,6 +1910,7 @@ class TestFMPMessage:
 
     def test_fmp_link_layer_max_hops(self):
         from fusion_multi_node.protocol import FMPLinkLayer
+
         link = FMPLinkLayer(source_id="a", target_id="b", max_hops=1)
         link.forward("c")
         assert not link.can_forward()
@@ -1486,6 +1919,7 @@ class TestFMPMessage:
 
     def test_fmp_business_round(self):
         from fusion_multi_node.protocol import FMPBusinessLayer, PayloadType
+
         biz = FMPBusinessLayer(
             payload_type=PayloadType.HEARTBEAT,
             payload=b"test",
@@ -1500,6 +1934,7 @@ class TestFMPMessage:
 
     def test_fmp_serialize_deserialize(self):
         from fusion_multi_node.protocol import FMPMessage, PayloadType
+
         msg = FMPMessage.create(
             source_id="s1",
             target_id="t1",
@@ -1515,6 +1950,7 @@ class TestFMPMessage:
 
     def test_fmp_dict_roundtrip(self):
         from fusion_multi_node.protocol import FMPMessage, PayloadType
+
         msg = FMPMessage.create(
             source_id="s2",
             target_id="t2",
@@ -1528,11 +1964,13 @@ class TestFMPMessage:
 
     def test_fmp_deserialize_invalid_magic(self):
         from fusion_multi_node.protocol import FMPMessage
+
         with pytest.raises(ValueError, match="MAGIC"):
             FMPMessage.deserialize(b"\x00\x00\x00\x00" + b"\x00" * 8 + b"{}")
 
     def test_fmp_deserialize_too_short(self):
         from fusion_multi_node.protocol import FMPMessage
+
         with pytest.raises(ValueError, match="过短"):
             FMPMessage.deserialize(b"\x00\x00")
 
@@ -1540,11 +1978,13 @@ class TestFMPMessage:
 class TestFMPCrypto:
     def test_generate_key(self):
         from fusion_multi_node.protocol import FMPCrypto
+
         key = FMPCrypto.generate_key()
         assert len(key) == 32
 
     def test_encrypt_decrypt_roundtrip(self):
         from fusion_multi_node.protocol import FMPCrypto
+
         key = FMPCrypto.generate_key()
         crypto = FMPCrypto(key=key)
         plaintext = b"hello fusion cluster"
@@ -1555,6 +1995,7 @@ class TestFMPCrypto:
 
     def test_encrypt_with_aad(self):
         from fusion_multi_node.protocol import FMPCrypto
+
         key = FMPCrypto.generate_key()
         crypto = FMPCrypto(key=key)
         plaintext = b"secure data"
@@ -1565,17 +2006,20 @@ class TestFMPCrypto:
 
     def test_no_key_raises(self):
         from fusion_multi_node.protocol import FMPCrypto
+
         crypto = FMPCrypto()
         with pytest.raises(RuntimeError):
             crypto.encrypt(b"data")
 
     def test_invalid_key_length(self):
         from fusion_multi_node.protocol import FMPCrypto
+
         with pytest.raises(ValueError):
             FMPCrypto(key=b"short")
 
     def test_encrypt_decrypt_message(self):
-        from fusion_multi_node.protocol import FMPMessage, FMPCrypto, PayloadType
+        from fusion_multi_node.protocol import FMPCrypto, FMPMessage, PayloadType
+
         msg = FMPMessage.create(
             source_id="s1",
             target_id="t1",
@@ -1593,6 +2037,7 @@ class TestFMPCrypto:
 class TestKVCacheSyncMessage:
     def test_create_sync_message(self):
         from fusion_multi_node.protocol import KVCacheSyncMessage
+
         msg = KVCacheSyncMessage(
             cache_id="cache_123",
             model_name="llama-3b",
@@ -1604,6 +2049,7 @@ class TestKVCacheSyncMessage:
 
     def test_sync_message_dict_roundtrip(self):
         from fusion_multi_node.protocol import KVCacheSyncMessage
+
         msg = KVCacheSyncMessage(
             cache_id="cache_456",
             model_name="qwen-7b",
@@ -1619,6 +2065,7 @@ class TestKVCacheSyncMessage:
         async def _test():
             cm = ClusterMaster()
             from fusion_multi_node.master.cluster_master import KVCacheEntry
+
             entry = KVCacheEntry(
                 cache_id="c1",
                 model_name="llama-3b",
@@ -1629,6 +2076,7 @@ class TestKVCacheSyncMessage:
             await cm.register_kv_cache(entry)
             result = await cm.sync_kv_cache("c1", "llama-3b", "n1", 100.0)
             assert result
+
         asyncio.run(_test())
 
     def test_sync_kv_cache_missing_entry(self):
@@ -1636,10 +2084,12 @@ class TestKVCacheSyncMessage:
             cm = ClusterMaster()
             result = await cm.sync_kv_cache("missing", "model", "n1", 50.0)
             assert not result
+
         asyncio.run(_test())
 
 
 # ── M1-02 device_model + uma_size_gb in NodeInfo and mDNS ──
+
 
 class TestDeviceModelUMA:
     def test_nodeinfo_has_device_model(self):
@@ -1681,10 +2131,12 @@ class TestDeviceModelUMA:
             node = cm.nodes["n1"]
             assert node.device_model == "Apple M3 Max"
             assert node.uma_size_gb == 128.0
+
         asyncio.run(_test())
 
     def test_mdns_register_passes_device_model(self):
         from fusion_multi_node.discovery import MDNSDiscovery
+
         mdns = MDNSDiscovery(node_id="test-master")
         props = {
             "role": "master",
@@ -1700,28 +2152,42 @@ class TestDeviceModelUMA:
 
     def test_heartbeat_interval_default_3s(self):
         from fusion_multi_node.config.config import ClusterConfig
+
         assert ClusterConfig.DEFAULT_CONFIG["cluster"]["heartbeat_interval"] == 3.0
 
 
 # ── M10 Task Migration and Rebalance ──
+
 
 class TestTaskMigration:
     def test_migrate_running_task(self):
         async def _test():
             cm = ClusterMaster()
             n1 = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-                total_memory_gb=64.0, available_memory_gb=32.0, status=NodeStatus.ONLINE,
+                node_id="n1",
+                hostname="mac1",
+                ip_address="10.0.0.1",
+                port=11445,
+                total_memory_gb=64.0,
+                available_memory_gb=32.0,
+                status=NodeStatus.ONLINE,
             )
             n2 = NodeInfo(
-                node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
-                total_memory_gb=64.0, available_memory_gb=48.0, status=NodeStatus.ONLINE,
+                node_id="n2",
+                hostname="mac2",
+                ip_address="10.0.0.2",
+                port=11445,
+                total_memory_gb=64.0,
+                available_memory_gb=48.0,
+                status=NodeStatus.ONLINE,
             )
             await cm.register_node(n1)
             await cm.register_node(n2)
 
             task = ClusterTask(
-                task_id="t1", name="inference", mode=ParallelMode.DATA,
+                task_id="t1",
+                name="inference",
+                mode=ParallelMode.DATA,
                 model_name="llama-3b",
             )
             ok = await cm.assign_task(task)
@@ -1732,6 +2198,7 @@ class TestTaskMigration:
             assert ok
             assert task.status.value == "running"
             assert len(task.assigned_nodes) > 0
+
         asyncio.run(_test())
 
     def test_migrate_nonexistent_task(self):
@@ -1739,41 +2206,64 @@ class TestTaskMigration:
             cm = ClusterMaster()
             ok = await cm.migrate_task("nonexistent")
             assert not ok
+
         asyncio.run(_test())
 
     def test_migrate_non_running_task(self):
         async def _test():
             from fusion_multi_node.master.cluster_master import TaskStatus
+
             cm = ClusterMaster()
             n1 = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-                total_memory_gb=64.0, available_memory_gb=32.0, status=NodeStatus.ONLINE,
+                node_id="n1",
+                hostname="mac1",
+                ip_address="10.0.0.1",
+                port=11445,
+                total_memory_gb=64.0,
+                available_memory_gb=32.0,
+                status=NodeStatus.ONLINE,
             )
             await cm.register_node(n1)
             task = ClusterTask(
-                task_id="t1", name="pending", mode=ParallelMode.DATA,
+                task_id="t1",
+                name="pending",
+                mode=ParallelMode.DATA,
             )
             task.status = TaskStatus.PENDING
             cm.tasks["t1"] = task
             ok = await cm.migrate_task("t1")
             assert not ok
+
         asyncio.run(_test())
 
 
 class TestKVSharingManagerFMP:
     def test_sync_to_cluster(self):
-        from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager, KVCacheEntry as KVEntry, KVShard
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import (
+            KVCacheEntry as KVEntry,
+        )
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import (
+            KVShard,
+            KVSharingManager,
+        )
+
         manager = KVSharingManager(enable_compression=False)
         entry = KVEntry(
             cache_id="c1",
             model_name="llama-3b",
             prompt_hash="abc123",
             prompt_prefix="hello",
-            shards=[KVShard(
-                shard_id="s1", model_name="llama-3b", layer_index=0,
-                node_id="n1", token_count=100, size_bytes=4096,
-                created_at=time.time(),
-            )],
+            shards=[
+                KVShard(
+                    shard_id="s1",
+                    model_name="llama-3b",
+                    layer_index=0,
+                    node_id="n1",
+                    token_count=100,
+                    size_bytes=4096,
+                    created_at=time.time(),
+                )
+            ],
             total_tokens=100,
             total_size_bytes=4096,
             created_at=time.time(),
@@ -1786,6 +2276,7 @@ class TestKVSharingManagerFMP:
 
     def test_sync_to_cluster_missing(self):
         from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
         manager = KVSharingManager(enable_compression=False)
         sync_msg = manager.sync_to_cluster("missing", "model", "n1")
         assert sync_msg.size_mb == 0.0

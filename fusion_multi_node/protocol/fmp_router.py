@@ -11,14 +11,15 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 from .fmp_connection import FMPConnectionManager
 from .fmp_message import (
+    MAX_ROUNDS,
     FMPMessage,
     PayloadType,
-    MAX_ROUNDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RoundInfo:
     """多轮对话追踪。"""
+
     round_id: str
     source_id: str
     target_id: str
@@ -45,13 +47,13 @@ class FMPRouter:
     def __init__(
         self,
         local_node_id: str = "",
-        connection_manager: Optional[FMPConnectionManager] = None,
-        on_local_message: Optional[Callable[[FMPMessage], None]] = None,
+        connection_manager: FMPConnectionManager | None = None,
+        on_local_message: Callable[[FMPMessage], None] | None = None,
     ):
         self.local_node_id = local_node_id
         self._conn_mgr = connection_manager
         self._on_local_message = on_local_message
-        self._rounds: Dict[str, RoundInfo] = {}
+        self._rounds: dict[str, RoundInfo] = {}
         self._blocked_nodes: set = set()
         self._stats = {
             "routed": 0,
@@ -131,7 +133,13 @@ class FMPRouter:
         )
         return await self.route(msg)
 
-    def register_round(self, round_id: str, source_id: str, target_id: str, max_rounds: int = MAX_ROUNDS) -> None:
+    def register_round(
+        self,
+        round_id: str,
+        source_id: str,
+        target_id: str,
+        max_rounds: int = MAX_ROUNDS,
+    ) -> None:
         self._rounds[round_id] = RoundInfo(
             round_id=round_id,
             source_id=source_id,
@@ -158,7 +166,7 @@ class FMPRouter:
             logger.info(f"清理过期对话: {len(stale)} 个")
         return len(stale)
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return {
             "local_node_id": self.local_node_id,
             "active_rounds": len(self._rounds),

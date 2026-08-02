@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class LoadMetrics:
     def uma_available_ratio(self) -> float:
         return max(0.0, 1.0 - self.uma_used_ratio)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "uma_used_ratio": self.uma_used_ratio,
             "cpu_percent": self.cpu_percent,
@@ -53,7 +53,7 @@ class LoadMetrics:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> LoadMetrics:
+    def from_dict(cls, data: dict[str, Any]) -> LoadMetrics:
         return cls(
             uma_used_ratio=data.get("uma_used_ratio", 0.0),
             cpu_percent=data.get("cpu_percent", 0.0),
@@ -87,16 +87,28 @@ class RoutingWeights:
         return abs(total - 1.0) < 0.01
 
 
-STRATEGY_WEIGHTS: Dict[RoutingStrategy, RoutingWeights] = {
+STRATEGY_WEIGHTS: dict[RoutingStrategy, RoutingWeights] = {
     RoutingStrategy.BALANCED: RoutingWeights(),
     RoutingStrategy.VRAM_FIRST: RoutingWeights(
-        uma_weight=0.5, cpu_weight=0.15, metal_weight=0.2, queue_weight=0.1, net_weight=0.05,
+        uma_weight=0.5,
+        cpu_weight=0.15,
+        metal_weight=0.2,
+        queue_weight=0.1,
+        net_weight=0.05,
     ),
     RoutingStrategy.LOCALITY_FIRST: RoutingWeights(
-        uma_weight=0.15, cpu_weight=0.15, metal_weight=0.1, queue_weight=0.1, net_weight=0.5,
+        uma_weight=0.15,
+        cpu_weight=0.15,
+        metal_weight=0.1,
+        queue_weight=0.1,
+        net_weight=0.5,
     ),
     RoutingStrategy.LOW_LATENCY: RoutingWeights(
-        uma_weight=0.1, cpu_weight=0.1, metal_weight=0.1, queue_weight=0.2, net_weight=0.5,
+        uma_weight=0.1,
+        cpu_weight=0.1,
+        metal_weight=0.1,
+        queue_weight=0.2,
+        net_weight=0.5,
     ),
 }
 
@@ -109,7 +121,7 @@ class RoutingResult:
     score: float
     strategy: RoutingStrategy
     metrics: LoadMetrics
-    breakdown: Dict[str, float] = field(default_factory=dict)
+    breakdown: dict[str, float] = field(default_factory=dict)
 
 
 class LoadRouter:
@@ -128,7 +140,7 @@ class LoadRouter:
         self.strategy = strategy
         self.stale_threshold = stale_threshold
         self.queue_capacity = queue_capacity
-        self._metrics: Dict[str, LoadMetrics] = {}
+        self._metrics: dict[str, LoadMetrics] = {}
         self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
         self._lock = threading.Lock()
         logger.info(f"LoadRouter 初始化: 策略={strategy.value}, 权重校验={self._weights.validate()}")
@@ -150,11 +162,11 @@ class LoadRouter:
         with self._lock:
             self._metrics.pop(node_id, None)
 
-    def get_metrics(self, node_id: str) -> Optional[LoadMetrics]:
+    def get_metrics(self, node_id: str) -> LoadMetrics | None:
         with self._lock:
             return self._metrics.get(node_id)
 
-    def compute_score(self, metrics: LoadMetrics, weights: Optional[RoutingWeights] = None) -> float:
+    def compute_score(self, metrics: LoadMetrics, weights: RoutingWeights | None = None) -> float:
         """计算节点综合评分 (0~1, 越高越优先)。"""
         with self._lock:
             w = weights or self._weights
@@ -174,7 +186,7 @@ class LoadRouter:
         )
         return max(0.0, min(1.0, score))
 
-    def score_breakdown(self, metrics: LoadMetrics, weights: Optional[RoutingWeights] = None) -> Dict[str, float]:
+    def score_breakdown(self, metrics: LoadMetrics, weights: RoutingWeights | None = None) -> dict[str, float]:
         """返回各维度评分明细。"""
         w = weights or self._weights
         uma_score = max(0.0, 1.0 - metrics.uma_used_ratio)
@@ -193,10 +205,10 @@ class LoadRouter:
 
     def select_best(
         self,
-        candidate_ids: List[str],
+        candidate_ids: list[str],
         preferred_node_id: str = "",
         required_uma_ratio: float = 0.0,
-    ) -> Optional[RoutingResult]:
+    ) -> RoutingResult | None:
         """从候选节点中选择最优节点。"""
         now = time.time()
         with self._lock:
@@ -204,7 +216,7 @@ class LoadRouter:
             current_weights = self._weights
             current_strategy = self.strategy
 
-        candidates: List[RoutingResult] = []
+        candidates: list[RoutingResult] = []
 
         for nid in candidate_ids:
             m = snapshot.get(nid)
@@ -225,13 +237,15 @@ class LoadRouter:
             if nid == preferred_node_id:
                 breakdown["preferred_bonus"] = preferred_bonus
 
-            candidates.append(RoutingResult(
-                node_id=nid,
-                score=final_score,
-                strategy=current_strategy,
-                metrics=m,
-                breakdown=breakdown,
-            ))
+            candidates.append(
+                RoutingResult(
+                    node_id=nid,
+                    score=final_score,
+                    strategy=current_strategy,
+                    metrics=m,
+                    breakdown=breakdown,
+                )
+            )
 
         if not candidates:
             return None
@@ -247,11 +261,11 @@ class LoadRouter:
 
     def select_n(
         self,
-        candidate_ids: List[str],
+        candidate_ids: list[str],
         count: int = 1,
         preferred_node_id: str = "",
         required_uma_ratio: float = 0.0,
-    ) -> List[RoutingResult]:
+    ) -> list[RoutingResult]:
         """选择 top-N 个最优节点。"""
         now = time.time()
         with self._lock:
@@ -259,7 +273,7 @@ class LoadRouter:
             current_weights = self._weights
             current_strategy = self.strategy
 
-        candidates: List[RoutingResult] = []
+        candidates: list[RoutingResult] = []
 
         for nid in candidate_ids:
             m = snapshot.get(nid)
@@ -277,18 +291,20 @@ class LoadRouter:
             if nid == preferred_node_id:
                 breakdown["preferred_bonus"] = preferred_bonus
 
-            candidates.append(RoutingResult(
-                node_id=nid,
-                score=final_score,
-                strategy=current_strategy,
-                metrics=m,
-                breakdown=breakdown,
-            ))
+            candidates.append(
+                RoutingResult(
+                    node_id=nid,
+                    score=final_score,
+                    strategy=current_strategy,
+                    metrics=m,
+                    breakdown=breakdown,
+                )
+            )
 
         candidates.sort(key=lambda r: r.score, reverse=True)
         return candidates[:count]
 
-    def get_cluster_load_summary(self) -> Dict[str, Any]:
+    def get_cluster_load_summary(self) -> dict[str, Any]:
         """获取集群负载摘要。"""
         with self._lock:
             if not self._metrics:

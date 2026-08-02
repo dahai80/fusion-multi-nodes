@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from importlib.metadata import version as _pkg_version
+
     _VERSION = _pkg_version("fusion-multi-node")
 except Exception:
     _VERSION = "0.2.0"
@@ -36,7 +37,7 @@ class InMemoryRateLimiter:
     def __init__(self, max_requests: int = 30, window_seconds: float = 60.0):
         self._max = max_requests
         self._window = window_seconds
-        self._counts: Dict[str, List[float]] = defaultdict(list)
+        self._counts: dict[str, list[float]] = defaultdict(list)
         self._call_count = 0
         self._last_time_cleanup: float = time.time()
 
@@ -62,17 +63,27 @@ class InMemoryRateLimiter:
         for k in stale_keys:
             del self._counts[k]
         if len(self._counts) > self._MAX_IP_ENTRIES:
-            sorted_keys = sorted(self._counts, key=lambda k: self._counts[k][-1] if self._counts[k] else 0)
-            for k in sorted_keys[:len(self._counts) - self._MAX_IP_ENTRIES]:
+            sorted_keys = sorted(
+                self._counts,
+                key=lambda k: self._counts[k][-1] if self._counts[k] else 0,
+            )
+            for k in sorted_keys[: len(self._counts) - self._MAX_IP_ENTRIES]:
                 del self._counts[k]
 
 
 class RateLimitMiddleware:
     """全局限流中间件 — 所有 API 端点统一限流。"""
 
-    EXEMPT_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc", "/", "/favicon.ico"}
+    EXEMPT_PATHS = {
+        "/api/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/",
+        "/favicon.ico",
+    }
 
-    def __init__(self, app, limiter: Optional[InMemoryRateLimiter] = None):
+    def __init__(self, app, limiter: InMemoryRateLimiter | None = None):
         self.app = app
         self._limiter = limiter or InMemoryRateLimiter()
 
@@ -98,6 +109,7 @@ class RateLimitMiddleware:
 
         if not self._limiter.is_allowed(client_ip):
             from starlette.responses import JSONResponse
+
             response = JSONResponse(status_code=429, content={"detail": "请求过于频繁"})
             await response(scope, receive, send)
             return
@@ -112,10 +124,10 @@ class ExecuteRequest(BaseModel):
     task_type: str = "inference"
     model_name: str = ""
     prompt: str = ""
-    messages: List[Dict[str, Any]] = []
+    messages: list[dict[str, Any]] = []
     max_tokens: int = 2048
     temperature: float = 0.7
-    extra: Dict[str, Any] = {}
+    extra: dict[str, Any] = {}
 
 
 class KGLookupRequest(BaseModel):
@@ -131,7 +143,7 @@ class KVTransferRequest(BaseModel):
 
 class KVWarmRequest(BaseModel):
     model_name: str
-    prompts: List[str]
+    prompts: list[str]
 
 
 class HealthResponse(BaseModel):
@@ -142,14 +154,15 @@ class HealthResponse(BaseModel):
 
 # ── Agent Server ──
 
+
 class AgentServer:
     """节点 Agent HTTP 服务。"""
 
     def __init__(
         self,
-        agent: Optional[NodeAgent] = None,
-        kv_manager: Optional[KVSharingManager] = None,
-        shared_token: Optional[str] = None,
+        agent: NodeAgent | None = None,
+        kv_manager: KVSharingManager | None = None,
+        shared_token: str | None = None,
     ):
         self.agent = agent or NodeAgent()
         self.kv_manager = kv_manager or KVSharingManager()
@@ -158,7 +171,7 @@ class AgentServer:
         self._rate_limiter = InMemoryRateLimiter()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
         self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
-        self._uvicorn_server: Optional[Any] = None
+        self._uvicorn_server: Any | None = None
         self._started_at: float = 0.0
         self._setup_routes()
 
@@ -250,6 +263,7 @@ class AgentServer:
 
     async def start(self, host: str = "127.0.0.1", port: int = 11445) -> None:
         import uvicorn
+
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)
         self._started_at = time.time()

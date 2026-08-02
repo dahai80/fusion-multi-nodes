@@ -52,11 +52,10 @@ class CircuitBreaker:
     @property
     def state(self) -> CircuitState:
         """当前状态（可能触发状态转换）。"""
-        if self._state == CircuitState.OPEN:
-            if time.time() - self._last_failure_time >= self.recovery_timeout:
-                self._state = CircuitState.HALF_OPEN
-                self._half_open_count = 0
-                logger.info(f"熔断器 [{self.name}] OPEN → HALF_OPEN")
+        if self._state == CircuitState.OPEN and time.time() - self._last_failure_time >= self.recovery_timeout:
+            self._state = CircuitState.HALF_OPEN
+            self._half_open_count = 0
+            logger.info(f"熔断器 [{self.name}] OPEN → HALF_OPEN")
         return self._state
 
     @property

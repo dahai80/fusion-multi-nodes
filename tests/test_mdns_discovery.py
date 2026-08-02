@@ -32,7 +32,9 @@ class TestDiscoveryInfo:
 
     def test_with_properties(self):
         info = DiscoveryInfo(
-            name="master", host="10.0.0.1", port=9754,
+            name="master",
+            host="10.0.0.1",
+            port=9754,
             properties={"role": "master", "version": "1.0"},
             discovered_at=time.time(),
         )
@@ -61,13 +63,23 @@ class TestMDNSDiscoveryRegister:
         d = MDNSDiscovery(node_id="test-node")
         mock_zc = MagicMock()
         mock_si = MagicMock()
-        with patch("fusion_multi_node.discovery.mdns_discovery.Zeroconf", return_value=mock_zc, create=True):
-            with patch("fusion_multi_node.discovery.mdns_discovery.ServiceInfo", return_value=mock_si, create=True):
-                try:
-                    d.register(port=9754, properties={"role": "master"})
-                    assert d._registered is True
-                except Exception:
-                    pass  # zeroconf may not be installed
+        with (
+            patch(
+                "fusion_multi_node.discovery.mdns_discovery.Zeroconf",
+                return_value=mock_zc,
+                create=True,
+            ),
+            patch(
+                "fusion_multi_node.discovery.mdns_discovery.ServiceInfo",
+                return_value=mock_si,
+                create=True,
+            ),
+        ):
+            try:
+                d.register(port=9754, properties={"role": "master"})
+                assert d._registered is True
+            except Exception:
+                pass  # zeroconf may not be installed
 
     def test_register_no_zeroconf(self):
         d = MDNSDiscovery(node_id="test-node")
@@ -119,13 +131,23 @@ class TestMDNSDiscoveryBrowse:
         d = MDNSDiscovery(node_id="test-node")
         mock_zc = MagicMock()
         mock_browser = MagicMock()
-        with patch("fusion_multi_node.discovery.mdns_discovery.Zeroconf", return_value=mock_zc, create=True):
-            with patch("fusion_multi_node.discovery.mdns_discovery.ServiceBrowser", return_value=mock_browser, create=True):
-                try:
-                    result = d.browse(timeout=0.01)
-                    assert isinstance(result, list)
-                except Exception:
-                    pass
+        with (
+            patch(
+                "fusion_multi_node.discovery.mdns_discovery.Zeroconf",
+                return_value=mock_zc,
+                create=True,
+            ),
+            patch(
+                "fusion_multi_node.discovery.mdns_discovery.ServiceBrowser",
+                return_value=mock_browser,
+                create=True,
+            ),
+        ):
+            try:
+                result = d.browse(timeout=0.01)
+                assert isinstance(result, list)
+            except Exception:
+                pass
 
 
 class TestMDNSDiscoveryGetDiscovered:
@@ -152,7 +174,9 @@ class TestMDNSDiscoveryFindMaster:
     def test_find_master_with_master(self):
         d = MDNSDiscovery(node_id="test-node")
         master_info = DiscoveryInfo(
-            name="master", host="10.0.0.1", port=9754,
+            name="master",
+            host="10.0.0.1",
+            port=9754,
             properties={"role": "master", "node_id": "master-1"},
         )
         with patch.object(d, "browse", return_value=[master_info]):
@@ -163,7 +187,9 @@ class TestMDNSDiscoveryFindMaster:
     def test_find_master_no_master_role(self):
         d = MDNSDiscovery(node_id="test-node")
         agent_info = DiscoveryInfo(
-            name="agent1", host="10.0.0.2", port=11445,
+            name="agent1",
+            host="10.0.0.2",
+            port=11445,
             properties={"role": "agent"},
         )
         with patch.object(d, "browse", return_value=[agent_info]):
@@ -182,7 +208,9 @@ class TestMDNSDiscoveryFindMaster:
     async def test_find_master_async_with_master(self):
         d = MDNSDiscovery(node_id="test-node")
         master_info = DiscoveryInfo(
-            name="master", host="10.0.0.1", port=9754,
+            name="master",
+            host="10.0.0.1",
+            port=9754,
             properties={"role": "master", "node_id": "master-1"},
         )
         d.browse_async = AsyncMock(return_value=[master_info])

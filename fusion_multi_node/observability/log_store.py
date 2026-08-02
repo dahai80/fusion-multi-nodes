@@ -17,7 +17,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -25,28 +25,31 @@ logger = logging.getLogger(__name__)
 @dataclass
 class StoredLog:
     """存储的日志条目。"""
+
     timestamp: float
     level: str
     source: str
     message: str
     node_id: str = ""
     task_id: str = ""
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def log_level(self):
         from fusion_multi_node.observability.observability import LogLevel
+
         return LogLevel.from_str(self.level)
 
 
 @dataclass
 class DiagnosisResult:
     """诊断结果。"""
+
     pattern: str
     severity: str
     description: str
-    affected_nodes: List[str] = field(default_factory=list)
-    affected_tasks: List[str] = field(default_factory=list)
+    affected_nodes: list[str] = field(default_factory=list)
+    affected_tasks: list[str] = field(default_factory=list)
     suggestion: str = ""
     confidence: float = 0.0
 
@@ -112,10 +115,10 @@ class LogStore:
         self._max_memory = max_memory_entries
         self._persist = persist_to_disk
         self._retention = retention_seconds
-        self._entries: List[StoredLog] = []
-        self._by_node: Dict[str, List[StoredLog]] = defaultdict(list)
-        self._by_task: Dict[str, List[StoredLog]] = defaultdict(list)
-        self._by_level: Dict[str, List[StoredLog]] = defaultdict(list)
+        self._entries: list[StoredLog] = []
+        self._by_node: dict[str, list[StoredLog]] = defaultdict(list)
+        self._by_task: dict[str, list[StoredLog]] = defaultdict(list)
+        self._by_level: dict[str, list[StoredLog]] = defaultdict(list)
 
     def store(self, log: StoredLog) -> None:
         self._entries.append(log)
@@ -131,7 +134,7 @@ class LogStore:
         if len(self._entries) > self._max_memory:
             self._cleanup_memory()
 
-    def store_batch(self, logs: List[StoredLog]) -> None:
+    def store_batch(self, logs: list[StoredLog]) -> None:
         for log in logs:
             self.store(log)
 
@@ -139,14 +142,15 @@ class LogStore:
         self,
         node_id: str = "",
         task_id: str = "",
-        level: Optional[str] = None,
+        level: str | None = None,
         source: str = "",
         start_time: float = 0.0,
         end_time: float = 0.0,
         keyword: str = "",
         limit: int = 100,
-    ) -> List[StoredLog]:
+    ) -> list[StoredLog]:
         from fusion_multi_node.observability.observability import LogLevel as _LogLevel
+
         results = self._entries
 
         if node_id:
@@ -168,7 +172,7 @@ class LogStore:
 
         return results[-limit:]
 
-    def export_json(self, logs: Optional[List[StoredLog]] = None) -> str:
+    def export_json(self, logs: list[StoredLog] | None = None) -> str:
         entries = logs or self._entries
         data = [
             {
@@ -184,18 +188,16 @@ class LogStore:
         ]
         return json.dumps(data, ensure_ascii=False, indent=2)
 
-    def export_csv(self, logs: Optional[List[StoredLog]] = None) -> str:
+    def export_csv(self, logs: list[StoredLog] | None = None) -> str:
         entries = logs or self._entries
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["timestamp", "level", "source", "node_id", "task_id", "message"])
         for e in entries:
-            writer.writerow([
-                e.timestamp, e.level, e.source, e.node_id, e.task_id, e.message
-            ])
+            writer.writerow([e.timestamp, e.level, e.source, e.node_id, e.task_id, e.message])
         return output.getvalue()
 
-    def export_text(self, logs: Optional[List[StoredLog]] = None) -> str:
+    def export_text(self, logs: list[StoredLog] | None = None) -> str:
         entries = logs or self._entries
         lines = []
         for e in entries:
@@ -237,7 +239,7 @@ class LogStore:
         for key in list(self._by_level.keys()):
             self._by_level[key] = [e for e in self._by_level[key] if e.timestamp > cutoff]
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         level_counts = Counter(e.level for e in self._entries)
         return {
             "total_entries": len(self._entries),
@@ -254,31 +256,28 @@ class FaultDiagnoser:
     基于日志模式匹配和统计分析，识别异常模式并提供诊断建议。
     """
 
-    def __init__(self, custom_patterns: Optional[List[Dict[str, str]]] = None):
+    def __init__(self, custom_patterns: list[dict[str, str]] | None = None):
         self._patterns = list(FAULT_PATTERNS)
         if custom_patterns:
             self._patterns.extend(custom_patterns)
-        self._compiled = [
-            (p, re.compile(p["pattern"], re.IGNORECASE))
-            for p in self._patterns
-        ]
-        self._diagnosis_history: List[DiagnosisResult] = []
+        self._compiled = [(p, re.compile(p["pattern"], re.IGNORECASE)) for p in self._patterns]
+        self._diagnosis_history: list[DiagnosisResult] = []
 
-    def diagnose(self, logs: List[StoredLog], time_window: float = 300.0) -> List[DiagnosisResult]:
+    def diagnose(self, logs: list[StoredLog], time_window: float = 300.0) -> list[DiagnosisResult]:
         now = time.time()
         recent = [e for e in logs if now - e.timestamp <= time_window]
 
         if not recent:
             return []
 
-        results: List[DiagnosisResult] = []
+        results: list[DiagnosisResult] = []
         for pattern_def, regex in self._compiled:
             matches = [e for e in recent if regex.search(e.message)]
             if not matches:
                 continue
 
-            affected_nodes = list(set(e.node_id for e in matches if e.node_id))
-            affected_tasks = list(set(e.task_id for e in matches if e.task_id))
+            affected_nodes = list({e.node_id for e in matches if e.node_id})
+            affected_tasks = list({e.task_id for e in matches if e.task_id})
 
             confidence = min(len(matches) / 5.0, 1.0)
 
@@ -293,9 +292,7 @@ class FaultDiagnoser:
             )
             results.append(result)
 
-        results.sort(key=lambda r: (
-            {"critical": 0, "error": 1, "warning": 2, "info": 3}.get(r.severity, 4)
-        ))
+        results.sort(key=lambda r: {"critical": 0, "error": 1, "warning": 2, "info": 3}.get(r.severity, 4))
 
         self._diagnosis_history.extend(results)
         if len(self._diagnosis_history) > 200:
@@ -303,7 +300,7 @@ class FaultDiagnoser:
 
         return results
 
-    def analyze_frequency(self, logs: List[StoredLog], group_by: str = "source") -> Dict[str, int]:
+    def analyze_frequency(self, logs: list[StoredLog], group_by: str = "source") -> dict[str, int]:
         if group_by == "source":
             counter = Counter(e.source for e in logs)
         elif group_by == "node_id":
@@ -314,5 +311,5 @@ class FaultDiagnoser:
             counter = Counter(e.source for e in logs)
         return dict(counter.most_common(20))
 
-    def get_history(self, limit: int = 20) -> List[DiagnosisResult]:
+    def get_history(self, limit: int = 20) -> list[DiagnosisResult]:
         return self._diagnosis_history[-limit:]

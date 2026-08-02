@@ -9,15 +9,16 @@
 
 from __future__ import annotations
 
-from fusion_multi_node.utils.auth import sanitize_node_url_part
-
 import asyncio
 import collections
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
+
+from fusion_multi_node.utils.auth import sanitize_node_url_part
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +26,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MCPTool:
     """MCP 工具定义。"""
+
     name: str
     description: str
-    parameters: Dict[str, Any]
+    parameters: dict[str, Any]
     node_id: str = ""
     plugin: str = ""
     required_memory_gb: float = 0.0
@@ -39,9 +41,10 @@ class MCPTool:
 @dataclass
 class MCPRequest:
     """MCP 请求记录。"""
+
     request_id: str
     tool_name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
     source: str  # "claude_desktop" | "claude_code" | "api"
     assigned_node: str = ""
     status: str = "pending"
@@ -60,10 +63,10 @@ class MCPClusterGateway:
     def __init__(self, host: str = "127.0.0.1", port: int = 11446):
         self.host = host
         self.port = port
-        self.tools: Dict[str, MCPTool] = {}
+        self.tools: dict[str, MCPTool] = {}
         self.requests: collections.OrderedDict = collections.OrderedDict()
         self._max_requests = 10000
-        self._node_selector: Optional[Callable] = None
+        self._node_selector: Callable | None = None
         self._running = False
         self.total_token_count: int = 0
         self.token_budget: int = 10_000_000
@@ -80,7 +83,7 @@ class MCPClusterGateway:
         self.tools.pop(name, None)
         logger.info(f"MCP 工具注销: {name}")
 
-    def get_tools_list(self) -> List[Dict[str, Any]]:
+    def get_tools_list(self) -> list[dict[str, Any]]:
         """获取所有可用工具列表（MCP 协议格式）。"""
         return [
             {
@@ -97,6 +100,7 @@ class MCPClusterGateway:
 
     async def _get_http_client(self, timeout: float = 60.0):
         import httpx
+
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=timeout)
         return self._http_client
@@ -104,9 +108,9 @@ class MCPClusterGateway:
     async def handle_tool_call(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         source: str = "claude_code",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """处理工具调用请求。
 
         1. 查找工具定义
@@ -144,7 +148,7 @@ class MCPClusterGateway:
         # 选择节点
         if self._node_selector:
             node = self._node_selector(tool)
-            request.assigned_node = node.node_id if hasattr(node, 'node_id') else str(node)
+            request.assigned_node = node.node_id if hasattr(node, "node_id") else str(node)
         else:
             request.assigned_node = "localhost"
 
@@ -167,7 +171,7 @@ class MCPClusterGateway:
             request.error = str(e)
             return {"error": "内部错误"}
 
-    async def _forward_to_node(self, request: MCPRequest, tool: MCPTool) -> Dict[str, Any]:
+    async def _forward_to_node(self, request: MCPRequest, tool: MCPTool) -> dict[str, Any]:
         """转发工具调用到目标节点执行。"""
         node_id = request.assigned_node
 
@@ -194,7 +198,7 @@ class MCPClusterGateway:
             )
             return resp.json()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取 MCP 网关统计。"""
         return {
             "registered_tools": len(self.tools),

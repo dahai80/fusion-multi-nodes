@@ -14,27 +14,28 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class LinkType(Enum):
     """网络链路类型。"""
-    THUNDERBOLT_5 = "thunderbolt_5"     # 40Gbps+
-    THUNDERBOLT_4 = "thunderbolt_4"     # 20Gbps
-    THUNDERBOLT_3 = "thunderbolt_3"     # 10Gbps
-    ETHERNET_10G = "ethernet_10g"       # 10Gbps
-    ETHERNET_1G = "ethernet_1g"         # 1Gbps
-    ETHERNET_100M = "ethernet_100m"     # 100Mbps
-    WIFI_6E = "wifi_6e"                 # WiFi 6E
-    WIFI_6 = "wifi_6"                   # WiFi 6
-    UNKNOWN = "unknown"                 # 未知
+
+    THUNDERBOLT_5 = "thunderbolt_5"  # 40Gbps+
+    THUNDERBOLT_4 = "thunderbolt_4"  # 20Gbps
+    THUNDERBOLT_3 = "thunderbolt_3"  # 10Gbps
+    ETHERNET_10G = "ethernet_10g"  # 10Gbps
+    ETHERNET_1G = "ethernet_1g"  # 1Gbps
+    ETHERNET_100M = "ethernet_100m"  # 100Mbps
+    WIFI_6E = "wifi_6e"  # WiFi 6E
+    WIFI_6 = "wifi_6"  # WiFi 6
+    UNKNOWN = "unknown"  # 未知
 
 
 @dataclass
 class LinkInfo:
     """链路信息。"""
+
     type: LinkType
     bandwidth_mbps: float
     latency_ms: float
@@ -47,10 +48,11 @@ class LinkInfo:
 @dataclass
 class NetworkPath:
     """网络路径 — 两节点之间的最优链路。"""
+
     source: str
     target: str
-    links: List[LinkInfo] = field(default_factory=list)
-    primary_link: Optional[LinkInfo] = None
+    links: list[LinkInfo] = field(default_factory=list)
+    primary_link: LinkInfo | None = None
     aggregated_bandwidth_mbps: float = 0.0
     avg_latency_ms: float = 0.0
 
@@ -59,11 +61,11 @@ class NetworkTopologyDetector:
     """网络拓扑检测器 — 发现节点间链路并选择最优路径。"""
 
     def __init__(self):
-        self._interfaces: Dict[str, LinkInfo] = {}
-        self._paths: Dict[Tuple[str, str], NetworkPath] = {}
+        self._interfaces: dict[str, LinkInfo] = {}
+        self._paths: dict[tuple[str, str], NetworkPath] = {}
         self._detected = False
 
-    async def detect(self) -> Dict[str, LinkInfo]:
+    async def detect(self) -> dict[str, LinkInfo]:
         """检测本机所有网络接口。"""
         self._interfaces.clear()
 
@@ -88,7 +90,9 @@ class NetworkTopologyDetector:
         try:
             result = subprocess.run(
                 ["system_profiler", "SPThunderboltDataType"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             output = result.stdout
 
@@ -100,7 +104,9 @@ class NetworkTopologyDetector:
             # 检测 Thunderbolt 网桥接口
             iface_result = subprocess.run(
                 ["ifconfig", "-l"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             interfaces = iface_result.stdout.strip().split()
 
@@ -127,7 +133,9 @@ class NetworkTopologyDetector:
         try:
             result = subprocess.run(
                 ["ifconfig", "-l"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             interfaces = result.stdout.strip().split()
 
@@ -156,8 +164,13 @@ class NetworkTopologyDetector:
         """检测 WiFi 接口。"""
         try:
             result = subprocess.run(
-                ["/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport", "-I"],
-                capture_output=True, text=True, timeout=3,
+                [
+                    "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport",
+                    "-I",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
             )
             output = result.stdout
             if "en0" in output or "en1" in output:
@@ -196,7 +209,9 @@ class NetworkTopologyDetector:
         try:
             result = subprocess.run(
                 ["system_profiler", "SPNetworkDataType"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             # 简单解析
             if "Thunderbolt" in result.stdout:
@@ -250,14 +265,17 @@ class NetworkTopologyDetector:
         try:
             result = subprocess.run(
                 ["ifconfig", iface],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             for line in result.stdout.split("\n"):
                 if "media:" in line:
                     if "baseT" in line:
                         # 提取速率，如 "media: autoselect (1000baseT <full-duplex>)"
                         import re
-                        m = re.search(r'(\d+)baseT', line)
+
+                        m = re.search(r"(\d+)baseT", line)
                         if m:
                             return float(m.group(1))
                     if "thunderbolt" in line.lower() or "40" in line:
@@ -279,7 +297,7 @@ class NetworkTopologyDetector:
         for _ in range(count):
             try:
                 start = time.time()
-                reader, writer = await asyncio.wait_for(
+                _reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(peer_ip, 11445),
                     timeout=2.0,
                 )
@@ -293,7 +311,7 @@ class NetworkTopologyDetector:
             return 10.0  # 默认 10ms
         return sum(latencies) / len(latencies)
 
-    def get_best_link(self) -> Optional[LinkInfo]:
+    def get_best_link(self) -> LinkInfo | None:
         """获取最优链路。"""
         active = [lnk for lnk in self._interfaces.values() if lnk.is_active]
         if not active:

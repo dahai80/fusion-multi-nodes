@@ -13,7 +13,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -57,20 +57,34 @@ class CloudUsage:
     last_request_at: float = 0.0
 
 
-AVAILABLE_MODELS: List[CloudModel] = [
+AVAILABLE_MODELS: list[CloudModel] = [
     CloudModel(CloudProvider.OPENAI, "gpt-4o-mini", "GPT-4o Mini", 128000, 0.00015, 0.0006),
     CloudModel(CloudProvider.OPENAI, "gpt-4o", "GPT-4o", 128000, 0.0025, 0.01),
-    CloudModel(CloudProvider.ANTHROPIC, "claude-3-5-haiku-20241022", "Claude 3.5 Haiku", 200000, 0.001, 0.005),
-    CloudModel(CloudProvider.ANTHROPIC, "claude-sonnet-4-20250514", "Claude Sonnet 4", 200000, 0.003, 0.015),
+    CloudModel(
+        CloudProvider.ANTHROPIC,
+        "claude-3-5-haiku-20241022",
+        "Claude 3.5 Haiku",
+        200000,
+        0.001,
+        0.005,
+    ),
+    CloudModel(
+        CloudProvider.ANTHROPIC,
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        200000,
+        0.003,
+        0.015,
+    ),
 ]
 
 
 class CloudFallbackClient:
     """云端 API 回退客户端。"""
 
-    def __init__(self, config: Optional[CloudConfig] = None):
+    def __init__(self, config: CloudConfig | None = None):
         self.config = config or CloudConfig()
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
         self._usage = CloudUsage()
         self._daily_cost = 0.0
         self._daily_reset = time.time()
@@ -82,11 +96,11 @@ class CloudFallbackClient:
 
     async def chat(
         self,
-        messages: List[Dict[str, Any]],
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         if not self.config.enabled:
             return {"error": "云端回退未启用"}
         if not self.config.api_key:
@@ -115,11 +129,11 @@ class CloudFallbackClient:
 
     async def _call_openai(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         model: str,
         temperature: float,
         max_tokens: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         base_url = self.config.base_url or "https://api.openai.com/v1"
         payload = {
             "model": model,
@@ -139,11 +153,11 @@ class CloudFallbackClient:
 
     async def _call_anthropic(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         model: str,
         temperature: float,
         max_tokens: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         base_url = self.config.base_url or "https://api.anthropic.com/v1"
 
         system_msg = ""
@@ -193,7 +207,8 @@ class CloudFallbackClient:
             "usage": {
                 "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
                 "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
-                "total_tokens": data.get("usage", {}).get("input_tokens", 0) + data.get("usage", {}).get("output_tokens", 0),
+                "total_tokens": data.get("usage", {}).get("input_tokens", 0)
+                + data.get("usage", {}).get("output_tokens", 0),
             },
             "provider": "anthropic",
         }
@@ -205,7 +220,7 @@ class CloudFallbackClient:
             self._daily_reset = now
         return self._daily_cost >= self.config.max_cost_per_day
 
-    def _update_usage(self, result: Dict[str, Any]) -> None:
+    def _update_usage(self, result: dict[str, Any]) -> None:
         usage = result.get("usage", {})
         input_tokens = usage.get("prompt_tokens", 0)
         output_tokens = usage.get("completion_tokens", 0)
@@ -217,14 +232,16 @@ class CloudFallbackClient:
 
         model_info = next((m for m in AVAILABLE_MODELS if m.model_id == result.get("model", "")), None)
         if model_info:
-            cost = (input_tokens / 1000 * model_info.cost_per_1k_input +
-                    output_tokens / 1000 * model_info.cost_per_1k_output)
+            cost = (
+                input_tokens / 1000 * model_info.cost_per_1k_input
+                + output_tokens / 1000 * model_info.cost_per_1k_output
+            )
             self._usage.total_cost += cost
             self._daily_cost += cost
 
         logger.info(f"云端 API 使用: +{input_tokens}in/{output_tokens}out tokens, 日消费=${self._daily_cost:.4f}")
 
-    def get_usage(self) -> Dict[str, Any]:
+    def get_usage(self) -> dict[str, Any]:
         return {
             "total_requests": self._usage.total_requests,
             "total_input_tokens": self._usage.total_input_tokens,

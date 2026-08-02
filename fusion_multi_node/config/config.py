@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from ..agent import AgentConfig
 
@@ -52,10 +52,8 @@ class ClusterConfig:
     }
 
     def __init__(self, config_path: str = ""):
-        self.config_path = config_path or str(
-            Path.home() / ".fusion" / "multi-node" / "config.json"
-        )
-        self._data: Dict[str, Any] = {}
+        self.config_path = config_path or str(Path.home() / ".fusion" / "multi-node" / "config.json")
+        self._data: dict[str, Any] = {}
         self.load()
 
     def load(self) -> None:
@@ -111,7 +109,7 @@ class ClusterConfig:
         data[parts[-1]] = value
         self.save()
 
-    def _merge(self, base: Dict, override: Dict) -> Dict:
+    def _merge(self, base: dict, override: dict) -> dict:
         """递归合并字典。"""
         result = dict(base)
         for key, value in override.items():

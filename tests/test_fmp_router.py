@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from fusion_multi_node.protocol.fmp_message import (
-    FMPMessage,
-    PayloadType,
     MAX_HOP_COUNT,
     MAX_ROUNDS,
+    FMPMessage,
+    PayloadType,
 )
 from fusion_multi_node.protocol.fmp_router import FMPRouter, RoundInfo
 

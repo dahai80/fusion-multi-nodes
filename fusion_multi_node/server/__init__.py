@@ -1,4 +1,4 @@
-from .master_server import MasterServer
 from .agent_server import AgentServer
+from .master_server import MasterServer
 
-__all__ = ["MasterServer", "AgentServer"]
+__all__ = ["AgentServer", "MasterServer"]

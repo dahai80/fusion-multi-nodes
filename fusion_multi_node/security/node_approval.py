@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class ApprovalRequest:
     approved_by: str = ""
     approved_at: float = 0.0
     reject_reason: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.requested_at:
@@ -42,13 +42,13 @@ class NodeApprovalManager:
 
     def __init__(
         self,
-        auto_approve_patterns: Optional[List[str]] = None,
+        auto_approve_patterns: list[str] | None = None,
         max_pending: int = 100,
         approval_ttl_seconds: float = 3600.0,
     ):
-        self._pending: Dict[str, ApprovalRequest] = {}
-        self._approved: Dict[str, ApprovalRequest] = {}
-        self._rejected: Dict[str, ApprovalRequest] = {}
+        self._pending: dict[str, ApprovalRequest] = {}
+        self._approved: dict[str, ApprovalRequest] = {}
+        self._rejected: dict[str, ApprovalRequest] = {}
         self._auto_patterns = auto_approve_patterns or []
         self._max_pending = max_pending
         self._approval_ttl = approval_ttl_seconds
@@ -60,7 +60,7 @@ class NodeApprovalManager:
         ip_address: str,
         port: int,
         cluster_secret_hash: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> ApprovalRequest:
         if node_id in self._approved:
             logger.debug(f"节点已审批通过: {node_id}")
@@ -116,10 +116,10 @@ class NodeApprovalManager:
     def is_approved(self, node_id: str) -> bool:
         return node_id in self._approved
 
-    def get_pending(self) -> List[ApprovalRequest]:
+    def get_pending(self) -> list[ApprovalRequest]:
         return list(self._pending.values())
 
-    def get_approved(self) -> List[ApprovalRequest]:
+    def get_approved(self) -> list[ApprovalRequest]:
         return list(self._approved.values())
 
     def revoke_approval(self, node_id: str) -> bool:
@@ -133,17 +133,11 @@ class NodeApprovalManager:
         return True
 
     def _check_auto_approve(self, hostname: str, ip_address: str) -> bool:
-        for pattern in self._auto_patterns:
-            if pattern in hostname or pattern in ip_address:
-                return True
-        return False
+        return any(pattern in hostname or pattern in ip_address for pattern in self._auto_patterns)
 
     def _cleanup_expired_pending(self) -> None:
         now = time.time()
-        expired = [
-            nid for nid, req in self._pending.items()
-            if now - req.requested_at > self._approval_ttl
-        ]
+        expired = [nid for nid, req in self._pending.items() if now - req.requested_at > self._approval_ttl]
         for nid in expired:
             del self._pending[nid]
         if expired:

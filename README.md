@@ -137,12 +137,24 @@ from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, Paral
 
 master = ClusterMaster(host="127.0.0.1", port=11452)
 
-node = NodeInfo(node_id="node_1", hostname="mac-studio-1", ip_address="10.0.0.1",
-                port=11445, total_memory_gb=64.0, available_memory_gb=48.0)
+node = NodeInfo(
+    node_id="node_1",
+    hostname="mac-studio-1",
+    ip_address="10.0.0.1",
+    port=11445,
+    total_memory_gb=64.0,
+    available_memory_gb=48.0,
+)
 master.register_node(node)
 
-task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA,
-                   required_capability="inference", preferred_node_id="node_1", priority=5)
+task = ClusterTask(
+    task_id="task_1",
+    name="batch-inference",
+    mode=ParallelMode.DATA,
+    required_capability="inference",
+    preferred_node_id="node_1",
+    priority=5,
+)
 master.assign_task(task)
 await master.cancel_task("task_1", reason="user request", cancel_sub_tasks=True)
 await master.degrade_task("task_1")  # 70b→32b→13b→8b→3b→1b
@@ -218,8 +230,13 @@ Three-layer binary protocol with AES-GCM encryption, circuit breaker, and hop_co
 
 ```python
 from fusion_multi_node.protocol import (
-    FMPMessage, PayloadType, FMPCrypto,
-    FMPConnectionManager, FMPRouter, CircuitBreaker, FMPServer,
+    FMPMessage,
+    PayloadType,
+    FMPCrypto,
+    FMPConnectionManager,
+    FMPRouter,
+    CircuitBreaker,
+    FMPServer,
 )
 
 msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
@@ -243,9 +260,17 @@ if cb.allow_request():
 Node approval, Master/Worker permission isolation, Worker sandbox, data scrubbing.
 
 ```python
-from fusion_multi_node.security.permission import PermissionManager, NodeRole, Permission
+from fusion_multi_node.security.permission import (
+    PermissionManager,
+    NodeRole,
+    Permission,
+)
 from fusion_multi_node.security.node_approval import NodeApprovalManager
-from fusion_multi_node.security.sandbox import WorkerSandbox, SandboxConfig, SandboxExecutor
+from fusion_multi_node.security.sandbox import (
+    WorkerSandbox,
+    SandboxConfig,
+    SandboxExecutor,
+)
 from fusion_multi_node.security.data_scrubber import DataScrubber
 from fusion_multi_node.security.crypto import FMPCrypto, MetalCryptoBackend
 
@@ -254,8 +279,8 @@ pm = PermissionManager()
 pm.assign_role("master-1", NodeRole.MASTER)
 pm.assign_role("worker-1", NodeRole.WORKER)
 pm.has_permission("worker-1", Permission.TASK_EXECUTE)  # True
-pm.has_permission("worker-1", Permission.TASK_SUBMIT)    # False
-pm.check_path_access("worker-1", "/api/execute", "POST") # True
+pm.has_permission("worker-1", Permission.TASK_SUBMIT)  # False
+pm.check_path_access("worker-1", "/api/execute", "POST")  # True
 
 # Node approval
 mgr = NodeApprovalManager(auto_approve_patterns=["192.168."])
@@ -263,13 +288,15 @@ req = mgr.request_join(node_id="n1", hostname="mac-1", ip_address="192.168.1.10"
 mgr.approve("n1", approved_by="admin")
 
 # Worker sandbox
-sandbox = WorkerSandbox(config=SandboxConfig(
-    allowed_paths=["/tmp", "/data"],
-    allowed_network_hosts=["api.openai.com"],
-))
-sandbox.check_path_access("/tmp/out", write=True)        # True
-sandbox.check_network_access("api.openai.com")            # True
-sandbox.filter_environment({"HOME": "/u", "SECRET": "x"}) # SECRET removed
+sandbox = WorkerSandbox(
+    config=SandboxConfig(
+        allowed_paths=["/tmp", "/data"],
+        allowed_network_hosts=["api.openai.com"],
+    )
+)
+sandbox.check_path_access("/tmp/out", write=True)  # True
+sandbox.check_network_access("api.openai.com")  # True
+sandbox.filter_environment({"HOME": "/u", "SECRET": "x"})  # SECRET removed
 
 # Data scrubbing (phone, email, API key, ID card, etc.)
 scrubber = DataScrubber()
@@ -286,9 +313,10 @@ decrypted = metal.decrypt(key, encrypted)
 
 # Secure transfer pipeline (AST diff + PII scrubbing)
 from fusion_multi_node.security.secure_transfer import SecureTransferPipeline
+
 pipeline = SecureTransferPipeline()
 transfer = pipeline.prepare_transfer(old_ast, new_ast)  # diff + scrub
-restored = pipeline.apply_transfer(base_ast, transfer)   # rebuild
+restored = pipeline.apply_transfer(base_ast, transfer)  # rebuild
 ```
 
 ### 6. Observability (`fusion_multi_node.observability`)
@@ -297,18 +325,29 @@ Metrics, logs, alerts, log store with export, intelligent fault diagnosis.
 
 ```python
 from fusion_multi_node.observability import ClusterObservability, LogEntry
-from fusion_multi_node.observability.log_store import LogStore, StoredLog, FaultDiagnoser
+from fusion_multi_node.observability.log_store import (
+    LogStore,
+    StoredLog,
+    FaultDiagnoser,
+)
 
 # Metrics & alerts
 obs = ClusterObservability(retention_hours=168.0)
 obs.record_metric("node_1", "memory_used_gb", 16.0, tags={"gpu": "m4_ultra"})
 obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "Task completed"))
-logs = obs.export_logs(fmt="json")        # M8-02 log export
+logs = obs.export_logs(fmt="json")  # M8-02 log export
 suggestions = obs.generate_optimization_suggestions()  # M8-03 smart suggestions
 
 # Log store & export
 store = LogStore()
-store.store(StoredLog(timestamp=time.time(), level="error", source="master", message="heartbeat timeout"))
+store.store(
+    StoredLog(
+        timestamp=time.time(),
+        level="error",
+        source="master",
+        message="heartbeat timeout",
+    )
+)
 results = store.query(level="error")
 json_data = store.export_json()
 csv_data = store.export_csv()
@@ -324,7 +363,12 @@ freq = diagnoser.analyze_frequency(logs, group_by="source")
 Conservative/Balanced/Aggressive scale policies.
 
 ```python
-from fusion_multi_node.autoscaler import Autoscaler, AutoscalerConfig, ScalePolicy, ScaleAction
+from fusion_multi_node.autoscaler import (
+    Autoscaler,
+    AutoscalerConfig,
+    ScalePolicy,
+    ScaleAction,
+)
 
 scaler = Autoscaler(
     policy=ScalePolicy.BALANCED,
@@ -381,8 +425,11 @@ Unified MCP endpoint for Claude Desktop/Code, aggregating tools from all nodes.
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 
 gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
-tool = MCPTool(name="code_review", description="Review code",
-               parameters={"type": "object", "properties": {"code": {"type": "string"}}})
+tool = MCPTool(
+    name="code_review",
+    description="Review code",
+    parameters={"type": "object", "properties": {"code": {"type": "string"}}},
+)
 gateway.register_tool(tool)
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
 ```

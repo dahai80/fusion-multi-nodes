@@ -15,12 +15,13 @@ import struct
 import zlib
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 
 @dataclass
 class CompressStats:
     """压缩统计。"""
+
     original_bytes: int = 0
     compressed_bytes: int = 0
     ratio: float = 0.0
@@ -39,11 +40,11 @@ class CavemanCompressor:
 
     def __init__(self, dictionary_size: int = 1024):
         self.dictionary_size = dictionary_size
-        self._dictionary: Dict[int, bytes] = {}
-        self._reverse_dict: Dict[bytes, int] = {}
+        self._dictionary: dict[int, bytes] = {}
+        self._reverse_dict: dict[bytes, int] = {}
         self._stats = CompressStats()
 
-    def build_dictionary(self, tokens: List[int]) -> None:
+    def build_dictionary(self, tokens: list[int]) -> None:
         """根据 token 频率构建字典。"""
         self._dictionary.clear()
         self._reverse_dict.clear()
@@ -55,7 +56,7 @@ class CavemanCompressor:
             self._dictionary[token] = code
             self._reverse_dict[code] = token
 
-    def compress(self, data: bytes, method: str = "auto") -> Tuple[bytes, CompressStats]:
+    def compress(self, data: bytes, method: str = "auto") -> tuple[bytes, CompressStats]:
         """压缩数据。
 
         Args:
@@ -66,6 +67,7 @@ class CavemanCompressor:
             (压缩后数据, 统计信息)
         """
         import time
+
         start = time.time()
         original_size = len(data)
 
@@ -122,7 +124,7 @@ class CavemanCompressor:
         result = bytearray()
         i = 0
         while i < len(data):
-            chunk = data[i:i+4]
+            chunk = data[i : i + 4]
             if len(chunk) == 4:
                 token = struct.unpack(">I", chunk)[0]
                 if token in self._dictionary:
@@ -142,13 +144,13 @@ class CavemanCompressor:
         result = bytearray()
         i = 0
         while i < len(data):
-            chunk = data[i:i+2]
+            chunk = data[i : i + 2]
             if len(chunk) == 2 and chunk in self._reverse_dict:
                 token = self._reverse_dict[chunk]
                 result.extend(struct.pack(">I", token))
                 i += 2
             else:
-                result.extend(data[i:i+1])
+                result.extend(data[i : i + 1])
                 i += 1
 
         return bytes(result)
@@ -163,7 +165,7 @@ class CavemanCompressor:
         result.extend(data[:1])
         # 后续存差值
         for i in range(1, len(data)):
-            diff = (data[i] - data[i-1]) & 0xFF
+            diff = (data[i] - data[i - 1]) & 0xFF
             result.append(diff)
 
         # 对差值再 zlib 压缩
@@ -191,7 +193,7 @@ class CavemanCompressor:
         windows = set()
         repeats = 0
         for i in range(0, len(data) - 4, 4):
-            window = data[i:i+4]
+            window = data[i : i + 4]
             if window in windows:
                 repeats += 1
             windows.add(window)
@@ -228,7 +230,7 @@ class CavemanManager:
         self.total_original = 0
         self.total_compressed = 0
 
-    def get_compression_config(self, link_type: str) -> Dict[str, Any]:
+    def get_compression_config(self, link_type: str) -> dict[str, Any]:
         """根据链路类型获取压缩配置。"""
         return self.COMPRESSION_LEVELS.get(link_type, self.COMPRESSION_LEVELS["unknown"])
 
@@ -236,7 +238,7 @@ class CavemanManager:
         self,
         data: bytes,
         link_type: str = "unknown",
-    ) -> Tuple[bytes, str, CompressStats]:
+    ) -> tuple[bytes, str, CompressStats]:
         """压缩张量数据。"""
         config = self.get_compression_config(link_type)
         compressed, stats = self.compressor.compress(data, method=config["method"])
@@ -254,7 +256,7 @@ class CavemanManager:
             return 1.0
         return self.total_compressed / self.total_original
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取压缩统计。"""
         return {
             "total_original_bytes": self.total_original,

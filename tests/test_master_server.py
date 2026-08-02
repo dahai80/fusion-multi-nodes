@@ -1,6 +1,5 @@
 """Master Server FastAPI coverage tests."""
 
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -66,11 +65,15 @@ class TestMasterServerNodeManagement:
     @pytest.mark.asyncio
     async def test_heartbeat(self, client, master_server):
         await _register_node(client)
-        resp = await client.post("/api/nodes/heartbeat", json={
-            "node_id": "n1",
-            "available_memory_gb": 40.0,
-            "active_tasks": 2,
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/nodes/heartbeat",
+            json={
+                "node_id": "n1",
+                "available_memory_gb": 40.0,
+                "active_tasks": 2,
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         node = master_server.master.nodes["n1"]
         assert node.available_memory_gb == 40.0
@@ -78,19 +81,27 @@ class TestMasterServerNodeManagement:
 
     @pytest.mark.asyncio
     async def test_heartbeat_unknown_node(self, client):
-        resp = await client.post("/api/nodes/heartbeat", json={
-            "node_id": "unknown",
-            "available_memory_gb": 10.0,
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/nodes/heartbeat",
+            json={
+                "node_id": "unknown",
+                "available_memory_gb": 10.0,
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
     async def test_heartbeat_revives_offline_node(self, client, master_server):
         await _register_node(client)
         master_server.master.nodes["n1"].status = NodeStatus.OFFLINE
-        resp = await client.post("/api/nodes/heartbeat", json={
-            "node_id": "n1",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/nodes/heartbeat",
+            json={
+                "node_id": "n1",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         assert master_server.master.nodes["n1"].status == NodeStatus.ONLINE
 
@@ -125,21 +136,29 @@ class TestMasterServerNodeManagement:
     @pytest.mark.asyncio
     async def test_fault_report(self, client, master_server):
         await _register_node(client)
-        resp = await client.post("/api/nodes/fault", json={
-            "node_id": "n1",
-            "fault_type": "oom",
-            "message": "Out of memory",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/nodes/fault",
+            json={
+                "node_id": "n1",
+                "fault_type": "oom",
+                "message": "Out of memory",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         assert master_server.master.nodes["n1"].status == NodeStatus.FAULT
 
     @pytest.mark.asyncio
     async def test_fault_report_unknown_node(self, client):
-        resp = await client.post("/api/nodes/fault", json={
-            "node_id": "unknown",
-            "fault_type": "crash",
-            "message": "Something went wrong",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/nodes/fault",
+            json={
+                "node_id": "unknown",
+                "fault_type": "crash",
+                "message": "Something went wrong",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
 
 
@@ -147,11 +166,15 @@ class TestMasterServerTaskManagement:
     @pytest.mark.asyncio
     async def test_submit_task(self, client, master_server):
         await _register_node(client)
-        resp = await client.post("/api/tasks/submit", json={
-            "name": "test-inference",
-            "mode": "data",
-            "model_name": "llama-3b",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/tasks/submit",
+            json={
+                "name": "test-inference",
+                "mode": "data",
+                "model_name": "llama-3b",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "running"
@@ -159,27 +182,39 @@ class TestMasterServerTaskManagement:
     @pytest.mark.asyncio
     async def test_submit_task_pipeline(self, client, master_server):
         await _register_node(client)
-        resp = await client.post("/api/tasks/submit", json={
-            "name": "test-pipeline",
-            "mode": "pipeline",
-            "model_name": "llama-3b",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/tasks/submit",
+            json={
+                "name": "test-pipeline",
+                "mode": "pipeline",
+                "model_name": "llama-3b",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "running"
 
     @pytest.mark.asyncio
     async def test_submit_task_no_nodes(self, client):
-        resp = await client.post("/api/tasks/submit", json={
-            "name": "test-inference",
-            "mode": "data",
-        }, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/tasks/submit",
+            json={
+                "name": "test-inference",
+                "mode": "data",
+            },
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 503
 
     @pytest.mark.asyncio
     async def test_list_tasks(self, client, master_server):
         await _register_node(client)
-        await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
+        await client.post(
+            "/api/tasks/submit",
+            json={"name": "task1", "mode": "data", "model_name": "m1"},
+            headers=AUTH_HEADERS,
+        )
         resp = await client.get("/api/tasks", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.json()
@@ -188,7 +223,11 @@ class TestMasterServerTaskManagement:
     @pytest.mark.asyncio
     async def test_get_task(self, client, master_server):
         await _register_node(client)
-        submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
+        submit_resp = await client.post(
+            "/api/tasks/submit",
+            json={"name": "task1", "mode": "data", "model_name": "m1"},
+            headers=AUTH_HEADERS,
+        )
         task_id = submit_resp.json()["task_id"]
         resp = await client.get(f"/api/tasks/{task_id}", headers=AUTH_HEADERS)
         assert resp.status_code == 200
@@ -202,30 +241,54 @@ class TestMasterServerTaskManagement:
     @pytest.mark.asyncio
     async def test_cancel_task(self, client, master_server):
         await _register_node(client)
-        submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
+        submit_resp = await client.post(
+            "/api/tasks/submit",
+            json={"name": "task1", "mode": "data", "model_name": "m1"},
+            headers=AUTH_HEADERS,
+        )
         task_id = submit_resp.json()["task_id"]
-        resp = await client.post(f"/api/tasks/{task_id}/cancel", json={"reason": "user request"}, headers=AUTH_HEADERS)
+        resp = await client.post(
+            f"/api/tasks/{task_id}/cancel",
+            json={"reason": "user request"},
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_cancel_task_missing(self, client):
-        resp = await client.post("/api/tasks/nonexistent/cancel", json={"reason": "test"}, headers=AUTH_HEADERS)
+        resp = await client.post(
+            "/api/tasks/nonexistent/cancel",
+            json={"reason": "test"},
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
     async def test_cancel_completed_task(self, client, master_server):
         await _register_node(client)
-        submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
+        submit_resp = await client.post(
+            "/api/tasks/submit",
+            json={"name": "task1", "mode": "data", "model_name": "m1"},
+            headers=AUTH_HEADERS,
+        )
         task_id = submit_resp.json()["task_id"]
         await master_server.master.complete_task(task_id)
-        resp = await client.post(f"/api/tasks/{task_id}/cancel", json={"reason": "too late"}, headers=AUTH_HEADERS)
+        resp = await client.post(
+            f"/api/tasks/{task_id}/cancel",
+            json={"reason": "too late"},
+            headers=AUTH_HEADERS,
+        )
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
     async def test_migrate_task(self, client, master_server):
         await _register_node(client, node_id="n1")
         await _register_node(client, node_id="n2", hostname="mac2", ip_address="10.0.1.2")
-        submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
+        submit_resp = await client.post(
+            "/api/tasks/submit",
+            json={"name": "task1", "mode": "data", "model_name": "m1"},
+            headers=AUTH_HEADERS,
+        )
         task_id = submit_resp.json()["task_id"]
         resp = await client.post(f"/api/tasks/{task_id}/migrate", headers=AUTH_HEADERS)
         assert resp.status_code == 200
@@ -238,7 +301,11 @@ class TestMasterServerTaskManagement:
     @pytest.mark.asyncio
     async def test_migrate_task_not_running(self, client, master_server):
         await _register_node(client)
-        submit_resp = await client.post("/api/tasks/submit", json={"name": "task1", "mode": "data", "model_name": "m1"}, headers=AUTH_HEADERS)
+        submit_resp = await client.post(
+            "/api/tasks/submit",
+            json={"name": "task1", "mode": "data", "model_name": "m1"},
+            headers=AUTH_HEADERS,
+        )
         task_id = submit_resp.json()["task_id"]
         await master_server.master.complete_task(task_id)
         resp = await client.post(f"/api/tasks/{task_id}/migrate", headers=AUTH_HEADERS)
@@ -249,12 +316,16 @@ class TestMasterServerKVCache:
     @pytest.mark.asyncio
     async def test_kv_register_and_find(self, client, master_server):
         await _register_node(client)
-        await client.post("/api/kv/register", json={
-            "cache_id": "kv1",
-            "model_name": "llama-3b",
-            "node_id": "n1",
-            "size_mb": 256.0,
-        }, headers=AUTH_HEADERS)
+        await client.post(
+            "/api/kv/register",
+            json={
+                "cache_id": "kv1",
+                "model_name": "llama-3b",
+                "node_id": "n1",
+                "size_mb": 256.0,
+            },
+            headers=AUTH_HEADERS,
+        )
         resp = await client.get("/api/kv/find/llama-3b", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         assert resp.json()["cache_id"] == "kv1"
@@ -301,12 +372,15 @@ class TestMasterServerLifecycle:
 
     @pytest.mark.asyncio
     async def test_start_mocked_uvicorn(self, master_server):
-        from unittest.mock import MagicMock, AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         mock_config = MagicMock()
         mock_server_instance = MagicMock()
         mock_server_instance.serve = AsyncMock()
-        with patch("uvicorn.Config", return_value=mock_config), \
-             patch("uvicorn.Server", return_value=mock_server_instance):
+        with (
+            patch("uvicorn.Config", return_value=mock_config),
+            patch("uvicorn.Server", return_value=mock_server_instance),
+        ):
             await master_server.start(host="127.0.0.1", port=9999)
         assert mock_server_instance.serve.called
         master_server.master._running = False

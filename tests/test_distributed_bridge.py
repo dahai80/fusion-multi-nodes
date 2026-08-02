@@ -1,14 +1,14 @@
 """Distributed MLX Bridge 测试。"""
 
-
-import pytest
-import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import pytest
+
 from fusion_multi_node.distributed_mlx.distributed_bridge import (
-    DistributedMLXBridge,
     DistConfig,
     DistMode,
+    DistributedMLXBridge,
     ModelShard,
 )
 
@@ -241,7 +241,9 @@ class TestDistributedMLXBridge:
 
         with patch.object(httpx, "AsyncClient", return_value=mock_client):
             results = await bridge.data_parallel_inference(
-                "test", ["prompt1"], ["n1"],
+                "test",
+                ["prompt1"],
+                ["n1"],
             )
             assert len(results) == 1
             assert "content" in results[0]
@@ -273,7 +275,9 @@ class TestDistributedMLXBridge:
 
         with patch.object(httpx, "AsyncClient", return_value=mock_client):
             results = await bridge.data_parallel_inference(
-                "test", ["p1", "p2"], ["n1", "n2"],
+                "test",
+                ["p1", "p2"],
+                ["n1", "n2"],
             )
             assert len(results) == 2
             assert results[0]["content"] == "ok"
@@ -290,7 +294,9 @@ class TestDistributedMLXBridge:
 
         with patch.object(httpx, "AsyncClient", return_value=mock_client):
             results = await bridge.data_parallel_inference(
-                "test", ["p1", "p2"], ["n1"],
+                "test",
+                ["p1", "p2"],
+                ["n1"],
             )
             assert len(results) == 2
             assert all("error" in r for r in results)

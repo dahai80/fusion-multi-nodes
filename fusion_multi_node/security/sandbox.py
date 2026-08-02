@@ -13,7 +13,7 @@ import os
 import resource
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any
 
 from .data_isolation import DataIsolationPolicy
 
@@ -23,37 +23,40 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SandboxConfig:
     """沙箱配置。"""
+
     max_cpu_seconds: int = 300
     max_memory_mb: int = 8192
     max_disk_mb: int = 10240
     max_processes: int = 8
     execution_timeout: int = 600
-    allowed_paths: List[str] = field(default_factory=lambda: [
-        "/tmp",
-        "/var/tmp",
-    ])
-    allowed_network_hosts: List[str] = field(default_factory=list)
-    allowed_env_prefixes: List[str] = field(default_factory=lambda: [
-        "HOME",
-        "PATH",
-        "LANG",
-        "LC_",
-        "TMPDIR",
-        "FUSION_",
-        "MODEL_",
-    ])
-    read_only_paths: List[str] = field(default_factory=list)
+    allowed_paths: list[str] = field(
+        default_factory=lambda: [
+            "/tmp",
+            "/var/tmp",
+        ]
+    )
+    allowed_network_hosts: list[str] = field(default_factory=list)
+    allowed_env_prefixes: list[str] = field(
+        default_factory=lambda: [
+            "HOME",
+            "PATH",
+            "LANG",
+            "LC_",
+            "TMPDIR",
+            "FUSION_",
+            "MODEL_",
+        ]
+    )
+    read_only_paths: list[str] = field(default_factory=list)
 
 
 class WorkerSandbox:
     """Worker 沙箱管理器 — 在任务执行前设置资源限制。"""
 
-    def __init__(self, config: Optional[SandboxConfig] = None):
+    def __init__(self, config: SandboxConfig | None = None):
         self.config = config or SandboxConfig()
-        self._active_sandboxes: Dict[str, Dict] = {}
-        self._allowed_paths_set: FrozenSet[str] = frozenset(
-            os.path.normpath(p) for p in self.config.allowed_paths
-        )
+        self._active_sandboxes: dict[str, dict] = {}
+        self._allowed_paths_set: frozenset[str] = frozenset(os.path.normpath(p) for p in self.config.allowed_paths)
         self._isolation_policy = DataIsolationPolicy()
 
     def apply_limits(self, task_id: str) -> bool:
@@ -104,9 +107,13 @@ class WorkerSandbox:
         self._active_sandboxes.pop(task_id, None)
         logger.info(f"沙箱[{task_id}]: 已清理")
 
-    def check_resource_usage(self, task_id: str) -> Dict[str, Any]:
+    def check_resource_usage(self, task_id: str) -> dict[str, Any]:
         """检查当前进程资源使用情况，与沙箱限制对比。"""
-        usage: Dict[str, Any] = {"task_id": task_id, "within_limits": True, "warnings": []}
+        usage: dict[str, Any] = {
+            "task_id": task_id,
+            "within_limits": True,
+            "warnings": [],
+        }
         try:
             usage_ru = resource.getrusage(resource.RUSAGE_SELF)
             cpu_used = usage_ru.ru_utime + usage_ru.ru_stime
@@ -128,7 +135,7 @@ class WorkerSandbox:
             usage["error"] = str(e)
         return usage
 
-    def apply_to_subprocess(self, task_id: str) -> Dict[str, str]:
+    def apply_to_subprocess(self, task_id: str) -> dict[str, str]:
         """生成子进程可继承的环境变量，用于在子进程中执行资源限制。"""
         env = {
             "FUSION_SANDBOX_TASK_ID": task_id,
@@ -177,8 +184,8 @@ class WorkerSandbox:
     def is_transfer_allowed(self, source_path: str, target_role: str) -> bool:
         return self._isolation_policy.is_transfer_allowed(source_path, target_role)
 
-    def filter_environment(self, env: Dict[str, str]) -> Dict[str, str]:
-        filtered: Dict[str, str] = {}
+    def filter_environment(self, env: dict[str, str]) -> dict[str, str]:
+        filtered: dict[str, str] = {}
         for key, value in env.items():
             for prefix in self.config.allowed_env_prefixes:
                 if key.startswith(prefix):
@@ -187,7 +194,7 @@ class WorkerSandbox:
         logger.debug(f"沙箱: 环境变量过滤 {len(env)} → {len(filtered)}")
         return filtered
 
-    def get_active_sandbox(self, task_id: str) -> Optional[Dict]:
+    def get_active_sandbox(self, task_id: str) -> dict | None:
         return self._active_sandboxes.get(task_id)
 
     @property
@@ -198,10 +205,10 @@ class WorkerSandbox:
 class SandboxExecutor:
     """M6-02 OS 级沙箱执行器 — macOS sandbox-exec / Linux unshare。"""
 
-    def __init__(self, config: Optional[SandboxConfig] = None):
+    def __init__(self, config: SandboxConfig | None = None):
         self.config = config or SandboxConfig()
         self._backend = self._detect_backend()
-        self._profile_cache: Dict[str, str] = {}
+        self._profile_cache: dict[str, str] = {}
         logger.info(f"SandboxExecutor: 后端={self._backend}")
 
     def _detect_backend(self) -> str:
@@ -213,6 +220,7 @@ class SandboxExecutor:
         if sys.platform == "linux":
             try:
                 import ctypes
+
                 libc = ctypes.CDLL("libc.so.6", use_errno=True)
                 if hasattr(libc, "unshare"):
                     return "unshare"
@@ -223,13 +231,9 @@ class SandboxExecutor:
     def _build_sbpl_profile(self) -> str:
         """生成 macOS sandbox-exec SBPL profile。"""
         allow_paths = "\n".join(
-            f'    (allow file-read* file-write* (subpath "{p}"))'
-            for p in self.config.allowed_paths
+            f'    (allow file-read* file-write* (subpath "{p}"))' for p in self.config.allowed_paths
         )
-        ro_paths = "\n".join(
-            f'    (allow file-read* (subpath "{p}"))'
-            for p in self.config.read_only_paths
-        )
+        ro_paths = "\n".join(f'    (allow file-read* (subpath "{p}"))' for p in self.config.read_only_paths)
         net_rules = ""
         if self.config.allowed_network_hosts:
             for host in self.config.allowed_network_hosts:
@@ -265,14 +269,17 @@ class SandboxExecutor:
             logger.debug(f"SandboxExecutor: 生成 SBPL profile {profile_path}")
         return self._profile_cache[task_id]
 
-    async def execute_in_sandbox(
-        self, task_id: str, command: list, timeout: Optional[int] = None
-    ) -> Dict[str, Any]:
+    async def execute_in_sandbox(self, task_id: str, command: list, timeout: int | None = None) -> dict[str, Any]:
         """在 OS 沙箱中执行命令，返回执行结果。"""
         import asyncio as _asyncio
 
         exec_timeout = timeout or self.config.execution_timeout
-        result: Dict[str, Any] = {"task_id": task_id, "exit_code": -1, "stdout": "", "stderr": ""}
+        result: dict[str, Any] = {
+            "task_id": task_id,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "",
+        }
 
         if self._backend == "sandbox-exec":
             profile_path = self._get_profile_path(task_id)
@@ -292,13 +299,11 @@ class SandboxExecutor:
                 stderr=_asyncio.subprocess.PIPE,
             )
             try:
-                stdout, stderr = await _asyncio.wait_for(
-                    proc.communicate(), timeout=exec_timeout
-                )
+                stdout, stderr = await _asyncio.wait_for(proc.communicate(), timeout=exec_timeout)
                 result["exit_code"] = proc.returncode or 0
                 result["stdout"] = stdout.decode(errors="replace")
                 result["stderr"] = stderr.decode(errors="replace")
-            except _asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 result["exit_code"] = -9

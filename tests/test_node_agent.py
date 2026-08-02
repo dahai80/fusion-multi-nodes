@@ -150,12 +150,14 @@ class TestNodeAgentExecuteTask:
         }
         mock_ac_class = _make_mock_client(mock_resp)
         with patch("httpx.AsyncClient", mock_ac_class):
-            result = await agent.execute_task({
-                "task_id": "t1",
-                "type": "inference",
-                "model": "test",
-                "params": {"prompt": "hello"},
-            })
+            result = await agent.execute_task(
+                {
+                    "task_id": "t1",
+                    "type": "inference",
+                    "model": "test",
+                    "params": {"prompt": "hello"},
+                }
+            )
         assert result["task_id"] == "t1"
         assert result["content"] == "world"
         assert agent._current_task is None
@@ -172,12 +174,14 @@ class TestNodeAgentExecuteTask:
         }
         mock_ac_class = _make_mock_client(mock_resp)
         with patch("httpx.AsyncClient", mock_ac_class):
-            result = await agent.execute_task({
-                "task_id": "t2",
-                "type": "inference",
-                "model": "test",
-                "params": {"messages": [{"role": "user", "content": "hi"}]},
-            })
+            result = await agent.execute_task(
+                {
+                    "task_id": "t2",
+                    "type": "inference",
+                    "model": "test",
+                    "params": {"messages": [{"role": "user", "content": "hi"}]},
+                }
+            )
         assert result["content"] == "response"
 
     @pytest.mark.asyncio
@@ -191,12 +195,14 @@ class TestNodeAgentExecuteTask:
         }
         mock_ac_class = _make_mock_client(mock_resp)
         with patch("httpx.AsyncClient", mock_ac_class):
-            result = await agent.execute_task({
-                "task_id": "t3",
-                "type": "embedding",
-                "model": "BGE-M3",
-                "params": {"text": "hello"},
-            })
+            result = await agent.execute_task(
+                {
+                    "task_id": "t3",
+                    "type": "embedding",
+                    "model": "BGE-M3",
+                    "params": {"text": "hello"},
+                }
+            )
         assert "embedding" in result
         assert result["dimensions"] == 3
 
@@ -208,13 +214,15 @@ class TestNodeAgentExecuteTask:
         mock_resp.json.return_value = {"result": "plugin_ok"}
         mock_ac_class = _make_mock_client(mock_resp)
         with patch("httpx.AsyncClient", mock_ac_class):
-            result = await agent.execute_task({
-                "task_id": "t4",
-                "type": "plugin",
-                "plugin": "test_plugin",
-                "action": "run",
-                "params": {"key": "value"},
-            })
+            result = await agent.execute_task(
+                {
+                    "task_id": "t4",
+                    "type": "plugin",
+                    "plugin": "test_plugin",
+                    "action": "run",
+                    "params": {"key": "value"},
+                }
+            )
         assert result["result"] == "plugin_ok"
 
     @pytest.mark.asyncio
@@ -229,12 +237,14 @@ class TestNodeAgentExecuteTask:
         agent = NodeAgent()
         mock_ac_class = _make_mock_client(side_effect=Exception("connection error"))
         with patch("httpx.AsyncClient", mock_ac_class):
-            result = await agent.execute_task({
-                "task_id": "t6",
-                "type": "inference",
-                "model": "test",
-                "params": {"prompt": "hello"},
-            })
+            result = await agent.execute_task(
+                {
+                    "task_id": "t6",
+                    "type": "inference",
+                    "model": "test",
+                    "params": {"prompt": "hello"},
+                }
+            )
         assert "error" in result
         assert agent._current_task is None
 
@@ -307,12 +317,14 @@ class TestNodeAgentLifecycle:
         call_count = 0
 
         original_collect = agent.collect_hardware_info
+
         def mock_collect():
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
                 agent._running = False
             return original_collect()
+
         agent.collect_hardware_info = mock_collect
 
         await agent._hardware_report_loop()
@@ -350,6 +362,9 @@ class TestNodeAgentLifecycle:
     @pytest.mark.asyncio
     async def test_discover_master_exception(self):
         agent = NodeAgent()
-        with patch("fusion_multi_node.discovery.MDNSDiscovery", side_effect=ImportError("no module")):
+        with patch(
+            "fusion_multi_node.discovery.MDNSDiscovery",
+            side_effect=ImportError("no module"),
+        ):
             result = await agent._discover_master()
         assert result is False

@@ -18,7 +18,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class KVEntry:
     """KV 条目。"""
+
     key: str
     value: Any
     partition: str = "default"
@@ -44,6 +45,7 @@ class KVEntry:
 @dataclass
 class KVSnapEntry:
     """快照条目。"""
+
     key: str
     value: Any
     partition: str
@@ -63,12 +65,12 @@ class DistributedKVStore:
         self._data_dir = Path(data_dir) if data_dir else Path.home() / ".fusion" / "multi-node" / "kv"
         self._auto_save_interval = auto_save_interval
         self._max_entries = max_entries
-        self._store: Dict[str, KVEntry] = {}
-        self._partitions: Dict[str, Set[str]] = {}
+        self._store: dict[str, KVEntry] = {}
+        self._partitions: dict[str, set[str]] = {}
         self._dirty = False
         self._fmp_interface: Any = None
-        self._local_node_id: Optional[str] = None
-        self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._local_node_id: str | None = None
+        self._pending_requests: dict[str, asyncio.Future] = {}
         logger.info(f"DistributedKVStore 初始化: dir={self._data_dir}")
 
     def put(
@@ -107,7 +109,7 @@ class DistributedKVStore:
             return default
         return entry.value
 
-    def get_entry(self, key: str) -> Optional[KVEntry]:
+    def get_entry(self, key: str) -> KVEntry | None:
         entry = self._store.get(key)
         if entry and entry.is_expired:
             self.delete(key)
@@ -127,17 +129,14 @@ class DistributedKVStore:
             return True
         return False
 
-    def list_keys(self, partition: Optional[str] = None, prefix: str = "") -> List[str]:
+    def list_keys(self, partition: str | None = None, prefix: str = "") -> list[str]:
         self._cleanup_expired()
-        if partition:
-            keys = self._partitions.get(partition, set())
-        else:
-            keys = set(self._store.keys())
+        keys = self._partitions.get(partition, set()) if partition else set(self._store.keys())
         if prefix:
             keys = {k for k in keys if k.startswith(prefix)}
         return sorted(keys)
 
-    def list_partition(self, partition: str) -> Dict[str, Any]:
+    def list_partition(self, partition: str) -> dict[str, Any]:
         self._cleanup_expired()
         keys = self._partitions.get(partition, set())
         return {k: self._store[k].value for k in keys if k in self._store and not self._store[k].is_expired}
@@ -158,19 +157,21 @@ class DistributedKVStore:
 
     # ── M9-03 快照/恢复 ──
 
-    def snapshot(self, path: Optional[str] = None) -> str:
+    def snapshot(self, path: str | None = None) -> str:
         snap_path = Path(path) if path else self._data_dir / f"kv_snapshot_{int(time.time())}.json"
         snap_path.parent.mkdir(parents=True, exist_ok=True)
         self._cleanup_expired()
         entries = []
         for entry in self._store.values():
-            entries.append({
-                "key": entry.key,
-                "value": entry.value,
-                "partition": entry.partition,
-                "ttl_seconds": entry.ttl_seconds,
-                "version": entry.version,
-            })
+            entries.append(
+                {
+                    "key": entry.key,
+                    "value": entry.value,
+                    "partition": entry.partition,
+                    "ttl_seconds": entry.ttl_seconds,
+                    "version": entry.version,
+                }
+            )
         data = {
             "snapshot_at": time.time(),
             "entry_count": len(entries),
@@ -206,7 +207,7 @@ class DistributedKVStore:
 
     # ── 持久化 ──
 
-    def save(self, path: Optional[str] = None) -> bool:
+    def save(self, path: str | None = None) -> bool:
         save_path = Path(path) if path else self._data_dir / "kv_store.json"
         save_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -217,7 +218,7 @@ class DistributedKVStore:
             logger.error(f"KV 持久化失败: {e}")
             return False
 
-    def load(self, path: Optional[str] = None) -> int:
+    def load(self, path: str | None = None) -> int:
         load_path = Path(path) if path else self._data_dir / "kv_store.json"
         if not load_path.exists():
             return 0
@@ -259,7 +260,7 @@ class DistributedKVStore:
 
             result = await asyncio.wait_for(future, timeout=timeout)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"M9-04 KV 远程读取超时: {key}@{node_id}")
             return None
         except Exception as e:
@@ -306,7 +307,7 @@ class DistributedKVStore:
 
             result = await asyncio.wait_for(future, timeout=timeout)
             return bool(result)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"M9-04 KV 远程写入超时: {key}@{node_id}")
             return False
         except Exception as e:

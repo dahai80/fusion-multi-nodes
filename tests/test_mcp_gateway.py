@@ -1,9 +1,9 @@
 """MCP Gateway 测试。"""
 
-
-import pytest
-import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
 
 from fusion_multi_node.mcp_gateway.mcp_gateway import (
     MCPClusterGateway,
@@ -85,8 +85,10 @@ class TestMCPClusterGateway:
 
     def test_set_node_selector(self):
         gw = MCPClusterGateway()
+
         def selector(tool):
             return "n1"
+
         gw.set_node_selector(selector)
         assert gw._node_selector is selector
 
@@ -150,8 +152,11 @@ class TestMCPClusterGateway:
         gw = MCPClusterGateway()
         tool = MCPTool(name="t1", description="test", parameters={})
         request = MCPRequest(
-            request_id="r1", tool_name="t1", arguments={},
-            source="claude_code", assigned_node="localhost",
+            request_id="r1",
+            tool_name="t1",
+            arguments={},
+            source="claude_code",
+            assigned_node="localhost",
         )
 
         mock_resp = MagicMock()
@@ -171,8 +176,11 @@ class TestMCPClusterGateway:
         gw = MCPClusterGateway()
         tool = MCPTool(name="t1", description="test", parameters={})
         request = MCPRequest(
-            request_id="r1", tool_name="t1", arguments={},
-            source="claude_code", assigned_node="remote_node_5",
+            request_id="r1",
+            tool_name="t1",
+            arguments={},
+            source="claude_code",
+            assigned_node="remote_node_5",
         )
 
         mock_resp = MagicMock()
@@ -192,8 +200,11 @@ class TestMCPClusterGateway:
         gw = MCPClusterGateway()
         tool = MCPTool(name="t1", description="test", parameters={}, timeout=1.0)
         request = MCPRequest(
-            request_id="r1", tool_name="t1", arguments={},
-            source="claude_code", assigned_node="localhost",
+            request_id="r1",
+            tool_name="t1",
+            arguments={},
+            source="claude_code",
+            assigned_node="localhost",
         )
         try:
             await gw._forward_to_node(request, tool)

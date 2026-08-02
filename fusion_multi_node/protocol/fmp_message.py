@@ -20,11 +20,11 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-FMP_MAGIC = b"\x46\x4D\x50\x01"
+FMP_MAGIC = b"\x46\x4d\x50\x01"
 FMP_HEADER_SIZE = 12
 MAX_HOP_COUNT = 3
 MAX_ROUNDS = 10
@@ -64,6 +64,7 @@ class ControlType(Enum):
 @dataclass
 class FMPLinkLayer:
     """链路层 — 路由与跳数控制。"""
+
     source_id: str
     target_id: str
     hop_count: int = 0
@@ -79,7 +80,7 @@ class FMPLinkLayer:
         self.hop_count += 1
         self.trace.append(next_node)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "source_id": self.source_id,
             "target_id": self.target_id,
@@ -89,7 +90,7 @@ class FMPLinkLayer:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPLinkLayer:
+    def from_dict(cls, d: dict[str, Any]) -> FMPLinkLayer:
         return cls(
             source_id=d["source_id"],
             target_id=d["target_id"],
@@ -102,6 +103,7 @@ class FMPLinkLayer:
 @dataclass
 class FMPBusinessLayer:
     """业务层 — payload 类型与序列化数据。"""
+
     payload_type: PayloadType
     payload: bytes
     round_id: str = ""
@@ -127,7 +129,7 @@ class FMPBusinessLayer:
             **kwargs,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "payload_type": self.payload_type.value,
             "payload": self.payload.decode("utf-8", errors="replace"),
@@ -137,7 +139,7 @@ class FMPBusinessLayer:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPBusinessLayer:
+    def from_dict(cls, d: dict[str, Any]) -> FMPBusinessLayer:
         return cls(
             payload_type=PayloadType(d["payload_type"]),
             payload=d["payload"].encode("utf-8") if isinstance(d["payload"], str) else d["payload"],
@@ -150,13 +152,14 @@ class FMPBusinessLayer:
 @dataclass
 class FMPControlLayer:
     """控制层 — 心跳、ACK、流控。"""
+
     control_type: ControlType
     sequence: int = 0
     timestamp: float = 0.0
     ack_seq: int = 0
     flow_window: int = 64
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "control_type": self.control_type.value,
             "sequence": self.sequence,
@@ -166,7 +169,7 @@ class FMPControlLayer:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPControlLayer:
+    def from_dict(cls, d: dict[str, Any]) -> FMPControlLayer:
         return cls(
             control_type=ControlType(d["control_type"]),
             sequence=d.get("sequence", 0),
@@ -179,6 +182,7 @@ class FMPControlLayer:
 @dataclass
 class FMPMessage:
     """FMP 完整消息 — 三层封装。"""
+
     message_id: str
     link: FMPLinkLayer
     business: FMPBusinessLayer
@@ -197,10 +201,7 @@ class FMPMessage:
     ) -> FMPMessage:
         msg_id = f"fmp_{uuid.uuid4().hex[:12]}"
         link = FMPLinkLayer(source_id=source_id, target_id=target_id)
-        if isinstance(payload, bytes):
-            raw = payload
-        else:
-            raw = json.dumps(payload).encode("utf-8")
+        raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         business = FMPBusinessLayer(
             payload_type=payload_type,
             payload=raw,
@@ -213,7 +214,7 @@ class FMPMessage:
         )
         return cls(message_id=msg_id, link=link, business=business, control=control)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "message_id": self.message_id,
             "link": self.link.to_dict(),
@@ -223,7 +224,7 @@ class FMPMessage:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPMessage:
+    def from_dict(cls, d: dict[str, Any]) -> FMPMessage:
         return cls(
             message_id=d["message_id"],
             link=FMPLinkLayer.from_dict(d["link"]),
@@ -243,6 +244,7 @@ class FMPMessage:
         if use_msgpack:
             try:
                 import msgpack
+
                 payload_bytes = msgpack.packb(payload_dict, use_bin_type=True)
                 flags |= 0x02
             except ImportError:
@@ -277,9 +279,7 @@ class FMPMessage:
 
         expected_total = FMP_HEADER_SIZE + payload_len
         if len(data) < expected_total:
-            raise ValueError(
-                f"数据不足: 声明 {payload_len} 字节, 实际 {len(data) - FMP_HEADER_SIZE} 字节"
-            )
+            raise ValueError(f"数据不足: 声明 {payload_len} 字节, 实际 {len(data) - FMP_HEADER_SIZE} 字节")
         if len(data) > expected_total:
             logger.warning(f"帧含尾部数据: {len(data) - expected_total} 字节将被忽略")
 
@@ -289,6 +289,7 @@ class FMPMessage:
         if is_msgpack:
             try:
                 import msgpack
+
                 d = msgpack.unpackb(payload_bytes, raw=False)
             except ImportError:
                 raise ValueError("收到 msgpack 帧，但 msgpack 未安装")
@@ -307,7 +308,7 @@ class KVCacheSyncMessage:
     size_mb: float
     protocol: str = "fmp"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "cache_id": self.cache_id,
             "model_name": self.model_name,
@@ -317,7 +318,7 @@ class KVCacheSyncMessage:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> KVCacheSyncMessage:
+    def from_dict(cls, d: dict[str, Any]) -> KVCacheSyncMessage:
         return cls(
             cache_id=d["cache_id"],
             model_name=d["model_name"],
@@ -330,7 +331,7 @@ class KVCacheSyncMessage:
 class FMPCrypto:
     """AES-GCM 加密器。"""
 
-    def __init__(self, key: Optional[bytes] = None):
+    def __init__(self, key: bytes | None = None):
         if key and len(key) != 32:
             raise ValueError("AES-256-GCM 需要 32 字节密钥")
         self._key = key
@@ -338,6 +339,7 @@ class FMPCrypto:
         if key:
             try:
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
                 self._aesgcm = AESGCM(key)
             except ImportError:
                 pass
@@ -346,14 +348,14 @@ class FMPCrypto:
     def generate_key(cls) -> bytes:
         return os.urandom(32)
 
-    def encrypt(self, plaintext: bytes, aad: Optional[bytes] = None) -> bytes:
+    def encrypt(self, plaintext: bytes, aad: bytes | None = None) -> bytes:
         if not self._aesgcm:
             raise RuntimeError("FMPCrypto: 加密密钥未设置，拒绝明文传输")
         nonce = os.urandom(12)
         ciphertext = self._aesgcm.encrypt(nonce, plaintext, aad)
         return nonce + ciphertext
 
-    def decrypt(self, data: bytes, aad: Optional[bytes] = None) -> bytes:
+    def decrypt(self, data: bytes, aad: bytes | None = None) -> bytes:
         if not self._aesgcm:
             raise RuntimeError("FMPCrypto: 解密密钥未设置，拒绝明文处理")
         nonce = data[:12]
@@ -362,7 +364,7 @@ class FMPCrypto:
 
     def encrypt_message(self, msg: FMPMessage) -> FMPMessage:
         raw_payload = msg.business.payload
-        aad = f"{msg.link.source_id}:{msg.link.target_id}".encode("utf-8")
+        aad = f"{msg.link.source_id}:{msg.link.target_id}".encode()
         encrypted_payload = self.encrypt(raw_payload, aad=aad)
         encrypted_business = FMPBusinessLayer(
             payload_type=msg.business.payload_type,
@@ -383,7 +385,7 @@ class FMPCrypto:
         if not msg.encrypted:
             return msg
         encrypted_payload = msg.business.payload
-        aad = f"{msg.link.source_id}:{msg.link.target_id}".encode("utf-8")
+        aad = f"{msg.link.source_id}:{msg.link.target_id}".encode()
         decrypted_payload = self.decrypt(encrypted_payload, aad=aad)
         msg.business.payload = decrypted_payload
         msg.encrypted = False

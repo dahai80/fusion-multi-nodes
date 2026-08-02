@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, Dict, List, Set
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def _collect_nodes(tree: Dict[str, Any], prefix: str = "") -> Dict[str, Dict[str, Any]]:
-    nodes: Dict[str, Dict[str, Any]] = {}
+def _collect_nodes(tree: dict[str, Any], prefix: str = "") -> dict[str, dict[str, Any]]:
+    nodes: dict[str, dict[str, Any]] = {}
     node_id = tree.get("id", "")
     path = f"{prefix}/{node_id}" if prefix else node_id
 
@@ -34,29 +34,29 @@ def _collect_nodes(tree: Dict[str, Any], prefix: str = "") -> Dict[str, Dict[str
     return nodes
 
 
-def compute_ast_diff(old_ast: Dict[str, Any], new_ast: Dict[str, Any]) -> Dict[str, Any]:
+def compute_ast_diff(old_ast: dict[str, Any], new_ast: dict[str, Any]) -> dict[str, Any]:
     old_nodes = _collect_nodes(old_ast)
     new_nodes = _collect_nodes(new_ast)
 
-    old_paths: Set[str] = set(old_nodes.keys())
-    new_paths: Set[str] = set(new_nodes.keys())
+    old_paths: set[str] = set(old_nodes.keys())
+    new_paths: set[str] = set(new_nodes.keys())
 
     added_paths = new_paths - old_paths
     removed_paths = old_paths - new_paths
     common_paths = old_paths & new_paths
 
-    added_nodes: List[Dict[str, Any]] = []
+    added_nodes: list[dict[str, Any]] = []
     for p in sorted(added_paths):
         added_nodes.append({"path": p, **new_nodes[p]})
 
-    removed_nodes: List[str] = sorted(removed_paths)
+    removed_nodes: list[str] = sorted(removed_paths)
 
-    modified_nodes: List[Dict[str, Any]] = []
+    modified_nodes: list[dict[str, Any]] = []
     for p in sorted(common_paths):
         old_n = old_nodes[p]
         new_n = new_nodes[p]
         if old_n != new_n:
-            diff_entry: Dict[str, Any] = {"path": p}
+            diff_entry: dict[str, Any] = {"path": p}
             for key in new_n:
                 if old_n.get(key) != new_n.get(key):
                     diff_entry[key] = new_n[key]
@@ -73,14 +73,11 @@ def compute_ast_diff(old_ast: Dict[str, Any], new_ast: Dict[str, Any]) -> Dict[s
         },
     }
 
-    logger.info(
-        f"AST diff: +{len(added_nodes)} -{len(removed_nodes)} "
-        f"~{len(modified_nodes)} changed"
-    )
+    logger.info(f"AST diff: +{len(added_nodes)} -{len(removed_nodes)} ~{len(modified_nodes)} changed")
     return diff
 
 
-def apply_ast_diff(base_ast: Dict[str, Any], diff: Dict[str, Any]) -> Dict[str, Any]:
+def apply_ast_diff(base_ast: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base_ast)
 
     removed_paths = set(diff.get("removed_nodes", []))
@@ -95,14 +92,11 @@ def apply_ast_diff(base_ast: Dict[str, Any], diff: Dict[str, Any]) -> Dict[str, 
         _insert_node(result, path, added)
 
     stats = diff.get("stats", {})
-    logger.info(
-        f"AST diff applied: +{stats.get('added', 0)} "
-        f"-{stats.get('removed', 0)} ~{stats.get('modified', 0)}"
-    )
+    logger.info(f"AST diff applied: +{stats.get('added', 0)} -{stats.get('removed', 0)} ~{stats.get('modified', 0)}")
     return result
 
 
-def _find_node(tree: Dict[str, Any], path: str) -> Dict[str, Any] | None:
+def _find_node(tree: dict[str, Any], path: str) -> dict[str, Any] | None:
     parts = path.strip("/").split("/")
     if not parts or parts[0] == "":
         return tree
@@ -132,7 +126,7 @@ def _find_node(tree: Dict[str, Any], path: str) -> Dict[str, Any] | None:
     return None
 
 
-def _remove_nodes(tree: Dict[str, Any], paths: Set[str]) -> None:
+def _remove_nodes(tree: dict[str, Any], paths: set[str]) -> None:
     for path in paths:
         parts = path.strip("/").split("/")
         if len(parts) < 1:
@@ -151,13 +145,10 @@ def _remove_nodes(tree: Dict[str, Any], paths: Set[str]) -> None:
                 break
 
         last_id = parts[-1]
-        current["children"] = [
-            c for c in current.get("children", [])
-            if c.get("id") != last_id
-        ]
+        current["children"] = [c for c in current.get("children", []) if c.get("id") != last_id]
 
 
-def _update_node(tree: Dict[str, Any], path: str, updates: Dict[str, Any]) -> None:
+def _update_node(tree: dict[str, Any], path: str, updates: dict[str, Any]) -> None:
     node = _find_node(tree, path)
     if node is None:
         logger.warning(f"AST diff: 未找到节点 {path}, 跳过更新")
@@ -168,7 +159,7 @@ def _update_node(tree: Dict[str, Any], path: str, updates: Dict[str, Any]) -> No
         node[key] = value
 
 
-def _insert_node(tree: Dict[str, Any], path: str, node_data: Dict[str, Any]) -> None:
+def _insert_node(tree: dict[str, Any], path: str, node_data: dict[str, Any]) -> None:
     parts = path.strip("/").split("/")
     if len(parts) <= 1:
         logger.warning(f"AST diff: 无法插入根级节点 {path}")
@@ -180,7 +171,7 @@ def _insert_node(tree: Dict[str, Any], path: str, node_data: Dict[str, Any]) -> 
         logger.warning(f"AST diff: 父节点 {parent_path} 不存在, 跳过插入 {path}")
         return
 
-    new_node: Dict[str, Any] = {
+    new_node: dict[str, Any] = {
         "id": node_data.get("id", parts[-1]),
         "type": node_data.get("type", ""),
         "children": [],

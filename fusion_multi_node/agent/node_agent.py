@@ -21,7 +21,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -38,11 +38,11 @@ class InferenceBackend:
     async def chat(
         self,
         model: str,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     async def embed(
@@ -50,7 +50,7 @@ class InferenceBackend:
         model: str,
         input_text: str,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     async def health(self) -> bool:
@@ -63,7 +63,7 @@ class FusionMLXBackend(InferenceBackend):
     def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 120.0):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -73,11 +73,11 @@ class FusionMLXBackend(InferenceBackend):
     async def chat(
         self,
         model: str,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         temperature: float = 0.7,
         max_tokens: int = 4096,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         payload = {
             "model": model,
             "messages": messages,
@@ -95,7 +95,7 @@ class FusionMLXBackend(InferenceBackend):
         model: str,
         input_text: str,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         payload = {"model": model, "input": input_text, **kwargs}
         client = await self._get_client()
         resp = await client.post(f"{self._base_url}/v1/embeddings", json=payload)
@@ -118,6 +118,7 @@ class FusionMLXBackend(InferenceBackend):
 @dataclass
 class AgentConfig:
     """节点代理配置。"""
+
     node_id: str = ""
     master_host: str = "localhost"
     master_port: int = 11452
@@ -136,23 +137,23 @@ class NodeAgent:
 
     def __init__(
         self,
-        config: Optional[AgentConfig] = None,
-        backend: Optional[InferenceBackend] = None,
+        config: AgentConfig | None = None,
+        backend: InferenceBackend | None = None,
     ):
         self.config = config or AgentConfig()
         self.config.node_id = self.config.node_id or f"node_{uuid.uuid4().hex[:8]}"
         self._running = False
-        self._current_task: Optional[Dict[str, Any]] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._hardware_task: Optional[asyncio.Task] = None
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._current_task: dict[str, Any] | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._hardware_task: asyncio.Task | None = None
+        self._http_client: httpx.AsyncClient | None = None
         self._backend = backend or FusionMLXBackend(
             base_url=f"http://localhost:{self.config.fusion_mlx_port}",
         )
 
     # ── 硬件信息收集 ──
 
-    def collect_hardware_info(self) -> Dict[str, Any]:
+    def collect_hardware_info(self) -> dict[str, Any]:
         """收集本机硬件信息。"""
         import psutil
 
@@ -192,6 +193,7 @@ class NodeAgent:
         """获取本机局域网 IP。"""
         try:
             import netifaces
+
             for iface in netifaces.interfaces():
                 addrs = netifaces.ifaddresses(iface)
                 if netifaces.AF_INET in addrs:
@@ -205,7 +207,9 @@ class NodeAgent:
         try:
             result = subprocess.run(
                 ["ipconfig", "getifaddr", "en0"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -227,7 +231,9 @@ class NodeAgent:
         try:
             result = subprocess.run(
                 ["system_profiler", "SPDisplaysDataType"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             gpu_cores = 0
             device_model = ""
@@ -246,6 +252,7 @@ class NodeAgent:
         """检查本地服务是否运行。"""
         try:
             import socket
+
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1)
             result = s.connect_ex(("127.0.0.1", port))
@@ -312,7 +319,7 @@ class NodeAgent:
 
     # ── 任务执行 ──
 
-    async def execute_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行 Master 下发的任务。
 
         任务格式：
@@ -354,7 +361,7 @@ class NodeAgent:
 
         return result
 
-    async def _execute_inference(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_inference(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行推理任务（通过 InferenceBackend）。"""
         model = task.get("model", "")
         prompt = task.get("params", {}).get("prompt", "")
@@ -377,7 +384,7 @@ class NodeAgent:
             "node_id": self.config.node_id,
         }
 
-    async def _execute_embedding(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_embedding(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行 Embedding 任务（通过 InferenceBackend）。"""
         text = task.get("params", {}).get("text", "")
         model = task.get("model", "BGE-M3")
@@ -391,7 +398,7 @@ class NodeAgent:
             "node_id": self.config.node_id,
         }
 
-    async def _execute_plugin(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_plugin(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行插件任务（转发给本机 fusion-desk）。"""
         plugin = task.get("plugin", "")
         action = task.get("action", "")
@@ -443,6 +450,7 @@ class NodeAgent:
 
         if with_server:
             from fusion_multi_node.server import AgentServer
+
             server = AgentServer(agent=self)
             await server.start(host="127.0.0.1", port=self.config.agent_port)
 
@@ -474,14 +482,17 @@ class NodeAgent:
         while self._running:
             await asyncio.sleep(self.config.report_interval)
             info = self.collect_hardware_info()
-            logger.debug(f"硬件状态: {info['available_memory_gb']:.1f}GB 可用, "
-                        f"CPU {info['cpu_percent']}%, "
-                        f"MLX: {info['fusion_mlx_running']}")
+            logger.debug(
+                f"硬件状态: {info['available_memory_gb']:.1f}GB 可用, "
+                f"CPU {info['cpu_percent']}%, "
+                f"MLX: {info['fusion_mlx_running']}"
+            )
 
     async def _discover_master(self) -> bool:
         """通过 mDNS 自动发现 Master 节点。"""
         try:
             from fusion_multi_node.discovery import MDNSDiscovery
+
             mdns = MDNSDiscovery(node_id=self.config.node_id)
             logger.info("mDNS 搜索 Master 节点...")
             master_info = await mdns.find_master_async(timeout=8.0)

@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from fusion_multi_node.utils import setup_logger, get_data_dir, get_log_dir
+from fusion_multi_node.utils import get_data_dir, get_log_dir, setup_logger
 
 
 class TestSetupLogger:

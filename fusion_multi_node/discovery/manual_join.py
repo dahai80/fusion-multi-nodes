@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class JoinRequest:
     """手动加入请求。"""
+
     node_id: str
     hostname: str
     ip_address: str
     port: int
     cluster_secret: str = ""
-    capabilities: List[str] = None  # will default in __post_init__
+    capabilities: list[str] = None  # will default in __post_init__
 
     def __post_init__(self):
         if self.capabilities is None:
@@ -34,6 +35,7 @@ class JoinRequest:
 @dataclass
 class JoinResponse:
     """手动加入响应。"""
+
     success: bool
     master_host: str = ""
     master_port: int = 0
@@ -54,7 +56,7 @@ class ManualJoinClient:
         self.node_id = node_id
         self._cluster_secret = cluster_secret
         self._timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -68,10 +70,11 @@ class ManualJoinClient:
         hostname: str = "",
         ip_address: str = "",
         agent_port: int = 11445,
-        capabilities: Optional[List[str]] = None,
+        capabilities: list[str] | None = None,
     ) -> JoinResponse:
         """通过 IP 直连方式加入集群。"""
         import platform
+
         hostname = hostname or platform.node()
         ip_address = ip_address or self._get_local_ip()
 
@@ -87,14 +90,17 @@ class ManualJoinClient:
         try:
             client = await self._get_client()
             url = f"http://{master_host}:{master_port}/api/join"
-            resp = await client.post(url, json={
-                "node_id": req.node_id,
-                "hostname": req.hostname,
-                "ip_address": req.ip_address,
-                "port": req.port,
-                "cluster_secret": req.cluster_secret,
-                "capabilities": req.capabilities,
-            })
+            resp = await client.post(
+                url,
+                json={
+                    "node_id": req.node_id,
+                    "hostname": req.hostname,
+                    "ip_address": req.ip_address,
+                    "port": req.port,
+                    "cluster_secret": req.cluster_secret,
+                    "capabilities": req.capabilities,
+                },
+            )
             data = resp.json()
 
             if resp.status_code == 200 and data.get("status") == "ok":
@@ -132,6 +138,7 @@ class ManualJoinClient:
 
     def _get_local_ip(self) -> str:
         import socket
+
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -155,10 +162,10 @@ class ManualJoinManager:
     def __init__(self, cluster_secret: str = "", auto_approve: bool = True):
         self._cluster_secret = cluster_secret
         self._auto_approve = auto_approve
-        self._join_history: List[Dict[str, Any]] = []
+        self._join_history: list[dict[str, Any]] = []
         self._max_history = 500
 
-    def handle_join_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    def handle_join_request(self, request_data: dict[str, Any]) -> dict[str, Any]:
         """处理手动加入请求。
 
         返回:
@@ -177,18 +184,20 @@ class ManualJoinManager:
                 return {"status": "error", "detail": "集群密钥验证失败"}
 
         # 记录加入历史
-        self._join_history.append({
-            "node_id": node_id,
-            "hostname": request_data.get("hostname", ""),
-            "ip_address": request_data.get("ip_address", ""),
-            "port": request_data.get("port", 0),
-            "joined_at": time.time(),
-            "auto_approved": self._auto_approve,
-        })
+        self._join_history.append(
+            {
+                "node_id": node_id,
+                "hostname": request_data.get("hostname", ""),
+                "ip_address": request_data.get("ip_address", ""),
+                "port": request_data.get("port", 0),
+                "joined_at": time.time(),
+                "auto_approved": self._auto_approve,
+            }
+        )
 
         # 清理历史
         if len(self._join_history) > self._max_history:
-            self._join_history = self._join_history[-self._max_history:]
+            self._join_history = self._join_history[-self._max_history :]
 
         logger.info(f"手动加入成功: {node_id} ({request_data.get('ip_address', '')}:{request_data.get('port', 0)})")
 
@@ -203,7 +212,7 @@ class ManualJoinManager:
 
         return result
 
-    def get_join_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_join_history(self, limit: int = 50) -> list[dict[str, Any]]:
         return self._join_history[-limit:]
 
     @property

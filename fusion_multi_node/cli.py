@@ -6,24 +6,23 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional
 
 import click
 
-from . import __version__, __app_name__
-from .config import ClusterConfig
-from .master import ClusterMaster, NodeStatus, ParallelMode, ClusterTask, TaskStatus
+from . import __app_name__, __version__
 from .agent import NodeAgent
+from .config import ClusterConfig
 from .distributed_mlx import CavemanManager, KVSharingManager
+from .master import ClusterMaster, ClusterTask, NodeStatus, ParallelMode, TaskStatus
 from .observability import ClusterObservability
-from .utils import setup_logger, NetworkTopologyDetector
+from .utils import NetworkTopologyDetector, setup_logger
 
 logger = logging.getLogger(__name__)
 
 _config = ClusterConfig()
-_master: Optional[ClusterMaster] = None
-_agent: Optional[NodeAgent] = None
-_observability: Optional[ClusterObservability] = None
+_master: ClusterMaster | None = None
+_agent: NodeAgent | None = None
+_observability: ClusterObservability | None = None
 
 
 @click.group()
@@ -37,10 +36,10 @@ def cli(verbose: bool):
 
 # ── 节点管理 ──
 
+
 @cli.group()
 def node():
     """节点管理：发现、注册、状态查看。"""
-    pass
 
 
 @node.command("list")
@@ -71,8 +70,10 @@ async def _async_list_nodes(online_only: bool):
         }.get(n.status, "⚪")
         mem_str = f"{n.available_memory_gb:.1f}/{n.total_memory_gb:.1f}"
         load_str = f"{n.active_tasks}/{n.max_tasks}"
-        click.echo(f"{n.node_id:<20} {n.hostname:<20} {n.ip_address:<16} "
-                  f"{status_icon} {n.status.value:<8} {mem_str:<12} {load_str:<8}")
+        click.echo(
+            f"{n.node_id:<20} {n.hostname:<20} {n.ip_address:<16} "
+            f"{status_icon} {n.status.value:<8} {mem_str:<12} {load_str:<8}"
+        )
 
     click.echo()
     click.echo(f"总计: {len(nodes)} 节点")
@@ -110,20 +111,49 @@ def node_info(node_id: str):
 @click.option("--port", default=0, help="监听端口 (0=默认)")
 @click.option("--master-host", default="localhost", help="Master 地址 (agent)")
 @click.option("--master-port", default=11452, help="Master 端口 (agent)")
-@click.option("--transport", type=click.Choice(["http", "fmp"]), default="http",
-              help="通信协议: http 或 fmp")
+@click.option(
+    "--transport",
+    type=click.Choice(["http", "fmp"]),
+    default="http",
+    help="通信协议: http 或 fmp",
+)
 @click.option("--no-mdns", is_flag=True, help="禁用 mDNS 发现")
 @click.option("--auto-discover", is_flag=True, help="Agent 自动发现 Master")
-def node_start(role: str, host: str, port: int, master_host: str, master_port: int,
-               transport: str, no_mdns: bool, auto_discover: bool):
+def node_start(
+    role: str,
+    host: str,
+    port: int,
+    master_host: str,
+    master_port: int,
+    transport: str,
+    no_mdns: bool,
+    auto_discover: bool,
+):
     """启动节点服务。"""
-    asyncio.run(_async_node_start(role, host, port, master_host, master_port,
-                                   transport, no_mdns, auto_discover))
+    asyncio.run(
+        _async_node_start(
+            role,
+            host,
+            port,
+            master_host,
+            master_port,
+            transport,
+            no_mdns,
+            auto_discover,
+        )
+    )
 
 
-async def _async_node_start(role: str, host: str, port: int, master_host: str,
-                            master_port: int, transport: str, no_mdns: bool,
-                            auto_discover: bool):
+async def _async_node_start(
+    role: str,
+    host: str,
+    port: int,
+    master_host: str,
+    master_port: int,
+    transport: str,
+    no_mdns: bool,
+    auto_discover: bool,
+):
     global _master, _agent
 
     click.echo(f"🚀 启动 {role} 节点 (transport={transport})")
@@ -136,14 +166,18 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
 
         if transport == "fmp":
             from .protocol import FMPServer
+
             fmp_server = FMPServer()
             await fmp_server.start(host=host, port=11446)
             _master._fmp_server = fmp_server
             click.echo(f"  FMP 服务已启动: {host}:11446")
 
-        click.echo(f"✅ Master 已启动: {host}:{actual_port} (mDNS={'ON' if with_mdns else 'OFF'}, transport={transport})")
+        click.echo(
+            f"✅ Master 已启动: {host}:{actual_port} (mDNS={'ON' if with_mdns else 'OFF'}, transport={transport})"
+        )
     else:
         from .agent import AgentConfig
+
         actual_port = port or 11445
         config = AgentConfig(
             master_host=master_host,
@@ -155,6 +189,7 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
 
         if transport == "fmp":
             from .protocol import FMPConnectionManager
+
             fmp_conn = FMPConnectionManager()
             await fmp_conn.connect(master_host, 11446)
             _agent._fmp_conn = fmp_conn
@@ -207,10 +242,10 @@ async def _async_node_discover(timeout: float):
 
 # ── 集群管理 ──
 
+
 @cli.group()
 def cluster():
     """集群管理：启动、停止、状态。"""
-    pass
 
 
 @cluster.command("start")
@@ -233,6 +268,7 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
 
         if transport == "fmp":
             from .protocol import FMPServer
+
             fmp_server = FMPServer()
             await fmp_server.start(host=_master.host, port=11446)
             _master._fmp_server = fmp_server
@@ -246,9 +282,7 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         click.echo(f"✅ Node Agent 已启动: {_agent.config.node_id}")
 
     if mode in ("master", "both"):
-        _observability = ClusterObservability(
-            retention_hours=_config.get("observability.retention_hours", 168.0)
-        )
+        _observability = ClusterObservability(retention_hours=_config.get("observability.retention_hours", 168.0))
         await _observability.start()
         click.echo("✅ 可观测模块已启动")
 
@@ -297,10 +331,10 @@ async def _async_cluster_status():
 
 # ── 任务管理 ──
 
+
 @cli.group()
 def task():
     """任务管理：提交、查看、取消。"""
-    pass
 
 
 @task.command("submit")
@@ -362,8 +396,9 @@ def task_list():
             TaskStatus.MIGRATED: "➡️",
             TaskStatus.TIMEOUT: "⏰",
         }.get(t.status, "⚪")
-        click.echo(f"{t.task_id[:14]:<16} {t.name:<20} {t.mode.value:<10} "
-                  f"{status_icon} {t.status.value:<10} {duration:<10}")
+        click.echo(
+            f"{t.task_id[:14]:<16} {t.name:<20} {t.mode.value:<10} {status_icon} {t.status.value:<10} {duration:<10}"
+        )
 
     click.echo()
     click.echo(f"总计: {len(tasks)} 任务")
@@ -388,10 +423,10 @@ async def _async_task_cancel(task_id: str):
 
 # ── 配置管理 ──
 
+
 @cli.group()
 def config():
     """配置管理。"""
-    pass
 
 
 @config.command("list")
@@ -440,10 +475,10 @@ def _get_master() -> ClusterMaster:
 
 # ── 网络拓扑命令 ──
 
+
 @cli.group()
 def network():
     """网络拓扑检测与链路优化。"""
-    pass
 
 
 @network.command("detect")
@@ -469,8 +504,10 @@ async def _async_network_detect():
 
     for name, link in sorted(interfaces.items(), key=lambda x: x[1].priority):
         rdma = "✅" if link.is_rdma else "❌"
-        click.echo(f"{name:<12} {link.type.value:<20} {link.bandwidth_mbps:.0f}Mbps{'':<4} "
-                  f"{link.latency_ms:<10.2f}ms {rdma:<8}")
+        click.echo(
+            f"{name:<12} {link.type.value:<20} {link.bandwidth_mbps:.0f}Mbps{'':<4} "
+            f"{link.latency_ms:<10.2f}ms {rdma:<8}"
+        )
 
     click.echo()
     best = detector.get_best_link()
@@ -483,10 +520,10 @@ async def _async_network_detect():
 
 # ── Caveman 压缩命令 ──
 
+
 @cli.group()
 def caveman():
     """Caveman Token 压缩管理。"""
-    pass
 
 
 @caveman.command("test")
@@ -505,23 +542,25 @@ async def _async_caveman_test(data: str):
     manager = CavemanManager()
 
     for method in ["zlib", "diff", "dict"]:
-        compressed, used_method, stats = await manager.compress_tensor(raw_bytes, link_type="ethernet_1g")
-        click.echo(f"  {method:<10} 原始: {stats.original_bytes:>8} bytes → "
-                  f"压缩: {stats.compressed_bytes:>8} bytes "
-                  f"({stats.ratio*100:.1f}%) 耗时: {stats.time_ms:.1f}ms")
+        _compressed, _used_method, stats = await manager.compress_tensor(raw_bytes, link_type="ethernet_1g")
+        click.echo(
+            f"  {method:<10} 原始: {stats.original_bytes:>8} bytes → "
+            f"压缩: {stats.compressed_bytes:>8} bytes "
+            f"({stats.ratio * 100:.1f}%) 耗时: {stats.time_ms:.1f}ms"
+        )
 
     click.echo()
     overall = manager.get_stats()
-    click.echo(f"  总体压缩率: {overall['overall_ratio']*100:.1f}%")
+    click.echo(f"  总体压缩率: {overall['overall_ratio'] * 100:.1f}%")
     click.echo(f"  节省带宽:   {overall['savings_percent']:.1f}%")
 
 
 # ── KV 缓存命令 ──
 
+
 @cli.group()
 def kv():
     """KV 缓存共享管理。"""
-    pass
 
 
 @kv.command("stats")

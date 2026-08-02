@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ class TaskPriority(Enum):
 @dataclass
 class TaskSpec:
     """任务规格 — 定义"做什么"，与运行时状态无关。"""
+
     name: str
     model_name: str = ""
     mode: str = "data"
@@ -28,11 +29,11 @@ class TaskSpec:
     required_capability: str = ""
     preferred_node_id: str = ""
     priority: TaskPriority = TaskPriority.NORMAL
-    model_shards: List[Dict[str, Any]] = field(default_factory=list)
-    input_data: Optional[Dict[str, Any]] = None
-    parameters: Dict[str, Any] = field(default_factory=dict)
+    model_shards: list[dict[str, Any]] = field(default_factory=list)
+    input_data: dict[str, Any] | None = None
+    parameters: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "model_name": self.model_name,
@@ -48,7 +49,7 @@ class TaskSpec:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> TaskSpec:
+    def from_dict(cls, data: dict[str, Any]) -> TaskSpec:
         priority_val = data.get("priority", 1)
         if isinstance(priority_val, int):
             priority = TaskPriority(priority_val)

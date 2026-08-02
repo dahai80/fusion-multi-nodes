@@ -1,6 +1,6 @@
 [project]
 name = "fusion-multi-node"
-version = "0.6.1"
+version = "0.6.2"
 description = "Multi-node cluster for Apple Silicon — node discovery, FMP routing, load balancing, distributed MLX inference"
 requires-python = ">=3.11"
 dependencies = [
@@ -31,6 +31,28 @@ all = [
 
 [project.scripts]
 fusion-multi-node = "fusion_multi_node.cli:main"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "SIM", "C4"]
+ignore = [
+    "BLE001",
+    "E741",
+    "S110",
+    "SIM102",
+    "SIM105",
+    "SIM117",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/fmp_proto_pb2.py" = ["E501"]
+"**/fmp_protobuf.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fusion_multi_node"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

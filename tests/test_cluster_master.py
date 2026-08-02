@@ -50,18 +50,30 @@ class TestNodeInfo:
 
     def test_score_high_resources(self):
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            total_memory_gb=64.0, available_memory_gb=50.0,
-            active_tasks=0, max_tasks=4, network_rtt_ms=5.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            total_memory_gb=64.0,
+            available_memory_gb=50.0,
+            active_tasks=0,
+            max_tasks=4,
+            network_rtt_ms=5.0,
         )
         score = info.score
         assert 0 < score <= 1
 
     def test_score_low_resources(self):
         info = NodeInfo(
-            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
-            total_memory_gb=64.0, available_memory_gb=5.0,
-            active_tasks=4, max_tasks=4, network_rtt_ms=50.0,
+            node_id="n2",
+            hostname="mac2",
+            ip_address="10.0.0.2",
+            port=11445,
+            total_memory_gb=64.0,
+            available_memory_gb=5.0,
+            active_tasks=4,
+            max_tasks=4,
+            network_rtt_ms=50.0,
         )
         score = info.score
         assert 0 <= score <= 1
@@ -76,8 +88,11 @@ class TestClusterTask:
 
     def test_with_model(self):
         task = ClusterTask(
-            task_id="t1", name="inference", mode=ParallelMode.DATA,
-            model_name="llama", assigned_nodes=["n1", "n2"],
+            task_id="t1",
+            name="inference",
+            mode=ParallelMode.DATA,
+            model_name="llama",
+            assigned_nodes=["n1", "n2"],
         )
         assert task.mode == ParallelMode.DATA
         assert len(task.assigned_nodes) == 2
@@ -86,8 +101,11 @@ class TestClusterTask:
 class TestKVCacheEntry:
     def test_basic(self):
         entry = KVCacheEntry(
-            cache_id="c1", model_name="test", node_id="n1",
-            created_at=time.time(), size_mb=100.0,
+            cache_id="c1",
+            model_name="test",
+            node_id="n1",
+            created_at=time.time(),
+            size_mb=100.0,
         )
         assert entry.cache_id == "c1"
         assert entry.access_count == 0
@@ -135,8 +153,12 @@ class TestClusterMaster:
     async def test_get_online_nodes(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, last_heartbeat=time.time(),
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
         )
         await master.register_node(info)
         nodes = await master.get_online_nodes()
@@ -146,8 +168,13 @@ class TestClusterMaster:
     async def test_assign_task(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -167,8 +194,13 @@ class TestClusterMaster:
     async def test_complete_task(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -181,8 +213,13 @@ class TestClusterMaster:
     async def test_complete_task_with_error_sets_failed(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -196,13 +233,23 @@ class TestClusterMaster:
     async def test_migrate_task(self):
         master = ClusterMaster()
         info1 = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         info2 = NodeInfo(
-            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=60.0, total_memory_gb=64.0,
+            node_id="n2",
+            hostname="mac2",
+            ip_address="10.0.0.2",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=60.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info1)
@@ -223,8 +270,12 @@ class TestClusterMaster:
     async def test_check_heartbeat(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, last_heartbeat=time.time(),
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
         )
         await master.register_node(info)
         ok = await master.check_heartbeat("n1")
@@ -250,14 +301,22 @@ class TestClusterMaster:
     async def test_check_timeouts(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info)
         task = ClusterTask(
-            task_id="t1", name="infer", mode=ParallelMode.PIPELINE,
-            model_name="test", timeout_seconds=0.01,
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
+            model_name="test",
+            timeout_seconds=0.01,
         )
         await master.assign_task(task)
         master.tasks["t1"].status = TaskStatus.RUNNING
@@ -270,13 +329,23 @@ class TestClusterMaster:
     async def test_select_nodes(self):
         master = ClusterMaster()
         info1 = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         info2 = NodeInfo(
-            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=60.0, total_memory_gb=64.0,
+            node_id="n2",
+            hostname="mac2",
+            ip_address="10.0.0.2",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=60.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info1)
@@ -288,8 +357,13 @@ class TestClusterMaster:
     async def test_select_nodes_insufficient(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=5.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=5.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -300,8 +374,11 @@ class TestClusterMaster:
     async def test_register_kv_cache(self):
         master = ClusterMaster()
         entry = KVCacheEntry(
-            cache_id="c1", model_name="test", node_id="n1",
-            created_at=time.time(), size_mb=100.0,
+            cache_id="c1",
+            model_name="test",
+            node_id="n1",
+            created_at=time.time(),
+            size_mb=100.0,
         )
         await master.register_kv_cache(entry)
         assert "c1" in master.kv_cache
@@ -310,13 +387,20 @@ class TestClusterMaster:
     async def test_find_kv_cache(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, last_heartbeat=time.time(),
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
         )
         await master.register_node(info)
         entry = KVCacheEntry(
-            cache_id="c1", model_name="test", node_id="n1",
-            created_at=time.time(), size_mb=100.0,
+            cache_id="c1",
+            model_name="test",
+            node_id="n1",
+            created_at=time.time(),
+            size_mb=100.0,
         )
         await master.register_kv_cache(entry)
         found = await master.find_kv_cache("test")
@@ -336,8 +420,11 @@ class TestClusterMaster:
         await master.register_node(info)
         master.nodes["n1"].status = NodeStatus.OFFLINE
         entry = KVCacheEntry(
-            cache_id="c1", model_name="test", node_id="n1",
-            created_at=time.time(), size_mb=100.0,
+            cache_id="c1",
+            model_name="test",
+            node_id="n1",
+            created_at=time.time(),
+            size_mb=100.0,
         )
         await master.register_kv_cache(entry)
         found = await master.find_kv_cache("test")
@@ -348,13 +435,21 @@ class TestClusterMaster:
     async def test_find_kv_cache_expired(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, last_heartbeat=time.time(),
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
         )
         await master.register_node(info)
         entry = KVCacheEntry(
-            cache_id="c1", model_name="test", node_id="n1",
-            created_at=time.time() - 5000, size_mb=100.0, ttl_seconds=1.0,
+            cache_id="c1",
+            model_name="test",
+            node_id="n1",
+            created_at=time.time() - 5000,
+            size_mb=100.0,
+            ttl_seconds=1.0,
         )
         await master.register_kv_cache(entry)
         found = await master.find_kv_cache("test")
@@ -390,8 +485,13 @@ class TestClusterMaster:
     async def test_complete_task_decrements_active(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
-            status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -421,25 +521,45 @@ class TestClusterMaster:
 
     def test_estimate_memory_70b(self):
         master = ClusterMaster()
-        task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="llama-70b")
+        task = ClusterTask(
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
+            model_name="llama-70b",
+        )
         mem = master._estimate_memory(task)
         assert mem > 30.0
 
     def test_estimate_memory_13b(self):
         master = ClusterMaster()
-        task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="llama-13b")
+        task = ClusterTask(
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
+            model_name="llama-13b",
+        )
         mem = master._estimate_memory(task)
         assert mem > 10.0
 
     def test_estimate_memory_8b(self):
         master = ClusterMaster()
-        task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="llama-8b")
+        task = ClusterTask(
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
+            model_name="llama-8b",
+        )
         mem = master._estimate_memory(task)
         assert mem > 6.0
 
     def test_estimate_memory_3b(self):
         master = ClusterMaster()
-        task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE, model_name="llama-3b")
+        task = ClusterTask(
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
+            model_name="llama-3b",
+        )
         mem = master._estimate_memory(task)
         assert mem > 4.0
 

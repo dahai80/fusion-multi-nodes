@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -15,14 +15,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CheckpointEntry:
     """检查点条目。"""
+
     checkpoint_id: str
     task_id: str
     node_id: str
     step: int
-    state_data: Dict[str, Any] = field(default_factory=dict)
+    state_data: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0.0
     size_bytes: int = 0
-    metadata: Dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 class CheckpointManager:
@@ -33,11 +34,16 @@ class CheckpointManager:
     - 支持按 task_id 查询最新检查点
     """
 
-    def __init__(self, checkpoint_dir: str = "", max_checkpoints: int = 100, ttl_seconds: float = 86400.0):
+    def __init__(
+        self,
+        checkpoint_dir: str = "",
+        max_checkpoints: int = 100,
+        ttl_seconds: float = 86400.0,
+    ):
         self._dir = checkpoint_dir or str(Path.home() / ".fusion" / "checkpoints")
         self._max_checkpoints = max_checkpoints
         self._ttl = ttl_seconds
-        self._entries: Dict[str, CheckpointEntry] = {}
+        self._entries: dict[str, CheckpointEntry] = {}
 
     def save(self, entry: CheckpointEntry) -> bool:
         entry.created_at = entry.created_at or time.time()
@@ -65,7 +71,7 @@ class CheckpointManager:
             logger.error(f"检查点保存失败: {entry.checkpoint_id}: {e}")
             return False
 
-    def load(self, checkpoint_id: str) -> Optional[CheckpointEntry]:
+    def load(self, checkpoint_id: str) -> CheckpointEntry | None:
         entry = self._entries.get(checkpoint_id)
         if entry:
             return entry
@@ -78,7 +84,7 @@ class CheckpointManager:
                 return self._load_from_file(cp_file)
         return None
 
-    def load_latest(self, task_id: str) -> Optional[CheckpointEntry]:
+    def load_latest(self, task_id: str) -> CheckpointEntry | None:
         task_dir = Path(self._dir) / task_id
         if not task_dir.exists():
             # 从内存查
@@ -109,12 +115,12 @@ class CheckpointManager:
                 logger.error(f"检查点删除失败: {checkpoint_id}: {e}")
         return False
 
-    def list_by_task(self, task_id: str) -> List[CheckpointEntry]:
+    def list_by_task(self, task_id: str) -> list[CheckpointEntry]:
         results = [e for e in self._entries.values() if e.task_id == task_id]
         results.sort(key=lambda e: e.step)
         return results
 
-    def _load_from_file(self, path: Path) -> Optional[CheckpointEntry]:
+    def _load_from_file(self, path: Path) -> CheckpointEntry | None:
         try:
             data = json.loads(path.read_text())
             entry = CheckpointEntry(
@@ -141,10 +147,10 @@ class CheckpointManager:
             self.delete(entry.checkpoint_id)
         logger.info(f"清理过期检查点: {remove_count} 个")
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         total_size = sum(e.size_bytes for e in self._entries.values())
         return {
             "total_checkpoints": len(self._entries),
             "total_size_mb": round(total_size / (1024 * 1024), 2),
-            "unique_tasks": len(set(e.task_id for e in self._entries.values())),
+            "unique_tasks": len({e.task_id for e in self._entries.values()}),
         }

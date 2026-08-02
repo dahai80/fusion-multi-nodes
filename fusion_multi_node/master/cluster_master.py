@@ -15,17 +15,26 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from fusion_multi_node.master.load_metrics import LoadMetrics, LoadRouter, RoutingStrategy
+from fusion_multi_node.master.cloud_fallback import (
+    CloudConfig,
+    CloudFallbackClient,
+    CloudProvider,
+)
+from fusion_multi_node.master.election import ElectionCandidate, MasterElection
+from fusion_multi_node.master.load_metrics import (
+    LoadMetrics,
+    LoadRouter,
+    RoutingStrategy,
+)
 from fusion_multi_node.master.task_spec import TaskSpec
-from fusion_multi_node.master.election import MasterElection, ElectionCandidate
-from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig, CloudProvider
 
 logger = logging.getLogger(__name__)
 
 
 # ── 数据模型 ──
+
 
 class NodeStatus(Enum):
     ONLINE = "online"
@@ -52,6 +61,7 @@ class TaskStatus(Enum):
 @dataclass
 class NodeInfo:
     """集群节点信息。"""
+
     node_id: str
     hostname: str
     ip_address: str
@@ -67,7 +77,7 @@ class NodeInfo:
     role: str = "worker"
     status: NodeStatus = NodeStatus.OFFLINE
     last_heartbeat: float = 0.0
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     active_tasks: int = 0
     max_tasks: int = 4
     network_rtt_ms: float = 0.0
@@ -84,12 +94,13 @@ class NodeInfo:
 @dataclass
 class ClusterTask:
     """集群任务 — spec 定义 + 运行时状态。"""
+
     task_id: str
     name: str
     mode: ParallelMode
     model_name: str = ""
-    model_shards: List[Dict[str, Any]] = field(default_factory=list)
-    assigned_nodes: List[str] = field(default_factory=list)
+    model_shards: list[dict[str, Any]] = field(default_factory=list)
+    assigned_nodes: list[str] = field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
     created_at: float = 0.0
     started_at: float = 0.0
@@ -105,10 +116,10 @@ class ClusterTask:
     degradation_count: int = 0
     max_degradations: int = 2
     # M5-04 任务全生命周期取消
-    sub_tasks: List[str] = field(default_factory=list)
+    sub_tasks: list[str] = field(default_factory=list)
     cancel_reason: str = ""
     # M3-05 TaskSpec 引用
-    spec: Optional[TaskSpec] = None
+    spec: TaskSpec | None = None
 
     @classmethod
     def from_spec(cls, task_id: str, spec: TaskSpec) -> ClusterTask:
@@ -131,6 +142,7 @@ class ClusterTask:
 @dataclass
 class KVCacheEntry:
     """全局 KV 缓存条目。"""
+
     cache_id: str
     model_name: str
     node_id: str
@@ -141,6 +153,7 @@ class KVCacheEntry:
 
 
 # ── Cluster Master ──
+
 
 class ClusterMaster:
     """集群主调度节点 — 全局唯一。
@@ -161,28 +174,28 @@ class ClusterMaster:
         self.heartbeat_timeout = heartbeat_timeout
 
         # 集群状态
-        self.nodes: Dict[str, NodeInfo] = {}
-        self.tasks: Dict[str, ClusterTask] = {}
-        self.kv_cache: Dict[str, KVCacheEntry] = {}
+        self.nodes: dict[str, NodeInfo] = {}
+        self.tasks: dict[str, ClusterTask] = {}
+        self.kv_cache: dict[str, KVCacheEntry] = {}
 
         # M4-01 负载感知路由
         self.load_router = LoadRouter(strategy=RoutingStrategy.BALANCED)
 
         # 内部状态
         self._running = False
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server: asyncio.AbstractServer | None = None
         self._lock = asyncio.Lock()
-        self._health_task: Optional[asyncio.Task] = None
-        self._retry_task: Optional[asyncio.Task] = None
-        self._pending_retry: List[ClusterTask] = []
+        self._health_task: asyncio.Task | None = None
+        self._retry_task: asyncio.Task | None = None
+        self._pending_retry: list[ClusterTask] = []
         self._max_retry_attempts = 1
         self._max_completed_tasks = 1000
         self._max_kv_cache = 500
         # M3-03 选举
-        self._election: Optional[MasterElection] = None
+        self._election: MasterElection | None = None
         self._is_leader = True
         # M4-05 云端回退
-        self._cloud_client: Optional[CloudFallbackClient] = None
+        self._cloud_client: CloudFallbackClient | None = None
 
     # ── 节点管理 ──
 
@@ -203,7 +216,7 @@ class ClusterMaster:
             self.load_router.remove_node(node_id)
             logger.info(f"节点离线: {node_id}")
 
-    async def get_online_nodes(self) -> List[NodeInfo]:
+    async def get_online_nodes(self) -> list[NodeInfo]:
         now = time.time()
         online = []
         async with self._lock:
@@ -276,7 +289,7 @@ class ClusterMaster:
         count: int = 1,
         required_capability: str = "",
         preferred_node_id: str = "",
-    ) -> List[NodeInfo]:
+    ) -> list[NodeInfo]:
         """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。"""
         candidates = await self.get_online_nodes()
 
@@ -498,7 +511,11 @@ class ClusterMaster:
         """将任务降级到更小的模型并重新分配。"""
         async with self._lock:
             task = self.tasks.get(task_id)
-            if not task or task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING, TaskStatus.FAILED):
+            if not task or task.status not in (
+                TaskStatus.RUNNING,
+                TaskStatus.PENDING,
+                TaskStatus.FAILED,
+            ):
                 return False
 
             if task.degradation_count >= task.max_degradations:
@@ -540,7 +557,7 @@ class ClusterMaster:
                 return size_key
         return ""
 
-    async def check_timeouts(self) -> List[str]:
+    async def check_timeouts(self) -> list[str]:
         """检查并处理超时任务，自动入重试队列。"""
         now = time.time()
         timed_out = []
@@ -590,10 +607,7 @@ class ClusterMaster:
         if not task.model_name:
             return False
         name_lower = task.model_name.lower()
-        for size in self._VRAM_FIRST_MODEL_SIZES:
-            if size in name_lower:
-                return True
-        return False
+        return any(size in name_lower for size in self._VRAM_FIRST_MODEL_SIZES)
 
     def _estimate_memory(self, task: ClusterTask) -> float:
         """估算任务所需内存。"""
@@ -618,7 +632,7 @@ class ClusterMaster:
                 del self.kv_cache[oldest[0]]
             logger.info(f"KV 缓存注册: {entry.model_name} @ {entry.node_id} ({entry.size_mb:.1f}MB)")
 
-    async def find_kv_cache(self, model_name: str) -> Optional[KVCacheEntry]:
+    async def find_kv_cache(self, model_name: str) -> KVCacheEntry | None:
         """查找可复用的 KV 缓存。"""
         now = time.time()
         async with self._lock:
@@ -643,8 +657,10 @@ class ClusterMaster:
             size_mb=size_mb,
             protocol="fmp",
         )
-        logger.info(f"M9-04 FMP KV 缓存同步: cache_id={cache_id} model={model_name} "
-                    f"source={source_node_id} size={size_mb:.1f}MB protocol={sync_msg.protocol}")
+        logger.info(
+            f"M9-04 FMP KV 缓存同步: cache_id={cache_id} model={model_name} "
+            f"source={source_node_id} size={size_mb:.1f}MB protocol={sync_msg.protocol}"
+        )
 
         async with self._lock:
             entry = self.kv_cache.get(cache_id)
@@ -660,7 +676,7 @@ class ClusterMaster:
         self,
         node_id: str,
         priority: int = 0,
-        known_nodes: Optional[List[Dict[str, Any]]] = None,
+        known_nodes: list[dict[str, Any]] | None = None,
     ) -> None:
         self._election = MasterElection(
             node_id=node_id,
@@ -671,16 +687,18 @@ class ClusterMaster:
         )
         if known_nodes:
             for node in known_nodes:
-                self._election.add_known_node(ElectionCandidate(
-                    node_id=node.get("node_id", ""),
-                    priority=node.get("priority", 0),
-                    hostname=node.get("hostname", ""),
-                    ip_address=node.get("ip_address", ""),
-                    port=node.get("port", 0),
-                    term=0,
-                    voted_for="",
-                    last_heartbeat=time.time(),
-                ))
+                self._election.add_known_node(
+                    ElectionCandidate(
+                        node_id=node.get("node_id", ""),
+                        priority=node.get("priority", 0),
+                        hostname=node.get("hostname", ""),
+                        ip_address=node.get("ip_address", ""),
+                        port=node.get("port", 0),
+                        term=0,
+                        voted_for="",
+                        last_heartbeat=time.time(),
+                    )
+                )
         self._election.on_elected = self._on_elected_leader
         self._election.on_demoted = self._on_demoted_from_leader
         logger.info(f"M3-03 Master 选举已配置: node_id={node_id} priority={priority}")
@@ -717,7 +735,7 @@ class ClusterMaster:
         self._cloud_client = CloudFallbackClient(config)
         logger.info(f"M4-05 云端回退已配置: provider={provider} model={model}")
 
-    async def fallback_to_cloud(self, task: ClusterTask, prompt: str) -> Optional[str]:
+    async def fallback_to_cloud(self, task: ClusterTask, prompt: str) -> str | None:
         if not self._cloud_client:
             logger.warning("云端回退未配置")
             return None
@@ -748,6 +766,7 @@ class ClusterMaster:
 
         if with_server:
             from fusion_multi_node.server import MasterServer
+
             server = MasterServer(master=self)
             await server.start(host=self.host, port=self.port)
 
@@ -766,8 +785,10 @@ class ClusterMaster:
 
     def _start_mdns(self) -> None:
         try:
-            from fusion_multi_node.discovery import MDNSDiscovery
             import subprocess
+
+            from fusion_multi_node.discovery import MDNSDiscovery
+
             device_model = ""
             uma_size_gb = "0.0"
             try:
@@ -777,7 +798,7 @@ class ClusterMaster:
                 pass
             try:
                 out = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
-                uma_size_gb = str(int(out) / (1024 ** 3))
+                uma_size_gb = str(int(out) / (1024**3))
             except Exception:
                 pass
             self._mdns = MDNSDiscovery(node_id="fusion-master")
@@ -853,11 +874,18 @@ class ClusterMaster:
         """清理已完成的旧任务，防止 tasks 无限增长。"""
         async with self._lock:
             terminal = [
-                tid for tid, t in self.tasks.items()
-                if t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMEOUT, TaskStatus.MIGRATED)
+                tid
+                for tid, t in self.tasks.items()
+                if t.status
+                in (
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                    TaskStatus.TIMEOUT,
+                    TaskStatus.MIGRATED,
+                )
             ]
             if len(terminal) > self._max_completed_tasks:
-                remove = terminal[:len(terminal) - self._max_completed_tasks]
+                remove = terminal[: len(terminal) - self._max_completed_tasks]
                 for tid in remove:
                     del self.tasks[tid]
                 logger.debug(f"清理旧任务: {len(remove)} 个")
@@ -867,8 +895,7 @@ class ClusterMaster:
         now = time.time()
         async with self._lock:
             stale = [
-                nid for nid, n in self.nodes.items()
-                if n.status == NodeStatus.OFFLINE and now - n.last_heartbeat > 3600
+                nid for nid, n in self.nodes.items() if n.status == NodeStatus.OFFLINE and now - n.last_heartbeat > 3600
             ]
             for nid in stale:
                 del self.nodes[nid]
@@ -877,7 +904,7 @@ class ClusterMaster:
 
     # ── 统计信息 ──
 
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self) -> dict[str, Any]:
         """获取集群统计信息。"""
         online_nodes = await self.get_online_nodes()
         async with self._lock:
@@ -887,7 +914,9 @@ class ClusterMaster:
                 "total_tasks": len(self.tasks),
                 "active_tasks": sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING),
                 "completed_tasks": sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED),
-                "failed_tasks": sum(1 for t in self.tasks.values() if t.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT)),
+                "failed_tasks": sum(
+                    1 for t in self.tasks.values() if t.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT)
+                ),
                 "kv_cache_entries": len(self.kv_cache),
                 "total_memory_gb": sum(n.total_memory_gb for n in online_nodes),
                 "available_memory_gb": sum(n.available_memory_gb for n in online_nodes),
@@ -897,6 +926,7 @@ class ClusterMaster:
 
 
 # ── HA Standby ──
+
 
 class StandbyMaster:
     """HA 备用主节点 — 监听主节点心跳，故障时接管。
@@ -928,8 +958,8 @@ class StandbyMaster:
         self.state = self.HAState.STANDBY
         self._last_master_heartbeat: float = 0.0
         self._running = False
-        self._monitor_task: Optional[asyncio.Task] = None
-        self._promoted_master: Optional[ClusterMaster] = None
+        self._monitor_task: asyncio.Task | None = None
+        self._promoted_master: ClusterMaster | None = None
         self._lock = asyncio.Lock()
         logger.info(f"StandbyMaster 初始化: 监听 {master_host}:{master_port}")
 
@@ -967,9 +997,7 @@ class StandbyMaster:
                     continue
                 elapsed = now - self._last_master_heartbeat
                 if self.state == self.HAState.LEARNING and elapsed > self.heartbeat_timeout:
-                    logger.warning(
-                        f"主节点心跳超时 ({elapsed:.1f}s > {self.heartbeat_timeout}s)，准备接管"
-                    )
+                    logger.warning(f"主节点心跳超时 ({elapsed:.1f}s > {self.heartbeat_timeout}s)，准备接管")
                     self.state = self.HAState.TAKING_OVER
                     await asyncio.sleep(self.take_over_delay)
                     if self._last_master_heartbeat < now - self.heartbeat_timeout:

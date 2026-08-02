@@ -4,12 +4,18 @@ import time
 
 import pytest
 
-from fusion_multi_node.protocol.fmp_message import (
-    FMPMessage, FMPLinkLayer, FMPBusinessLayer, FMPControlLayer,
-    FMPCrypto, PayloadType, ControlType,
-    FMP_MAGIC, MAX_HOP_COUNT,
-)
 from fusion_multi_node.protocol.circuit_breaker import CircuitBreaker, CircuitState
+from fusion_multi_node.protocol.fmp_message import (
+    FMP_MAGIC,
+    MAX_HOP_COUNT,
+    ControlType,
+    FMPBusinessLayer,
+    FMPControlLayer,
+    FMPCrypto,
+    FMPLinkLayer,
+    FMPMessage,
+    PayloadType,
+)
 
 
 class TestFMPLinkLayer:
@@ -45,7 +51,8 @@ class TestFMPLinkLayer:
 class TestFMPBusinessLayer:
     def test_json_payload(self):
         biz = FMPBusinessLayer.from_json_payload(
-            PayloadType.HEARTBEAT, {"status": "ok"},
+            PayloadType.HEARTBEAT,
+            {"status": "ok"},
         )
         data = biz.payload_as_json()
         assert data["status"] == "ok"
@@ -66,8 +73,10 @@ class TestFMPBusinessLayer:
 
     def test_serialization(self):
         biz = FMPBusinessLayer.from_json_payload(
-            PayloadType.TASK_ASSIGN, {"task_id": "t1"},
-            round_id="r1", round_number=2,
+            PayloadType.TASK_ASSIGN,
+            {"task_id": "t1"},
+            round_id="r1",
+            round_number=2,
         )
         d = biz.to_dict()
         biz2 = FMPBusinessLayer.from_dict(d)
@@ -92,7 +101,8 @@ class TestFMPControlLayer:
 class TestFMPMessage:
     def test_create(self):
         msg = FMPMessage.create(
-            source_id="master", target_id="node1",
+            source_id="master",
+            target_id="node1",
             payload_type=PayloadType.HEARTBEAT,
             payload={"ts": 12345},
         )
@@ -103,7 +113,8 @@ class TestFMPMessage:
 
     def test_serialize_deserialize(self):
         msg = FMPMessage.create(
-            source_id="m1", target_id="n1",
+            source_id="m1",
+            target_id="n1",
             payload_type=PayloadType.TASK_RESULT,
             payload={"result": "done"},
         )
@@ -117,7 +128,8 @@ class TestFMPMessage:
 
     def test_round_trip_with_forward(self):
         msg = FMPMessage.create(
-            source_id="m1", target_id="n3",
+            source_id="m1",
+            target_id="n3",
             payload_type=PayloadType.CHAT_COMPLETION,
             payload={"prompt": "hello"},
         )
@@ -148,7 +160,8 @@ class TestFMPCrypto:
         key = FMPCrypto.generate_key()
         crypto = FMPCrypto(key=key)
         msg = FMPMessage.create(
-            source_id="m1", target_id="n1",
+            source_id="m1",
+            target_id="n1",
             payload_type=PayloadType.HEARTBEAT,
             payload={"status": "ok"},
         )

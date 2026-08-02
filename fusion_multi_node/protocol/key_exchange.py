@@ -11,9 +11,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional, Set, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +22,14 @@ class ECDHKeyExchange:
     """ECDH 密钥交换 — 协商 AES-256 会话密钥。"""
 
     def __init__(self):
-        self._private_key: Optional[bytes] = None
-        self._public_key: Optional[bytes] = None
+        self._private_key: bytes | None = None
+        self._public_key: bytes | None = None
 
     def generate_keypair(self) -> bytes:
         try:
-            from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+            from cryptography.hazmat.primitives.asymmetric.x25519 import (
+                X25519PrivateKey,
+            )
         except ImportError:
             raise RuntimeError("ECDH 需要 cryptography 库")
         self._private_key = X25519PrivateKey.generate()
@@ -38,8 +40,8 @@ class ECDHKeyExchange:
         if not self._private_key:
             raise RuntimeError("请先调用 generate_keypair()")
         try:
-            from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
             from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
             from cryptography.hazmat.primitives.kdf.hkdf import HKDF
         except ImportError:
             raise RuntimeError("ECDH 需要 cryptography 库")
@@ -56,44 +58,46 @@ class ECDHKeyExchange:
         return session_key
 
     @property
-    def public_key(self) -> Optional[bytes]:
+    def public_key(self) -> bytes | None:
         return self._public_key
 
 
 class TLSCertManager:
     """TLS 自签名证书管理 — 生成节点间通信证书 + 指纹 pinning 信任。"""
 
-    def __init__(self, cert_dir: Optional[str] = None):
+    def __init__(self, cert_dir: str | None = None):
         self._cert_dir = Path(cert_dir) if cert_dir else Path.home() / ".fusion" / "multi-node" / "tls"
         self._cert_path = self._cert_dir / "node.crt"
         self._key_path = self._cert_dir / "node.key"
-        self._ssl_context: Optional[Any] = None
-        self._client_ssl_context: Optional[Any] = None
-        self._pinned_fingerprints: Set[str] = set()
-        self._cert_fingerprint: Optional[str] = None
+        self._ssl_context: Any | None = None
+        self._client_ssl_context: Any | None = None
+        self._pinned_fingerprints: set[str] = set()
+        self._cert_fingerprint: str | None = None
 
-    def ensure_certificates(self) -> Tuple[str, str]:
+    def ensure_certificates(self) -> tuple[str, str]:
         if self._cert_path.exists() and self._key_path.exists():
             return str(self._cert_path), str(self._key_path)
         return self._generate_self_signed()
 
-    def _generate_self_signed(self) -> Tuple[str, str]:
+    def _generate_self_signed(self) -> tuple[str, str]:
         try:
             from cryptography import x509
-            from cryptography.x509.oid import NameOID
             from cryptography.hazmat.primitives import hashes, serialization
             from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.x509.oid import NameOID
         except ImportError:
             raise RuntimeError("TLS 证书生成需要 cryptography 库")
 
         self._cert_dir.mkdir(parents=True, exist_ok=True)
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, "fusion-multi-node"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "FusionCluster"),
-        ])
-        now = datetime.now(timezone.utc)
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COMMON_NAME, "fusion-multi-node"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "FusionCluster"),
+            ]
+        )
+        now = datetime.now(UTC)
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -103,10 +107,12 @@ class TLSCertManager:
             .not_valid_before(now)
             .not_valid_after(now + timedelta(days=365))
             .add_extension(
-                x509.SubjectAlternativeName([
-                    x509.DNSName("localhost"),
-                    x509.IPAddress(self._get_local_ip()),
-                ]),
+                x509.SubjectAlternativeName(
+                    [
+                        x509.DNSName("localhost"),
+                        x509.IPAddress(self._get_local_ip()),
+                    ]
+                ),
                 critical=False,
             )
             .sign(key, hashes.SHA256())
@@ -115,9 +121,7 @@ class TLSCertManager:
         key_pem = key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.BestAvailableEncryption(
-                os.urandom(32)
-            ),
+            serialization.BestAvailableEncryption(os.urandom(32)),
         )
         cert_pem = cert.public_bytes(serialization.Encoding.PEM)
 
@@ -141,6 +145,7 @@ class TLSCertManager:
         try:
             from cryptography import x509
             from cryptography.hazmat.primitives import hashes
+
             cert_der = Path(cert_path).read_bytes()
             cert = x509.load_pem_x509_certificate(cert_der)
             fingerprint = cert.fingerprint(hashes.SHA256()).hex()
@@ -164,6 +169,7 @@ class TLSCertManager:
         try:
             from cryptography import x509
             from cryptography.hazmat.primitives import hashes
+
             cert = x509.load_der_x509_certificate(cert_der)
             fp = cert.fingerprint(hashes.SHA256()).hex()
             if fp in self._pinned_fingerprints:
@@ -176,8 +182,9 @@ class TLSCertManager:
 
     @staticmethod
     def _get_local_ip():
-        import socket
         import ipaddress
+        import socket
+
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -192,6 +199,7 @@ class TLSCertManager:
             return self._ssl_context
         cert_path, key_path = self.ensure_certificates()
         import ssl
+
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert_path, key_path)
         ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
@@ -204,6 +212,7 @@ class TLSCertManager:
             return self._client_ssl_context
         cert_path, key_path = self.ensure_certificates()
         import ssl
+
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.load_cert_chain(cert_path, key_path)
         if self._pinned_fingerprints:
@@ -220,6 +229,7 @@ class TLSCertManager:
                     return True
                 logger.warning(f"TLS 对端证书不在 pinned 列表: {fp[:16]}...")
                 return False
+
             ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
             ctx.verify_flags = ssl.VERIFY_X509_PARTIAL_CHAIN
             ctx.load_verify_locations(cert_path)

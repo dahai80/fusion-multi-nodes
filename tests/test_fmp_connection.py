@@ -8,10 +8,10 @@ import pytest
 
 from fusion_multi_node.protocol.circuit_breaker import CircuitState
 from fusion_multi_node.protocol.fmp_connection import (
+    DEFAULT_RECONNECT_INTERVAL,
     ConnectionInfo,
     FMPConnection,
     FMPConnectionManager,
-    DEFAULT_RECONNECT_INTERVAL,
 )
 from fusion_multi_node.protocol.fmp_message import (
     FMPCrypto,
@@ -50,7 +50,7 @@ def fmp_echo_handler(received_list=None):
                         pass
             except asyncio.IncompleteReadError:
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except Exception:
                 break
@@ -58,6 +58,7 @@ def fmp_echo_handler(received_list=None):
             writer.close()
         except Exception:
             pass
+
     return handler
 
 
@@ -73,7 +74,7 @@ def fmp_send_and_hold_handler(messages_to_send, hold_timeout=5.0):
                     data = await asyncio.wait_for(reader.read(4096), timeout=hold_timeout)
                     if not data:
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 except Exception:
                     break
@@ -84,6 +85,7 @@ def fmp_send_and_hold_handler(messages_to_send, hold_timeout=5.0):
                 writer.close()
             except Exception:
                 pass
+
     return handler
 
 
@@ -96,15 +98,21 @@ class TestConnectionInfo:
 
     def test_uptime_when_alive(self):
         info = ConnectionInfo(
-            node_id="n1", host="10.0.1.5", port=11452,
-            is_alive=True, connected_at=time.time(),
+            node_id="n1",
+            host="10.0.1.5",
+            port=11452,
+            is_alive=True,
+            connected_at=time.time(),
         )
         assert info.uptime > 0
 
     def test_uptime_zero_when_not_alive(self):
         info = ConnectionInfo(
-            node_id="n1", host="10.0.1.5", port=11452,
-            is_alive=False, connected_at=time.time(),
+            node_id="n1",
+            host="10.0.1.5",
+            port=11452,
+            is_alive=False,
+            connected_at=time.time(),
         )
         assert info.uptime == 0.0
 
@@ -166,7 +174,8 @@ class TestFMPConnection:
             assert ok
 
             msg = FMPMessage.create(
-                source_id="s1", target_id="t1",
+                source_id="s1",
+                target_id="t1",
                 payload_type=PayloadType.HEARTBEAT,
                 payload={"status": "ok"},
             )
@@ -218,11 +227,15 @@ class TestFMPConnection:
         conn._running = False
         conn.info.is_alive = True
 
-        fake_writer = type("FakeWriter", (), {
-            "is_closing": lambda self: False,
-            "write": lambda self, data: None,
-            "drain": lambda self: (_ for _ in ()).throw(ConnectionError("broken")),
-        })()
+        fake_writer = type(
+            "FakeWriter",
+            (),
+            {
+                "is_closing": lambda self: False,
+                "write": lambda self, data: None,
+                "drain": lambda self: (_ for _ in ()).throw(ConnectionError("broken")),
+            },
+        )()
         conn._writer = fake_writer
 
         msg = FMPMessage.create("s1", "t1", PayloadType.HEARTBEAT, {"ok": True})
@@ -260,20 +273,24 @@ class TestFMPConnection:
             client_messages.append(msg)
 
         msg_to_send = FMPMessage.create(
-            source_id="srv", target_id="cli",
+            source_id="srv",
+            target_id="cli",
             payload_type=PayloadType.HEARTBEAT,
             payload={"ping": "pong"},
         )
 
         server = await asyncio.start_server(
             fmp_send_and_hold_handler([msg_to_send], hold_timeout=5.0),
-            "127.0.0.1", 0,
+            "127.0.0.1",
+            0,
         )
         port = server.sockets[0].getsockname()[1]
 
         try:
             conn = FMPConnection(
-                node_id="cli", host="127.0.0.1", port=port,
+                node_id="cli",
+                host="127.0.0.1",
+                port=port,
                 on_message=on_msg,
             )
             ok = await conn.connect()
@@ -320,7 +337,6 @@ class TestFMPConnection:
             conn = FMPConnection(node_id="n1", host="127.0.0.1", port=port)
             ok = await conn.connect()
             assert ok
-
 
             async def bad_wait_closed():
                 raise OSError("broken pipe")
@@ -395,7 +411,7 @@ class TestFMPConnection:
                         data = await asyncio.wait_for(reader.read(4096), timeout=5.0)
                         if not data:
                             break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except Exception:
                         break
@@ -448,7 +464,7 @@ class TestFMPConnection:
                         data = await asyncio.wait_for(reader.read(4096), timeout=5.0)
                         if not data:
                             break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except Exception:
                         break
@@ -500,7 +516,7 @@ class TestFMPConnection:
                         data = await asyncio.wait_for(reader.read(4096), timeout=5.0)
                         if not data:
                             break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except Exception:
                         break
@@ -542,7 +558,9 @@ class TestFMPConnection:
 
         try:
             conn = FMPConnection(
-                node_id="n1", host="127.0.0.1", port=port,
+                node_id="n1",
+                host="127.0.0.1",
+                port=port,
                 crypto=crypto,
             )
             ok = await conn.connect()

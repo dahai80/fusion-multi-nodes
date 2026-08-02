@@ -10,7 +10,8 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Pattern, Tuple
+from re import Pattern
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ScrubRule:
     """脱敏规则。"""
+
     name: str
     pattern: str
     replacement: str = "***"
@@ -28,7 +30,7 @@ class ScrubRule:
         return re.compile(self.pattern)
 
 
-DEFAULT_RULES: List[ScrubRule] = [
+DEFAULT_RULES: list[ScrubRule] = [
     ScrubRule(
         name="phone_cn",
         pattern=r"1[3-9]\d{9}",
@@ -77,19 +79,19 @@ DEFAULT_RULES: List[ScrubRule] = [
 class DataScrubber:
     """数据脱敏器 — 在传输前自动擦除敏感信息。"""
 
-    def __init__(self, rules: Optional[List[ScrubRule]] = None, custom_rules: Optional[List[ScrubRule]] = None):
-        self._rules: List[ScrubRule] = list(rules or DEFAULT_RULES)
+    def __init__(
+        self,
+        rules: list[ScrubRule] | None = None,
+        custom_rules: list[ScrubRule] | None = None,
+    ):
+        self._rules: list[ScrubRule] = list(rules or DEFAULT_RULES)
         if custom_rules:
             self._rules.extend(custom_rules)
-        self._compiled: List[Tuple[ScrubRule, Pattern]] = []
+        self._compiled: list[tuple[ScrubRule, Pattern]] = []
         self._recompile()
 
     def _recompile(self) -> None:
-        self._compiled = [
-            (rule, rule.compile())
-            for rule in self._rules
-            if rule.enabled
-        ]
+        self._compiled = [(rule, rule.compile()) for rule in self._rules if rule.enabled]
         logger.info(f"脱敏规则编译完成: {len(self._compiled)} 条生效")
 
     def add_rule(self, rule: ScrubRule) -> None:
@@ -103,9 +105,9 @@ class DataScrubber:
         self._recompile()
         logger.info(f"移除脱敏规则: {name}")
 
-    def scrub_text(self, text: str) -> Tuple[str, List[str]]:
+    def scrub_text(self, text: str) -> tuple[str, list[str]]:
         """脱敏纯文本，返回 (脱敏后文本, 命中规则列表)。"""
-        hits: List[str] = []
+        hits: list[str] = []
         result = text
         for rule, pattern in self._compiled:
             if pattern.search(result):
@@ -115,12 +117,12 @@ class DataScrubber:
             logger.debug(f"脱敏命中: {hits}")
         return result, hits
 
-    def scrub_dict(self, data: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    def scrub_dict(self, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         """深度遍历字典并脱敏所有字符串值。"""
-        all_hits: List[str] = []
+        all_hits: list[str] = []
         return self._scrub_dict_recursive(data, all_hits), all_hits
 
-    def _scrub_dict_recursive(self, data: Any, hits: List[str]) -> Any:
+    def _scrub_dict_recursive(self, data: Any, hits: list[str]) -> Any:
         if isinstance(data, str):
             scrubbed, rule_hits = self.scrub_text(data)
             hits.extend(rule_hits)
@@ -131,20 +133,20 @@ class DataScrubber:
             return [self._scrub_dict_recursive(item, hits) for item in data]
         return data
 
-    def scrub_value(self, value: Any) -> Tuple[Any, List[str]]:
+    def scrub_value(self, value: Any) -> tuple[Any, list[str]]:
         """脱敏任意值（自动判断类型）。"""
         if isinstance(value, str):
             return self.scrub_text(value)
         elif isinstance(value, dict):
             return self.scrub_dict(value)
         elif isinstance(value, list):
-            all_hits: List[str] = []
+            all_hits: list[str] = []
             result = [self._scrub_dict_recursive(item, all_hits) for item in value]
             return result, all_hits
         return value, []
 
     @property
-    def active_rules(self) -> List[str]:
+    def active_rules(self) -> list[str]:
         return [rule.name for rule, _ in self._compiled]
 
     @property

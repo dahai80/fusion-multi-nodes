@@ -13,8 +13,9 @@ import logging
 import platform
 import socket
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,11 @@ def _hash_cluster_secret(secret: str) -> str:
 @dataclass
 class DiscoveryInfo:
     """发现的节点信息。"""
+
     name: str
     host: str
     port: int
-    properties: Dict[str, str] = field(default_factory=dict)
+    properties: dict[str, str] = field(default_factory=dict)
     discovered_at: float = 0.0
 
     @property
@@ -43,17 +45,21 @@ class DiscoveryInfo:
 class MDNSDiscovery:
     """mDNS 节点发现管理器。"""
 
-    def __init__(self, node_id: str = "", service_type: str = SERVICE_TYPE,
-                 cluster_secret: str = ""):
+    def __init__(
+        self,
+        node_id: str = "",
+        service_type: str = SERVICE_TYPE,
+        cluster_secret: str = "",
+    ):
         self.node_id = node_id or f"fusion-{platform.node().lower()}"
         self.service_type = service_type
         self._cluster_secret = cluster_secret
-        self._registry: Optional[Any] = None
-        self._browser: Optional[Any] = None
-        self._zeroconf: Optional[Any] = None
-        self._discovered: Dict[str, DiscoveryInfo] = {}
-        self._on_discover: Optional[Callable[[DiscoveryInfo], None]] = None
-        self._on_remove: Optional[Callable[[str], None]] = None
+        self._registry: Any | None = None
+        self._browser: Any | None = None
+        self._zeroconf: Any | None = None
+        self._discovered: dict[str, DiscoveryInfo] = {}
+        self._on_discover: Callable[[DiscoveryInfo], None] | None = None
+        self._on_remove: Callable[[str], None] | None = None
         self._registered = False
 
     # ── 服务注册（Master 用） ──
@@ -61,11 +67,11 @@ class MDNSDiscovery:
     def register(
         self,
         port: int = 11452,
-        properties: Optional[Dict[str, str]] = None,
+        properties: dict[str, str] | None = None,
     ) -> bool:
         """注册 mDNS 服务，使局域网内其他节点可发现。"""
         try:
-            from zeroconf import ServiceInfo, Zeroconf, IPVersion
+            from zeroconf import IPVersion, ServiceInfo, Zeroconf
         except ImportError:
             logger.error("zeroconf 未安装，请运行: pip install zeroconf")
             return False
@@ -120,15 +126,15 @@ class MDNSDiscovery:
     def browse(
         self,
         timeout: float = 5.0,
-        on_discover: Optional[Callable[[DiscoveryInfo], None]] = None,
-        on_remove: Optional[Callable[[str], None]] = None,
-    ) -> List[DiscoveryInfo]:
+        on_discover: Callable[[DiscoveryInfo], None] | None = None,
+        on_remove: Callable[[str], None] | None = None,
+    ) -> list[DiscoveryInfo]:
         """浏览局域网内 mDNS 服务，返回发现的节点列表。
 
         注意: 此方法是同步的，会阻塞调用线程。在 async 环境中请使用 browse_async。
         """
         try:
-            from zeroconf import Zeroconf, ServiceBrowser
+            from zeroconf import ServiceBrowser, Zeroconf
         except ImportError:
             logger.error("zeroconf 未安装，请运行: pip install zeroconf")
             return []
@@ -183,13 +189,14 @@ class MDNSDiscovery:
     async def browse_async(
         self,
         timeout: float = 5.0,
-        on_discover: Optional[Callable[[DiscoveryInfo], None]] = None,
-        on_remove: Optional[Callable[[str], None]] = None,
-    ) -> List[DiscoveryInfo]:
+        on_discover: Callable[[DiscoveryInfo], None] | None = None,
+        on_remove: Callable[[str], None] | None = None,
+    ) -> list[DiscoveryInfo]:
         """异步浏览 mDNS 服务 — 非阻塞版本。"""
         import asyncio
+
         try:
-            from zeroconf import Zeroconf, ServiceBrowser
+            from zeroconf import ServiceBrowser, Zeroconf
         except ImportError:
             logger.error("zeroconf 未安装，请运行: pip install zeroconf")
             return []
@@ -241,11 +248,11 @@ class MDNSDiscovery:
             logger.error(f"mDNS 异步浏览失败: {e}")
             return []
 
-    def get_discovered(self) -> List[DiscoveryInfo]:
+    def get_discovered(self) -> list[DiscoveryInfo]:
         """获取已发现的节点列表。"""
         return list(self._discovered.values())
 
-    def find_master(self, timeout: float = 5.0) -> Optional[DiscoveryInfo]:
+    def find_master(self, timeout: float = 5.0) -> DiscoveryInfo | None:
         """浏览并找到 Master 节点。"""
         nodes = self.browse(timeout)
         for node in nodes:
@@ -264,7 +271,7 @@ class MDNSDiscovery:
             return node
         return None
 
-    async def find_master_async(self, timeout: float = 5.0) -> Optional[DiscoveryInfo]:
+    async def find_master_async(self, timeout: float = 5.0) -> DiscoveryInfo | None:
         """异步查找 Master 节点 — 非阻塞版本。"""
         nodes = await self.browse_async(timeout)
         for node in nodes:
@@ -296,7 +303,7 @@ class MDNSDiscovery:
             return "127.0.0.1"
 
     @staticmethod
-    def get_heartbeat_config(properties: Dict[str, str]) -> Dict[str, int]:
+    def get_heartbeat_config(properties: dict[str, str]) -> dict[str, int]:
         interval = int(properties.get("heartbeat_interval", "3"))
         timeout = int(properties.get("heartbeat_timeout", "15"))
         return {"interval": interval, "timeout": timeout}

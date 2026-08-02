@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +76,13 @@ class Autoscaler:
 
     def __init__(
         self,
-        config: Optional[AutoscalerConfig] = None,
-        policy: Optional[ScalePolicy] = None,
-        on_scale_up: Optional[Callable[[int], Any]] = None,
-        on_scale_down: Optional[Callable[[str], Any]] = None,
-        on_rebalance: Optional[Callable[[], Any]] = None,
-        get_cluster_state: Optional[Callable[[], Dict[str, Any]]] = None,
-        migrate_task: Optional[Callable[[str], Any]] = None,
+        config: AutoscalerConfig | None = None,
+        policy: ScalePolicy | None = None,
+        on_scale_up: Callable[[int], Any] | None = None,
+        on_scale_down: Callable[[str], Any] | None = None,
+        on_rebalance: Callable[[], Any] | None = None,
+        get_cluster_state: Callable[[], dict[str, Any]] | None = None,
+        migrate_task: Callable[[str], Any] | None = None,
         cluster_master: Any = None,
     ):
         if policy and not config:
@@ -106,9 +107,9 @@ class Autoscaler:
         self._master = cluster_master
 
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._last_action_time: float = 0.0
-        self._action_history: List[Dict[str, Any]] = []
+        self._action_history: list[dict[str, Any]] = []
         self._max_history = 200
 
     async def start(self) -> None:
@@ -160,10 +161,12 @@ class Autoscaler:
         action = ScaleAction.NOOP
 
         # 扩容: 负载超过阈值 + 有待执行任务 + 不在冷却期 + 未达最大节点数
-        if (load_ratio > self.config.scale_up_threshold
-                and pending_tasks
-                and not in_cooldown
-                and num_online < self.config.max_nodes):
+        if (
+            load_ratio > self.config.scale_up_threshold
+            and pending_tasks
+            and not in_cooldown
+            and num_online < self.config.max_nodes
+        ):
             target_count = min(
                 num_online + max(1, len(pending_tasks) // 4),
                 self.config.max_nodes,
@@ -181,15 +184,21 @@ class Autoscaler:
         # 缩容: 负载低于阈值 + 有空闲节点 + 不在冷却期 + 未达最小节点数
         elif load_ratio < self.config.scale_down_threshold and not in_cooldown and num_online > self.config.min_nodes:
             idle_nodes = [
-                n for n in online_nodes
+                n
+                for n in online_nodes
                 if n.get("active_tasks", 0) == 0
                 and (now - n.get("last_heartbeat", now)) > self.config.idle_timeout_seconds
             ]
-            scale_down_candidates = idle_nodes if idle_nodes else [
-                n for n in online_nodes
-                if n.get("active_tasks", 0) > 0
-                and n.get("node_id", "") not in [t.get("preferred_node_id", "") for t in _active_tasks]
-            ]
+            scale_down_candidates = (
+                idle_nodes
+                if idle_nodes
+                else [
+                    n
+                    for n in online_nodes
+                    if n.get("active_tasks", 0) > 0
+                    and n.get("node_id", "") not in [t.get("preferred_node_id", "") for t in _active_tasks]
+                ]
+            )
             if idle_nodes:
                 victim = idle_nodes[0]
             elif scale_down_candidates and num_online > self.config.min_nodes:
@@ -233,16 +242,18 @@ class Autoscaler:
         return action
 
     def _record_action(self, action: ScaleAction, load_ratio: float, node_count: int) -> None:
-        self._action_history.append({
-            "action": action.value,
-            "load_ratio": round(load_ratio, 3),
-            "node_count": node_count,
-            "timestamp": time.time(),
-        })
+        self._action_history.append(
+            {
+                "action": action.value,
+                "load_ratio": round(load_ratio, 3),
+                "node_count": node_count,
+                "timestamp": time.time(),
+            }
+        )
         if len(self._action_history) > self._max_history:
-            self._action_history = self._action_history[-self._max_history:]
+            self._action_history = self._action_history[-self._max_history :]
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return {
             "policy": self.config.policy.value,
             "config": {
@@ -263,10 +274,7 @@ class Autoscaler:
 
         state = self._get_cluster_state()
         tasks = state.get("tasks", [])
-        running_on_node = [
-            t for t in tasks
-            if t.get("status") == "running" and node_id in t.get("assigned_nodes", [])
-        ]
+        running_on_node = [t for t in tasks if t.get("status") == "running" and node_id in t.get("assigned_nodes", [])]
 
         if not running_on_node:
             logger.info(f"M10-03 任务迁移: 节点 {node_id} 无活跃任务")
@@ -292,7 +300,7 @@ class Autoscaler:
         logger.info(f"M10-03 节点 {node_id} 任务迁移完成: {migrated}/{len(running_on_node)}")
         return migrated
 
-    async def _rebalance_tasks(self, online_nodes: List[Dict[str, Any]], tasks: List[Dict[str, Any]]) -> int:
+    async def _rebalance_tasks(self, online_nodes: list[dict[str, Any]], tasks: list[dict[str, Any]]) -> int:
         """M10-05: 实际任务再平衡 — 从过载节点迁移任务到低载节点。"""
         if not online_nodes or not self._migrate_task:
             return 0
@@ -418,7 +426,8 @@ class Autoscaler:
             logger.info("M10-02 内建扩容: 无 standby 节点可激活")
             return
         online_count = sum(
-            1 for n in (self._master.nodes.values() if self._master else [])
+            1
+            for n in (self._master.nodes.values() if self._master else [])
             if getattr(n, "status", None) and n.status.value == "online"
         )
         needed = min(target_count - online_count, len(standby_nodes))
@@ -428,6 +437,7 @@ class Autoscaler:
                 info = self._master.nodes.get(nid)
                 if info:
                     from fusion_multi_node.master.cluster_master import NodeStatus
+
                     info.status = NodeStatus.ONLINE
                     info.role = "worker"
                     activated += 1
@@ -447,6 +457,7 @@ class Autoscaler:
             info = self._master.nodes.get(node_id)
             if info:
                 from fusion_multi_node.master.cluster_master import NodeStatus
+
                 info.status = NodeStatus.OFFLINE
                 info.role = "standby"
                 logger.info(f"M10-03 节点 {node_id} 已设为 standby")

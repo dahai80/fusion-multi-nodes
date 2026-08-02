@@ -8,11 +8,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ReplicationConfig:
     """副本配置。"""
+
     replication_factor: int = 2
     sync_timeout: float = 60.0
     retry_attempts: int = 3
@@ -30,6 +30,7 @@ class ReplicationConfig:
 @dataclass
 class ShardReplica:
     """分片副本。"""
+
     shard_id: str
     node_id: str
     volume_name: str
@@ -44,6 +45,7 @@ class ShardReplica:
 @dataclass
 class SyncResult:
     """同步结果。"""
+
     shard_id: str
     target_node_id: str
     success: bool
@@ -63,19 +65,19 @@ class ShardReplicator:
     - 触发副本同步/修复
     """
 
-    def __init__(self, config: Optional[ReplicationConfig] = None, fmp_interface: Any = None):
+    def __init__(self, config: ReplicationConfig | None = None, fmp_interface: Any = None):
         self.config = config or ReplicationConfig()
-        self._replicas: Dict[str, List[ShardReplica]] = {}
-        self._shard_data: Dict[str, bytes] = {}
+        self._replicas: dict[str, list[ShardReplica]] = {}
+        self._shard_data: dict[str, bytes] = {}
         self._fmp_interface = fmp_interface
-        self._local_node_id: Optional[str] = None
+        self._local_node_id: str | None = None
 
     def register_shard_data(self, shard_id: str, data: bytes) -> None:
         """M9-02 注册分片数据（用于后续同步传输）。"""
         self._shard_data[shard_id] = data
         logger.debug(f"分片数据注册: {shard_id} ({len(data)} bytes)")
 
-    def get_shard_data(self, shard_id: str) -> Optional[bytes]:
+    def get_shard_data(self, shard_id: str) -> bytes | None:
         """获取缓存的分片数据。"""
         return self._shard_data.get(shard_id)
 
@@ -84,9 +86,9 @@ class ShardReplicator:
         shard_id: str,
         file_path: str,
         size_bytes: int,
-        available_nodes: List[Dict[str, Any]],
+        available_nodes: list[dict[str, Any]],
         volume_name: str = "models",
-    ) -> List[ShardReplica]:
+    ) -> list[ShardReplica]:
         count = min(self.config.replication_factor, len(available_nodes))
         replicas = []
         for i in range(count):
@@ -185,9 +187,7 @@ class ShardReplicator:
                 loop = None
 
             if loop and loop.is_running():
-                asyncio.ensure_future(
-                    self._fmp_interface._conn_mgr.send_to(target_node_id, msg)
-                )
+                asyncio.ensure_future(self._fmp_interface._conn_mgr.send_to(target_node_id, msg))
             else:
                 asyncio.run(self._fmp_interface._conn_mgr.send_to(target_node_id, msg))
 
@@ -231,7 +231,9 @@ class ShardReplicator:
         try:
             if storage_volume is not None:
                 ok = storage_volume.write_file(
-                    replica.volume_name, replica.file_path, data,
+                    replica.volume_name,
+                    replica.file_path,
+                    data,
                 )
                 if not ok:
                     return SyncResult(
@@ -281,7 +283,7 @@ class ShardReplicator:
         self._local_node_id = local_node_id
         logger.info(f"ShardReplicator FMP 传输已启用: local_node={local_node_id}")
 
-    def sync_all_replicas(self, shard_id: str, storage_volume: Any = None) -> List[SyncResult]:
+    def sync_all_replicas(self, shard_id: str, storage_volume: Any = None) -> list[SyncResult]:
         """M9-02 同步分片到所有副本节点。"""
         results = []
         for replica in self._replicas.get(shard_id, []):
@@ -299,10 +301,10 @@ class ShardReplicator:
             self.mark_replica_active(shard_id, target_node_id)
         return result
 
-    def get_replicas(self, shard_id: str) -> List[ShardReplica]:
+    def get_replicas(self, shard_id: str) -> list[ShardReplica]:
         return self._replicas.get(shard_id, [])
 
-    def get_healthy_replica(self, shard_id: str) -> Optional[ShardReplica]:
+    def get_healthy_replica(self, shard_id: str) -> ShardReplica | None:
         for replica in self._replicas.get(shard_id, []):
             if replica.status == "active":
                 return replica
@@ -326,7 +328,7 @@ class ShardReplicator:
                 replica.status = "active"
                 logger.info(f"分片副本恢复完成: {shard_id}@{node_id}")
 
-    def remove_node_replicas(self, node_id: str) -> List[str]:
+    def remove_node_replicas(self, node_id: str) -> list[str]:
         affected = []
         for shard_id, replicas in self._replicas.items():
             for replica in replicas:
@@ -335,7 +337,7 @@ class ShardReplicator:
                     affected.append(shard_id)
         return affected
 
-    def get_under_replicated(self) -> List[str]:
+    def get_under_replicated(self) -> list[str]:
         result = []
         for shard_id, replicas in self._replicas.items():
             active = sum(1 for r in replicas if r.status == "active")
@@ -345,7 +347,7 @@ class ShardReplicator:
 
     # ── M9-02 Quorum 读/写 ──
 
-    def quorum_write(self, shard_id: str, data: bytes, storage_volume: Any = None) -> Dict[str, Any]:
+    def quorum_write(self, shard_id: str, data: bytes, storage_volume: Any = None) -> dict[str, Any]:
         """M9-02 Quorum 写入：写入多数副本成功即视为写入成功。
 
         写入 ⌈N/2⌉ 个副本即返回成功，其余异步补齐。
@@ -376,7 +378,7 @@ class ShardReplicator:
             "quorum": quorum,
         }
 
-    def quorum_read(self, shard_id: str, storage_volume: Any = None) -> Dict[str, Any]:
+    def quorum_read(self, shard_id: str, storage_volume: Any = None) -> dict[str, Any]:
         """M9-02 Quorum 读取：从多数副本读取并校验一致性。
 
         读取 ⌈N/2⌉ 个副本，校验 checksum 一致后返回数据。
@@ -386,8 +388,8 @@ class ShardReplicator:
             return {"shard_id": shard_id, "success": False, "error": "no_replicas"}
 
         quorum = (len(replicas) + 1) // 2
-        reads: Dict[str, bytes] = {}
-        checksums: Dict[str, str] = {}
+        reads: dict[str, bytes] = {}
+        checksums: dict[str, str] = {}
         for replica in replicas:
             if replica.status != "active":
                 continue
@@ -419,9 +421,14 @@ class ShardReplicator:
 
         data = next(iter(reads.values()))
         logger.info(f"M9-02 Quorum 读取: {shard_id} 成功 读取={len(reads)} quorum={quorum}")
-        return {"shard_id": shard_id, "success": True, "data": data, "read_count": len(reads)}
+        return {
+            "shard_id": shard_id,
+            "success": True,
+            "data": data,
+            "read_count": len(reads),
+        }
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         total = sum(len(r) for r in self._replicas.values())
         active = sum(sum(1 for r in rlist if r.status == "active") for rlist in self._replicas.values())
         return {

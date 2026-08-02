@@ -14,9 +14,10 @@ import collections
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class LogLevel(Enum):
     FATAL = "FATAL"
 
     @classmethod
-    def from_str(cls, value: str) -> "LogLevel":
+    def from_str(cls, value: str) -> LogLevel:
         normalized = value.upper()
         mapping = {
             "INFO": cls.INFO,
@@ -42,22 +43,29 @@ class LogLevel(Enum):
 
     @property
     def numeric(self) -> int:
-        return {LogLevel.INFO: 0, LogLevel.WARN: 1, LogLevel.ERROR: 2, LogLevel.FATAL: 3}[self]
+        return {
+            LogLevel.INFO: 0,
+            LogLevel.WARN: 1,
+            LogLevel.ERROR: 2,
+            LogLevel.FATAL: 3,
+        }[self]
 
 
 @dataclass
 class MetricPoint:
     """指标数据点。"""
+
     timestamp: float
     node_id: str
     metric_name: str
     value: float
-    tags: Dict[str, str] = field(default_factory=dict)
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class Alert:
     """告警定义。"""
+
     alert_id: str
     severity: str  # "info" | "warning" | "critical"
     title: str
@@ -71,6 +79,7 @@ class Alert:
 @dataclass
 class LogEntry:
     """日志条目。"""
+
     timestamp: float
     node_id: str
     level: str
@@ -87,10 +96,10 @@ class ClusterObservability:
         self.metrics: collections.deque = collections.deque(maxlen=10000)
         self.alerts: collections.deque = collections.deque(maxlen=10000)
         self.logs: collections.deque = collections.deque(maxlen=50000)
-        self._metric_times: List[float] = []
-        self._alert_handlers: List[Callable] = []
+        self._metric_times: list[float] = []
+        self._alert_handlers: list[Callable] = []
         self._running = False
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
 
     # ── 指标收集 ──
 
@@ -99,17 +108,19 @@ class ClusterObservability:
         node_id: str,
         name: str,
         value: float,
-        tags: Optional[Dict[str, str]] = None,
+        tags: dict[str, str] | None = None,
     ) -> None:
         """记录指标。"""
         ts = time.time()
-        self.metrics.append(MetricPoint(
-            timestamp=ts,
-            node_id=node_id,
-            metric_name=name,
-            value=value,
-            tags=tags or {},
-        ))
+        self.metrics.append(
+            MetricPoint(
+                timestamp=ts,
+                node_id=node_id,
+                metric_name=name,
+                value=value,
+                tags=tags or {},
+            )
+        )
         self._metric_times.append(ts)
 
     def get_metrics(
@@ -118,7 +129,7 @@ class ClusterObservability:
         node_id: str = "",
         since: float = 0.0,
         limit: int = 100,
-    ) -> List[MetricPoint]:
+    ) -> list[MetricPoint]:
         """查询指标 — 使用时间索引加速 since 过滤。"""
         results = []
         start_idx = 0
@@ -135,12 +146,11 @@ class ClusterObservability:
                 break
         return results
 
-    def get_latest_metric(self, name: str, node_id: str = "") -> Optional[MetricPoint]:
+    def get_latest_metric(self, name: str, node_id: str = "") -> MetricPoint | None:
         """获取最新指标值。"""
         for m in reversed(self.metrics):
-            if m.metric_name == name:
-                if not node_id or m.node_id == node_id:
-                    return m
+            if m.metric_name == name and (not node_id or m.node_id == node_id):
+                return m
         return None
 
     # ── 日志管理 ──
@@ -165,7 +175,7 @@ class ClusterObservability:
         level: str = "",
         since: float = 0.0,
         limit: int = 100,
-    ) -> List[LogEntry]:
+    ) -> list[LogEntry]:
         """查询日志。"""
         results = []
         for log in reversed(self.logs):
@@ -182,15 +192,15 @@ class ClusterObservability:
 
     def collect_node_logs(
         self,
-        node_ids: Optional[List[str]] = None,
+        node_ids: list[str] | None = None,
         level: str = "",
         since: float = 0.0,
         limit: int = 500,
-    ) -> Dict[str, List[LogEntry]]:
+    ) -> dict[str, list[LogEntry]]:
         """Master侧全节点日志汇总 — 按node_id分组返回。"""
         id_set = set(node_ids) if node_ids else None
         target_level = LogLevel.from_str(level) if level else None
-        result: Dict[str, List[LogEntry]] = collections.defaultdict(list)
+        result: dict[str, list[LogEntry]] = collections.defaultdict(list)
         for log in reversed(self.logs):
             if id_set and log.node_id not in id_set:
                 continue
@@ -241,12 +251,9 @@ class ClusterObservability:
                 return True
         return False
 
-    def get_active_alerts(self, severity: str = "") -> List[Alert]:
+    def get_active_alerts(self, severity: str = "") -> list[Alert]:
         """获取活跃告警。"""
-        return [
-            a for a in self.alerts
-            if not a.resolved and (not severity or a.severity == severity)
-        ]
+        return [a for a in self.alerts if not a.resolved and (not severity or a.severity == severity)]
 
     def on_alert(self, handler: Callable) -> None:
         """注册告警处理器。"""
@@ -254,7 +261,7 @@ class ClusterObservability:
 
     # ── 告警规则引擎 ──
 
-    async def check_alert_rules(self, nodes: Dict[str, Any]) -> List[Alert]:
+    async def check_alert_rules(self, nodes: dict[str, Any]) -> list[Alert]:
         """检查告警规则。"""
         new_alerts = []
 
@@ -285,7 +292,7 @@ class ClusterObservability:
 
     # ── 统计报表 ──
 
-    def get_cluster_report(self) -> Dict[str, Any]:
+    def get_cluster_report(self) -> dict[str, Any]:
         """生成集群统计报告。"""
         now = time.time()
         since = now - 3600  # 最近1小时
@@ -294,9 +301,7 @@ class ClusterObservability:
         recent_metrics = [m for m in self.metrics if m.timestamp > since]
 
         # 各节点指标聚合
-        node_metrics: Dict[str, Dict[str, List[float]]] = collections.defaultdict(
-            lambda: collections.defaultdict(list)
-        )
+        node_metrics: dict[str, dict[str, list[float]]] = collections.defaultdict(lambda: collections.defaultdict(list))
         for m in recent_metrics:
             node_metrics[m.node_id][m.metric_name].append(m.value)
 
@@ -310,10 +315,7 @@ class ClusterObservability:
             "logs_collected": sum(1 for lg in self.logs if lg.timestamp > since),
             "active_alerts": active_alerts,
             "total_alerts": total_alerts,
-            "node_summary": {
-                nid: _build_node_summary(metrics)
-                for nid, metrics in node_metrics.items()
-            },
+            "node_summary": {nid: _build_node_summary(metrics) for nid, metrics in node_metrics.items()},
         }
 
     # ── 生命周期 ──
@@ -344,14 +346,23 @@ class ClusterObservability:
             logs = [l for l in logs if l.node_id == node_id]
         if fmt == "csv":
             import io
+
             buf = io.StringIO()
             buf.write("timestamp,level,node_id,module,message\n")
             for l in logs:
                 msg = l.message.replace('"', '""')
                 buf.write(f'{l.timestamp},{l.level},{l.node_id},{l.module},"{msg}"\n')
             return buf.getvalue()
-        return [{"timestamp": l.timestamp, "level": l.level, "node_id": l.node_id,
-                 "module": l.module, "message": l.message} for l in logs]
+        return [
+            {
+                "timestamp": l.timestamp,
+                "level": l.level,
+                "node_id": l.node_id,
+                "module": l.module,
+                "message": l.message,
+            }
+            for l in logs
+        ]
 
     def generate_optimization_suggestions(self) -> list:
         """M8-03 基于告警和日志生成智能优化建议。"""
@@ -359,49 +370,59 @@ class ClusterObservability:
         active = [a for a in self.alerts if not a.resolved]
         for alert in active:
             if "memory" in alert.message.lower() or "内存" in alert.message:
-                suggestions.append({
-                    "priority": "high",
-                    "category": "resource",
-                    "title": "内存压力过高",
-                    "suggestion": "建议启用模型降级链(M4-04)或扩容新节点(M10-02)，并检查是否有内存泄漏",
-                    "related_alert": alert.alert_id,
-                })
+                suggestions.append(
+                    {
+                        "priority": "high",
+                        "category": "resource",
+                        "title": "内存压力过高",
+                        "suggestion": "建议启用模型降级链(M4-04)或扩容新节点(M10-02)，并检查是否有内存泄漏",
+                        "related_alert": alert.alert_id,
+                    }
+                )
             elif "offline" in alert.message.lower() or "离线" in alert.message:
-                suggestions.append({
-                    "priority": "high",
-                    "category": "availability",
-                    "title": "节点离线",
-                    "suggestion": "检查节点网络连接和进程状态，考虑自动重启或激活 standby 节点",
-                    "related_alert": alert.alert_id,
-                })
+                suggestions.append(
+                    {
+                        "priority": "high",
+                        "category": "availability",
+                        "title": "节点离线",
+                        "suggestion": "检查节点网络连接和进程状态，考虑自动重启或激活 standby 节点",
+                        "related_alert": alert.alert_id,
+                    }
+                )
             elif "latency" in alert.message.lower() or "延迟" in alert.message:
-                suggestions.append({
-                    "priority": "medium",
-                    "category": "performance",
-                    "title": "推理延迟升高",
-                    "suggestion": "检查负载路由策略(M4-01)，考虑切换到 VRAM-first 路由或启用并行推理",
-                    "related_alert": alert.alert_id,
-                })
+                suggestions.append(
+                    {
+                        "priority": "medium",
+                        "category": "performance",
+                        "title": "推理延迟升高",
+                        "suggestion": "检查负载路由策略(M4-01)，考虑切换到 VRAM-first 路由或启用并行推理",
+                        "related_alert": alert.alert_id,
+                    }
+                )
 
         error_logs = [l for l in list(self.logs)[-200:] if l.level == "ERROR"]
         error_sources = {}
         for l in error_logs:
             error_sources[l.module] = error_sources.get(l.module, 0) + 1
         for source, count in sorted(error_sources.items(), key=lambda x: -x[1])[:3]:
-            suggestions.append({
-                "priority": "medium",
-                "category": "stability",
-                "title": f"{source} 频繁报错({count}次)",
-                "suggestion": f"最近日志中 {source} 出现 {count} 次 ERROR，建议检查该组件状态和配置",
-            })
+            suggestions.append(
+                {
+                    "priority": "medium",
+                    "category": "stability",
+                    "title": f"{source} 频繁报错({count}次)",
+                    "suggestion": f"最近日志中 {source} 出现 {count} 次 ERROR，建议检查该组件状态和配置",
+                }
+            )
 
         if not suggestions:
-            suggestions.append({
-                "priority": "low",
-                "category": "info",
-                "title": "集群运行正常",
-                "suggestion": "当前无活跃告警或异常日志，建议定期检查扩缩容策略是否匹配负载模式",
-            })
+            suggestions.append(
+                {
+                    "priority": "low",
+                    "category": "info",
+                    "title": "集群运行正常",
+                    "suggestion": "当前无活跃告警或异常日志，建议定期检查扩缩容策略是否匹配负载模式",
+                }
+            )
 
         return suggestions
 
@@ -422,9 +443,11 @@ class ClusterObservability:
                     self.logs.popleft()
                 while self.alerts and (self.alerts[0].resolved and self.alerts[0].created_at <= cutoff):
                     self.alerts.popleft()
-                logger.debug(f"可观测数据清理完成: 指标 {before_m}→{len(self.metrics)}, "
-                            f"日志 {before_l}→{len(self.logs)}, "
-                            f"告警 {before_a}→{len(self.alerts)}")
+                logger.debug(
+                    f"可观测数据清理完成: 指标 {before_m}→{len(self.metrics)}, "
+                    f"日志 {before_l}→{len(self.logs)}, "
+                    f"告警 {before_a}→{len(self.alerts)}"
+                )
         except asyncio.CancelledError:
             pass
 

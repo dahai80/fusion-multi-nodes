@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, FrozenSet, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,33 +40,37 @@ class Permission(Enum):
     AUTOSCALER_MANAGE = "autoscaler:manage"
 
 
-_ROLE_PERMISSIONS: Dict[NodeRole, FrozenSet[Permission]] = {
-    NodeRole.MASTER: frozenset({
-        Permission.NODE_REGISTER,
-        Permission.NODE_LIST,
-        Permission.NODE_DELETE,
-        Permission.NODE_HEARTBEAT,
-        Permission.TASK_SUBMIT,
-        Permission.TASK_LIST,
-        Permission.TASK_CANCEL,
-        Permission.TASK_MIGRATE,
-        Permission.KV_REGISTER,
-        Permission.KV_FIND,
-        Permission.CLUSTER_STATS,
-        Permission.APPROVAL_LIST,
-        Permission.APPROVAL_APPROVE,
-        Permission.AUTOSCALER_MANAGE,
-    }),
-    NodeRole.WORKER: frozenset({
-        Permission.NODE_HEARTBEAT,
-        Permission.TASK_EXECUTE,
-        Permission.KV_LOOKUP,
-        Permission.KV_TRANSFER,
-        Permission.HARDWARE_READ,
-    }),
+_ROLE_PERMISSIONS: dict[NodeRole, frozenset[Permission]] = {
+    NodeRole.MASTER: frozenset(
+        {
+            Permission.NODE_REGISTER,
+            Permission.NODE_LIST,
+            Permission.NODE_DELETE,
+            Permission.NODE_HEARTBEAT,
+            Permission.TASK_SUBMIT,
+            Permission.TASK_LIST,
+            Permission.TASK_CANCEL,
+            Permission.TASK_MIGRATE,
+            Permission.KV_REGISTER,
+            Permission.KV_FIND,
+            Permission.CLUSTER_STATS,
+            Permission.APPROVAL_LIST,
+            Permission.APPROVAL_APPROVE,
+            Permission.AUTOSCALER_MANAGE,
+        }
+    ),
+    NodeRole.WORKER: frozenset(
+        {
+            Permission.NODE_HEARTBEAT,
+            Permission.TASK_EXECUTE,
+            Permission.KV_LOOKUP,
+            Permission.KV_TRANSFER,
+            Permission.HARDWARE_READ,
+        }
+    ),
 }
 
-_PATH_PERMISSION_MAP: Dict[str, Permission] = {
+_PATH_PERMISSION_MAP: dict[str, Permission] = {
     "/api/nodes/register": Permission.NODE_REGISTER,
     "/api/nodes": Permission.NODE_LIST,
     "/api/nodes/heartbeat": Permission.NODE_HEARTBEAT,
@@ -100,10 +103,11 @@ class PermissionManager:
     """权限管理器 — 校验节点对 API 的访问权限。"""
 
     def __init__(self):
-        self._assignments: Dict[str, RoleAssignment] = {}
+        self._assignments: dict[str, RoleAssignment] = {}
 
     def assign_role(self, node_id: str, role: NodeRole, assigned_by: str = "system") -> None:
         import time
+
         self._assignments[node_id] = RoleAssignment(
             node_id=node_id,
             role=role,
@@ -112,7 +116,7 @@ class PermissionManager:
         )
         logger.info(f"角色分配: {node_id} → {role.value} (by {assigned_by})")
 
-    def get_role(self, node_id: str) -> Optional[NodeRole]:
+    def get_role(self, node_id: str) -> NodeRole | None:
         assignment = self._assignments.get(node_id)
         return assignment.role if assignment else None
 
@@ -123,7 +127,14 @@ class PermissionManager:
         return permission in _ROLE_PERMISSIONS.get(assignment.role, frozenset())
 
     def check_path_access(self, node_id: str, path: str, method: str = "GET") -> bool:
-        if path in ("/api/health", "/docs", "/openapi.json", "/redoc", "/", "/favicon.ico"):
+        if path in (
+            "/api/health",
+            "/docs",
+            "/openapi.json",
+            "/redoc",
+            "/",
+            "/favicon.ico",
+        ):
             return True
 
         permission = _PATH_PERMISSION_MAP.get(path)
@@ -131,7 +142,7 @@ class PermissionManager:
             return self.has_permission(node_id, permission)
 
         for api_path, perm in _PATH_PERMISSION_MAP.items():
-            if path.startswith(api_path + "/") or path.startswith(api_path):
+            if path.startswith((api_path + "/", api_path)):
                 return self.has_permission(node_id, perm)
 
         if method == "DELETE" and "/api/nodes/" in path:
@@ -144,7 +155,7 @@ class PermissionManager:
         logger.warning(f"权限未定义路径: {path} ({method}), 拒绝访问")
         return False
 
-    def get_permissions(self, node_id: str) -> List[Permission]:
+    def get_permissions(self, node_id: str) -> list[Permission]:
         assignment = self._assignments.get(node_id)
         if not assignment:
             return []

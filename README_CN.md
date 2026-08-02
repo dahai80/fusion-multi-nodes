@@ -196,8 +196,14 @@ from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, Paral
 
 master = ClusterMaster(host="127.0.0.1", port=11452)
 
-node = NodeInfo(node_id="node_1", hostname="mac-studio-1", ip_address="10.0.0.1",
-                port=11445, total_memory_gb=64.0, available_memory_gb=48.0)
+node = NodeInfo(
+    node_id="node_1",
+    hostname="mac-studio-1",
+    ip_address="10.0.0.1",
+    port=11445,
+    total_memory_gb=64.0,
+    available_memory_gb=48.0,
+)
 master.register_node(node)
 
 task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA)
@@ -242,8 +248,12 @@ mdns.unregister()
 
 ```python
 from fusion_multi_node.protocol import (
-    FMPMessage, PayloadType, FMPCrypto,
-    FMPConnectionManager, FMPRouter, CircuitBreaker,
+    FMPMessage,
+    PayloadType,
+    FMPCrypto,
+    FMPConnectionManager,
+    FMPRouter,
+    CircuitBreaker,
 )
 
 msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
@@ -267,7 +277,11 @@ if cb.allow_request():
 三个子模块支撑分布式推理：
 
 ```python
-from fusion_multi_node.distributed_mlx import DistributedMLXBridge, CavemanManager, KVSharingManager
+from fusion_multi_node.distributed_mlx import (
+    DistributedMLXBridge,
+    CavemanManager,
+    KVSharingManager,
+)
 
 # 模型分片 & 流水线
 bridge = DistributedMLXBridge()
@@ -292,8 +306,11 @@ found = kv.lookup_local("qwen", "abc123")
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 
 gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
-tool = MCPTool(name="code_review", description="Review code",
-               parameters={"type": "object", "properties": {"code": {"type": "string"}}})
+tool = MCPTool(
+    name="code_review",
+    description="Review code",
+    parameters={"type": "object", "properties": {"code": {"type": "string"}}},
+)
 gateway.register_tool(tool)
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
 ```

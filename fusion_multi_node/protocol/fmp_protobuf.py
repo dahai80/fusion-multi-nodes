@@ -16,11 +16,11 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-FMP_PROTO_MAGIC = b"\x46\x4D\x50\x02"
+FMP_PROTO_MAGIC = b"\x46\x4d\x50\x02"
 FMP_PROTO_HEADER_SIZE = 12
 FMP_PROTO_VERSION = 2
 FMP_PROTO_MAX_PAYLOAD = 16 * 1024 * 1024
@@ -70,11 +70,12 @@ class ControlCode(IntEnum):
 @dataclass
 class FMPEnvelope:
     """信封层 — 路由与跳数控制。"""
+
     source_id: str
     target_id: str
     hop_count: int = 0
     max_hops: int = 3
-    trace: List[str] = field(default_factory=list)
+    trace: list[str] = field(default_factory=list)
     message_id: str = ""
     timestamp: float = 0.0
     sequence: int = 0
@@ -94,7 +95,7 @@ class FMPEnvelope:
         self.hop_count += 1
         self.trace.append(next_node)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "source_id": self.source_id,
             "target_id": self.target_id,
@@ -107,7 +108,7 @@ class FMPEnvelope:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPEnvelope:
+    def from_dict(cls, d: dict[str, Any]) -> FMPEnvelope:
         return cls(
             source_id=d["source_id"],
             target_id=d["target_id"],
@@ -123,6 +124,7 @@ class FMPEnvelope:
 @dataclass
 class FMPControl:
     """控制层 — 心跳、ACK、流控。"""
+
     code: ControlCode
     sequence: int = 0
     timestamp: float = 0.0
@@ -134,7 +136,7 @@ class FMPControl:
         if not self.timestamp:
             self.timestamp = time.time()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "code": self.code.value,
             "sequence": self.sequence,
@@ -145,7 +147,7 @@ class FMPControl:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPControl:
+    def from_dict(cls, d: dict[str, Any]) -> FMPControl:
         return cls(
             code=ControlCode(d["code"]),
             sequence=d.get("sequence", 0),
@@ -159,6 +161,7 @@ class FMPControl:
 @dataclass
 class FMPPayload:
     """业务负载层 — 类型标记 + 序列化数据。"""
+
     payload_type: PayloadType
     data: bytes
     round_id: str = ""
@@ -174,7 +177,7 @@ class FMPPayload:
             raise ValueError(f"round_number={self.round_number} 已达上限 {self.max_rounds}")
         self.round_number += 1
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "payload_type": self.payload_type.value,
             "data": self.data.decode("utf-8", errors="replace"),
@@ -185,7 +188,7 @@ class FMPPayload:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPPayload:
+    def from_dict(cls, d: dict[str, Any]) -> FMPPayload:
         raw = d["data"]
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
@@ -202,6 +205,7 @@ class FMPPayload:
 @dataclass
 class FMPProtoMessage:
     """Protobuf 三层协议完整消息。"""
+
     envelope: FMPEnvelope
     control: FMPControl
     payload: FMPPayload
@@ -218,11 +222,9 @@ class FMPProtoMessage:
         round_id: str = "",
     ) -> FMPProtoMessage:
         import json
+
         envelope = FMPEnvelope(source_id=source_id, target_id=target_id)
-        if isinstance(data, bytes):
-            raw = data
-        else:
-            raw = json.dumps(data).encode("utf-8")
+        raw = data if isinstance(data, bytes) else json.dumps(data).encode("utf-8")
         payload = FMPPayload(
             payload_type=payload_type,
             data=raw,
@@ -234,7 +236,7 @@ class FMPProtoMessage:
         )
         return cls(envelope=envelope, control=control, payload=payload)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "envelope": self.envelope.to_dict(),
             "control": self.control.to_dict(),
@@ -243,7 +245,7 @@ class FMPProtoMessage:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> FMPProtoMessage:
+    def from_dict(cls, d: dict[str, Any]) -> FMPProtoMessage:
         return cls(
             envelope=FMPEnvelope.from_dict(d["envelope"]),
             control=FMPControl.from_dict(d["control"]),
@@ -253,6 +255,7 @@ class FMPProtoMessage:
 
     def serialize(self) -> bytes:
         import json
+
         payload_dict = self.to_dict()
         flags = FLAG_ENCRYPTED if self.encrypted else 0x00
 
@@ -263,6 +266,7 @@ class FMPProtoMessage:
         else:
             try:
                 import msgpack
+
                 payload_bytes = msgpack.packb(payload_dict, use_bin_type=True)
                 flags |= FLAG_MSGPACK
             except ImportError:
@@ -283,9 +287,7 @@ class FMPProtoMessage:
         if len(data) < FMP_PROTO_HEADER_SIZE:
             raise ValueError(f"数据过短: {len(data)} < {FMP_PROTO_HEADER_SIZE}")
 
-        magic, version, flags, payload_len, _ = struct.unpack(
-            "!4sBBIH", data[:FMP_PROTO_HEADER_SIZE]
-        )
+        magic, version, flags, payload_len, _ = struct.unpack("!4sBBIH", data[:FMP_PROTO_HEADER_SIZE])
         if magic != FMP_PROTO_MAGIC:
             raise ValueError(f"无效 MAGIC: {magic}")
         if version != FMP_PROTO_VERSION:
@@ -308,22 +310,25 @@ class FMPProtoMessage:
         elif is_msgpack:
             try:
                 import msgpack
+
                 d = msgpack.unpackb(payload_bytes, raw=False)
             except ImportError:
                 raise ValueError("收到 msgpack 帧但 msgpack 未安装")
         else:
             import json
+
             d = json.loads(payload_bytes.decode("utf-8"))
 
         d["encrypted"] = bool(flags & FLAG_ENCRYPTED)
         return cls.from_dict(d)
 
 
-def _try_protobuf_encode(payload_dict: Dict[str, Any]) -> Optional[bytes]:
+def _try_protobuf_encode(payload_dict: dict[str, Any]) -> bytes | None:
     """将消息字典编码为结构化 protobuf — 使用 FMPEnvelope/FMPControl/FMPPayload 字段。"""
     try:
-        from fusion_multi_node.protocol import fmp_proto_pb2
         import json
+
+        from fusion_multi_node.protocol import fmp_proto_pb2
 
         frame = fmp_proto_pb2.FMPFrame()
 
@@ -371,11 +376,12 @@ def _try_protobuf_encode(payload_dict: Dict[str, Any]) -> Optional[bytes]:
         return None
 
 
-def _try_protobuf_decode(data: bytes) -> Optional[Dict[str, Any]]:
+def _try_protobuf_decode(data: bytes) -> dict[str, Any] | None:
     """从 protobuf 二进制解码为消息字典 — 使用结构化字段。"""
     try:
-        from fusion_multi_node.protocol import fmp_proto_pb2
         import json
+
+        from fusion_multi_node.protocol import fmp_proto_pb2
 
         frame = fmp_proto_pb2.FMPFrame()
         frame.ParseFromString(data)

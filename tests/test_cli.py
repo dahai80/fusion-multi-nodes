@@ -10,16 +10,16 @@ import pytest
 from click.testing import CliRunner
 
 from fusion_multi_node.cli import (
-    cli,
-    _async_list_nodes,
+    _async_caveman_test,
     _async_cluster_start,
     _async_cluster_stop,
-    _async_task_submit,
     _async_kv_warm,
+    _async_list_nodes,
     _async_network_detect,
-    _async_caveman_test,
     _async_node_discover,
+    _async_task_submit,
     _get_master,
+    cli,
 )
 from fusion_multi_node.master.cluster_master import (
     ClusterMaster,
@@ -41,10 +41,16 @@ def master_with_nodes():
     m = ClusterMaster()
     for i in range(3):
         info = NodeInfo(
-            node_id=f"n{i}", hostname=f"mac{i}", ip_address=f"10.0.0.{i}",
-            port=11445, status=NodeStatus.ONLINE, last_heartbeat=time.time(),
-            available_memory_gb=50.0 - i * 10, total_memory_gb=64.0,
-            active_tasks=i, max_tasks=4,
+            node_id=f"n{i}",
+            hostname=f"mac{i}",
+            ip_address=f"10.0.0.{i}",
+            port=11445,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
+            available_memory_gb=50.0 - i * 10,
+            total_memory_gb=64.0,
+            active_tasks=i,
+            max_tasks=4,
         )
         m.nodes[f"n{i}"] = info
     return m
@@ -119,10 +125,12 @@ class TestNodeCommands:
     def test_node_start_master(self, runner):
         mock_master = AsyncMock()
         mock_master.stop = AsyncMock()
-        with patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master):
-            with patch("fusion_multi_node.cli._async_node_start", new_callable=AsyncMock):
-                result = runner.invoke(cli, ["node", "start", "--role", "master"])
-                assert result.exit_code == 0
+        with (
+            patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master),
+            patch("fusion_multi_node.cli._async_node_start", new_callable=AsyncMock),
+        ):
+            result = runner.invoke(cli, ["node", "start", "--role", "master"])
+            assert result.exit_code == 0
 
     def test_node_start_agent(self, runner):
         with patch("fusion_multi_node.cli._async_node_start", new_callable=AsyncMock):
@@ -144,6 +152,7 @@ class TestNodeCommands:
     @pytest.mark.asyncio
     async def test_async_node_discover_with_nodes(self):
         from fusion_multi_node.discovery.mdns_discovery import DiscoveryInfo
+
         mock_mdns = MagicMock()
         nodes = [DiscoveryInfo(name="m1", host="10.0.0.1", port=9754, properties={"role": "master"})]
         mock_mdns.browse_async = AsyncMock(return_value=nodes)
@@ -170,6 +179,7 @@ class TestClusterCommands:
     @pytest.mark.asyncio
     async def test_async_cluster_stop_with_services(self):
         import fusion_multi_node.cli as cli_mod
+
         old_master = cli_mod._master
         old_agent = cli_mod._agent
         old_obs = cli_mod._observability
@@ -192,6 +202,7 @@ class TestClusterCommands:
     @pytest.mark.asyncio
     async def test_async_cluster_stop_no_services(self):
         import fusion_multi_node.cli as cli_mod
+
         old_master = cli_mod._master
         old_agent = cli_mod._agent
         old_obs = cli_mod._observability
@@ -213,16 +224,19 @@ class TestClusterCommands:
     @pytest.mark.asyncio
     async def test_async_cluster_start_master(self):
         import fusion_multi_node.cli as cli_mod
+
         old_master = cli_mod._master
         old_obs = cli_mod._observability
         try:
             mock_master = AsyncMock()
             mock_master.port = 11452
             mock_obs = AsyncMock()
-            with patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master):
-                with patch("fusion_multi_node.cli.ClusterObservability", return_value=mock_obs):
-                    await _async_cluster_start("master", "http")
-            assert cli_mod._master is not None or True
+            with (
+                patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master),
+                patch("fusion_multi_node.cli.ClusterObservability", return_value=mock_obs),
+            ):
+                await _async_cluster_start("master", "http")
+            assert True
         finally:
             cli_mod._master = old_master
             cli_mod._observability = old_obs
@@ -230,6 +244,7 @@ class TestClusterCommands:
     @pytest.mark.asyncio
     async def test_async_cluster_start_agent(self):
         import fusion_multi_node.cli as cli_mod
+
         old_agent = cli_mod._agent
         try:
             mock_agent = AsyncMock()
@@ -257,8 +272,11 @@ class TestTaskCommands:
     def test_task_list_with_tasks(self, runner, master_with_nodes):
         m = master_with_nodes
         task = ClusterTask(
-            task_id="t1", name="infer", mode=ParallelMode.PIPELINE,
-            model_name="test", timeout_seconds=300.0,
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
+            model_name="test",
+            timeout_seconds=300.0,
         )
         m.tasks["t1"] = task
         with patch("fusion_multi_node.cli._get_master", return_value=m):
@@ -288,7 +306,9 @@ class TestTaskCommands:
     def test_task_cancel_existing(self, runner, master_with_nodes):
         m = master_with_nodes
         task = ClusterTask(
-            task_id="t1", name="infer", mode=ParallelMode.PIPELINE,
+            task_id="t1",
+            name="infer",
+            mode=ParallelMode.PIPELINE,
             model_name="test",
         )
         m.tasks["t1"] = task
@@ -341,10 +361,15 @@ class TestNetworkCommands:
     @pytest.mark.asyncio
     async def test_async_network_detect_with_interfaces(self):
         from fusion_multi_node.utils.network_topology import LinkInfo, LinkType
+
         mock_detector = MagicMock()
         link = LinkInfo(
-            interface="en0", type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=1.0, is_rdma=False, priority=5,
+            interface="en0",
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=1.0,
+            is_rdma=False,
+            priority=5,
         )
         mock_detector.detect = AsyncMock(return_value={"en0": link})
         mock_detector.get_best_link.return_value = link
@@ -363,10 +388,15 @@ class TestNetworkCommands:
     @pytest.mark.asyncio
     async def test_async_network_detect_thunderbolt(self):
         from fusion_multi_node.utils.network_topology import LinkInfo, LinkType
+
         mock_detector = MagicMock()
         link = LinkInfo(
-            interface="bridge0", type=LinkType.THUNDERBOLT_3, bandwidth_mbps=10000,
-            latency_ms=0.1, is_rdma=True, priority=1,
+            interface="bridge0",
+            type=LinkType.THUNDERBOLT_3,
+            bandwidth_mbps=10000,
+            latency_ms=0.1,
+            is_rdma=True,
+            priority=1,
         )
         mock_detector.detect = AsyncMock(return_value={"bridge0": link})
         mock_detector.get_best_link.return_value = link
@@ -423,14 +453,17 @@ class TestKVCommands:
     async def test_async_kv_warm_with_nodes(self, master_with_nodes):
         mock_manager = MagicMock()
         mock_manager.warm_cache = AsyncMock(return_value={"success": 1, "failed": 0})
-        with patch("fusion_multi_node.cli.KVSharingManager", return_value=mock_manager):
-            with patch("fusion_multi_node.cli._get_master", return_value=master_with_nodes):
-                await _async_kv_warm(["hello"], ["n0"])
+        with (
+            patch("fusion_multi_node.cli.KVSharingManager", return_value=mock_manager),
+            patch("fusion_multi_node.cli._get_master", return_value=master_with_nodes),
+        ):
+            await _async_kv_warm(["hello"], ["n0"])
 
 
 class TestGetMaster:
     def test_creates_master(self):
         import fusion_multi_node.cli as cli_mod
+
         old_master = cli_mod._master
         try:
             cli_mod._master = None
@@ -441,6 +474,7 @@ class TestGetMaster:
 
     def test_returns_existing(self):
         import fusion_multi_node.cli as cli_mod
+
         old_master = cli_mod._master
         test_master = ClusterMaster()
         try:

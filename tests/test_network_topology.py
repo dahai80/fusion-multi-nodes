@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
 from fusion_multi_node.utils.network_topology import (
     LinkInfo,
     LinkType,
@@ -15,9 +14,15 @@ from fusion_multi_node.utils.network_topology import (
 class TestLinkType:
     def test_all_values(self):
         expected = [
-            "thunderbolt_5", "thunderbolt_4", "thunderbolt_3",
-            "ethernet_10g", "ethernet_1g", "ethernet_100m",
-            "wifi_6e", "wifi_6", "unknown",
+            "thunderbolt_5",
+            "thunderbolt_4",
+            "thunderbolt_3",
+            "ethernet_10g",
+            "ethernet_1g",
+            "ethernet_100m",
+            "wifi_6e",
+            "wifi_6",
+            "unknown",
         ]
         for val, exp in zip(LinkType, expected):
             assert val.value == exp
@@ -135,20 +140,32 @@ class TestGetBestLink:
 
     def test_multiple_picks_highest_priority(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="en0", is_active=True, priority=4,
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="en0",
+            is_active=True,
+            priority=4,
         )
         self.detector._interfaces["bridge100"] = LinkInfo(
-            type=LinkType.THUNDERBOLT_5, bandwidth_mbps=40000,
-            latency_ms=0.05, interface="bridge100", is_active=True, priority=0,
+            type=LinkType.THUNDERBOLT_5,
+            bandwidth_mbps=40000,
+            latency_ms=0.05,
+            interface="bridge100",
+            is_active=True,
+            priority=0,
         )
         best = self.detector.get_best_link()
         assert best.interface == "bridge100"
 
     def test_inactive_excluded(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="en0", is_active=False, priority=4,
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="en0",
+            is_active=False,
+            priority=4,
         )
         assert self.detector.get_best_link() is None
 
@@ -159,8 +176,12 @@ class TestPrimaryInterfaceHelpers:
 
     def test_get_primary_interface_with_link(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="en0", is_active=True, priority=4,
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="en0",
+            is_active=True,
+            priority=4,
         )
         assert self.detector.get_primary_interface() == "en0"
 
@@ -169,8 +190,12 @@ class TestPrimaryInterfaceHelpers:
 
     def test_get_link_type_with_link(self):
         self.detector._interfaces["bridge100"] = LinkInfo(
-            type=LinkType.THUNDERBOLT_4, bandwidth_mbps=20000,
-            latency_ms=0.05, interface="bridge100", is_active=True, priority=1,
+            type=LinkType.THUNDERBOLT_4,
+            bandwidth_mbps=20000,
+            latency_ms=0.05,
+            interface="bridge100",
+            is_active=True,
+            priority=1,
         )
         assert self.detector.get_link_type() == LinkType.THUNDERBOLT_4
 
@@ -179,8 +204,12 @@ class TestPrimaryInterfaceHelpers:
 
     def test_get_link_speed_with_link(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="en0", is_active=True, priority=4,
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="en0",
+            is_active=True,
+            priority=4,
         )
         assert self.detector.get_link_speed() == 1000.0
 
@@ -194,22 +223,36 @@ class TestIsThunderboltAvailable:
 
     def test_with_thunderbolt(self):
         self.detector._interfaces["bridge100"] = LinkInfo(
-            type=LinkType.THUNDERBOLT_5, bandwidth_mbps=40000,
-            latency_ms=0.05, interface="bridge100", is_rdma=True, is_active=True, priority=0,
+            type=LinkType.THUNDERBOLT_5,
+            bandwidth_mbps=40000,
+            latency_ms=0.05,
+            interface="bridge100",
+            is_rdma=True,
+            is_active=True,
+            priority=0,
         )
         assert self.detector.is_thunderbolt_available() is True
 
     def test_with_thunderbolt_3(self):
         self.detector._interfaces["bridge100"] = LinkInfo(
-            type=LinkType.THUNDERBOLT_3, bandwidth_mbps=10000,
-            latency_ms=0.1, interface="bridge100", is_rdma=True, is_active=True, priority=2,
+            type=LinkType.THUNDERBOLT_3,
+            bandwidth_mbps=10000,
+            latency_ms=0.1,
+            interface="bridge100",
+            is_rdma=True,
+            is_active=True,
+            priority=2,
         )
         assert self.detector.is_thunderbolt_available() is True
 
     def test_without_thunderbolt(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="en0", is_active=True, priority=4,
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="en0",
+            is_active=True,
+            priority=4,
         )
         assert self.detector.is_thunderbolt_available() is False
 
@@ -223,8 +266,11 @@ class TestRecommendedCompression:
 
     def _set_link(self, link_type):
         self.detector._interfaces["iface0"] = LinkInfo(
-            type=link_type, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="iface0", is_active=True,
+            type=link_type,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="iface0",
+            is_active=True,
             priority=self.detector._get_priority(link_type),
         )
 
@@ -347,7 +393,7 @@ class TestMeasurePeerLatency:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
             mock_reader = AsyncMock()
             mock_writer = AsyncMock()
             mock_writer.close = MagicMock()
@@ -482,8 +528,12 @@ class TestDetectEthernet:
 
     async def test_skip_already_registered(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.THUNDERBOLT_5, bandwidth_mbps=40000,
-            latency_ms=0.01, interface="en0", is_active=True, priority=0,
+            type=LinkType.THUNDERBOLT_5,
+            bandwidth_mbps=40000,
+            latency_ms=0.01,
+            interface="en0",
+            is_active=True,
+            priority=0,
         )
         ifconfig_list = MagicMock()
         ifconfig_list.stdout = "lo0 en0"
@@ -604,8 +654,12 @@ class TestDetectWifi:
 
     async def test_wifi_skip_already_registered(self):
         self.detector._interfaces["en0"] = LinkInfo(
-            type=LinkType.ETHERNET_1G, bandwidth_mbps=1000,
-            latency_ms=0.1, interface="en0", is_active=True, priority=4,
+            type=LinkType.ETHERNET_1G,
+            bandwidth_mbps=1000,
+            latency_ms=0.1,
+            interface="en0",
+            is_active=True,
+            priority=4,
         )
         airport_result = MagicMock()
         airport_result.stdout = "en0"
@@ -628,17 +682,23 @@ class TestDetectWifi:
         airport_result = MagicMock()
         airport_result.stdout = "en0"
 
-        with patch("subprocess.run", return_value=airport_result):
-            with patch.object(
-                self.detector, "_measure_interface_speed",
-                new_callable=AsyncMock, return_value=0.0,
-            ):
-                with patch.object(
-                    self.detector, "_measure_latency",
-                    new_callable=AsyncMock, return_value=0.1,
-                ):
-                    await self.detector._detect_wifi()
-                    assert "en0" not in self.detector._interfaces
+        with (
+            patch("subprocess.run", return_value=airport_result),
+            patch.object(
+                self.detector,
+                "_measure_interface_speed",
+                new_callable=AsyncMock,
+                return_value=0.0,
+            ),
+            patch.object(
+                self.detector,
+                "_measure_latency",
+                new_callable=AsyncMock,
+                return_value=0.1,
+            ),
+        ):
+            await self.detector._detect_wifi()
+            assert "en0" not in self.detector._interfaces
 
     async def test_wifi_subprocess_exception(self):
         with patch("subprocess.run", side_effect=Exception("no airport")):
@@ -685,23 +745,29 @@ class TestFullDetect:
 
     async def test_detect_clears_old(self):
         self.detector._interfaces["old0"] = LinkInfo(
-            type=LinkType.UNKNOWN, bandwidth_mbps=0,
-            latency_ms=0, interface="old0",
+            type=LinkType.UNKNOWN,
+            bandwidth_mbps=0,
+            latency_ms=0,
+            interface="old0",
         )
-        with patch.object(self.detector, "_detect_thunderbolt", new_callable=AsyncMock):
-            with patch.object(self.detector, "_detect_ethernet", new_callable=AsyncMock):
-                with patch.object(self.detector, "_detect_wifi", new_callable=AsyncMock):
-                    await self.detector.detect()
-                    assert "old0" not in self.detector._interfaces
-                    assert "lo0" in self.detector._interfaces
+        with (
+            patch.object(self.detector, "_detect_thunderbolt", new_callable=AsyncMock),
+            patch.object(self.detector, "_detect_ethernet", new_callable=AsyncMock),
+            patch.object(self.detector, "_detect_wifi", new_callable=AsyncMock),
+        ):
+            await self.detector.detect()
+            assert "old0" not in self.detector._interfaces
+            assert "lo0" in self.detector._interfaces
 
     async def test_detect_sets_detected_flag(self):
         assert self.detector._detected is False
-        with patch.object(self.detector, "_detect_thunderbolt", new_callable=AsyncMock):
-            with patch.object(self.detector, "_detect_ethernet", new_callable=AsyncMock):
-                with patch.object(self.detector, "_detect_wifi", new_callable=AsyncMock):
-                    await self.detector.detect()
-                    assert self.detector._detected is True
+        with (
+            patch.object(self.detector, "_detect_thunderbolt", new_callable=AsyncMock),
+            patch.object(self.detector, "_detect_ethernet", new_callable=AsyncMock),
+            patch.object(self.detector, "_detect_wifi", new_callable=AsyncMock),
+        ):
+            await self.detector.detect()
+            assert self.detector._detected is True
 
 
 class TestNetworkPath:
@@ -714,13 +780,18 @@ class TestNetworkPath:
 
     def test_with_values(self):
         link = LinkInfo(
-            type=LinkType.THUNDERBOLT_5, bandwidth_mbps=40000,
-            latency_ms=0.05, interface="bridge100",
+            type=LinkType.THUNDERBOLT_5,
+            bandwidth_mbps=40000,
+            latency_ms=0.05,
+            interface="bridge100",
         )
         path = NetworkPath(
-            source="a", target="b",
-            links=[link], primary_link=link,
-            aggregated_bandwidth_mbps=40000, avg_latency_ms=0.05,
+            source="a",
+            target="b",
+            links=[link],
+            primary_link=link,
+            aggregated_bandwidth_mbps=40000,
+            avg_latency_ms=0.05,
         )
         assert path.source == "a"
         assert len(path.links) == 1

@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 class DistMode(Enum):
     """分布式模式。"""
+
     PIPELINE = "pipeline"
     DATA = "data"
     TENSOR = "tensor"
@@ -33,9 +34,10 @@ class DistMode(Enum):
 @dataclass
 class ModelShard:
     """模型分片定义。"""
+
     shard_id: int
     total_shards: int
-    layers: List[int]
+    layers: list[int]
     node_id: str
     memory_mb: float = 0.0
     status: str = "pending"
@@ -44,6 +46,7 @@ class ModelShard:
 @dataclass
 class DistConfig:
     """分布式推理配置。"""
+
     mode: DistMode = DistMode.PIPELINE
     model_name: str = ""
     num_nodes: int = 1
@@ -60,9 +63,9 @@ class DistributedMLXBridge:
     """
 
     def __init__(self):
-        self._shards: Dict[str, List[ModelShard]] = {}
-        self._active_pipelines: Dict[str, Dict[str, Any]] = {}
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._shards: dict[str, list[ModelShard]] = {}
+        self._active_pipelines: dict[str, dict[str, Any]] = {}
+        self._http_client: httpx.AsyncClient | None = None
         self._max_pipelines = 100
         self._max_shards = 50
 
@@ -89,7 +92,7 @@ class DistributedMLXBridge:
         model_name: str,
         num_shards: int,
         strategy: str = "auto",
-    ) -> List[ModelShard]:
+    ) -> list[ModelShard]:
         """将模型切分为分片。"""
         logger.info(f"模型分片: {model_name} → {num_shards} 片 (策略: {strategy})")
 
@@ -118,8 +121,7 @@ class DistributedMLXBridge:
         if len(self._shards) > self._max_shards:
             oldest = next(iter(self._shards))
             del self._shards[oldest]
-        logger.info(f"分片完成: {total_layers} 层 → {num_shards} 片 "
-                    f"({layers_per_shard} 层/片)")
+        logger.info(f"分片完成: {total_layers} 层 → {num_shards} 片 ({layers_per_shard} 层/片)")
         return shards
 
     async def load_shard(
@@ -169,9 +171,9 @@ class DistributedMLXBridge:
         self,
         model_name: str,
         prompt: str,
-        node_chain: List[str],
+        node_chain: list[str],
         fusion_mlx_port: int = 8000,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """流水线并行推理。"""
         pipeline_id = f"pipe_{model_name}_{len(self._active_pipelines)}"
         self._active_pipelines[pipeline_id] = {
@@ -204,9 +206,9 @@ class DistributedMLXBridge:
                 )
                 data = resp.json()
                 current_input = data.get("output", current_input)
-                logger.debug(f"流水线步骤 {i+1}/{len(node_chain)} 完成 @ {node_id}")
+                logger.debug(f"流水线步骤 {i + 1}/{len(node_chain)} 完成 @ {node_id}")
             except Exception as e:
-                logger.error(f"流水线步骤 {i+1} 失败: {e}")
+                logger.error(f"流水线步骤 {i + 1} 失败: {e}")
                 self._active_pipelines[pipeline_id]["status"] = "failed"
                 return {"error": "流水线步骤执行失败", "pipeline_id": pipeline_id}
 
@@ -221,15 +223,15 @@ class DistributedMLXBridge:
     async def data_parallel_inference(
         self,
         model_name: str,
-        prompts: List[str],
-        nodes: List[str],
+        prompts: list[str],
+        nodes: list[str],
         fusion_mlx_port: int = 8000,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """数据并行推理 — 负载感知分配。
 
         优先分配给活跃任务数最少的节点，而非简单轮询。
         """
-        load: Dict[str, int] = {n: 0 for n in nodes}
+        load: dict[str, int] = dict.fromkeys(nodes, 0)
         tasks = []
 
         for prompt in prompts:
@@ -255,7 +257,7 @@ class DistributedMLXBridge:
         model_name: str,
         prompt: str,
         port: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """单节点推理。"""
         payload = {
             "model": model_name,
@@ -275,13 +277,11 @@ class DistributedMLXBridge:
             "usage": data.get("usage", {}),
         }
 
-    async def _get_model_config(self, model_name: str) -> Dict[str, Any]:
+    async def _get_model_config(self, model_name: str) -> dict[str, Any]:
         """获取模型配置（通过 fusion-mlx API）。"""
         try:
             client = await self._get_http_client(10.0)
-            resp = await client.get(
-                f"http://localhost:8000/v1/models/{model_name}"
-            )
+            resp = await client.get(f"http://localhost:8000/v1/models/{model_name}")
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
@@ -297,7 +297,7 @@ class DistributedMLXBridge:
         self,
         model_name: str,
         source_node: str,
-        target_nodes: List[str],
+        target_nodes: list[str],
         port: int = 8000,
     ) -> bool:
         """跨节点同步模型权重。"""

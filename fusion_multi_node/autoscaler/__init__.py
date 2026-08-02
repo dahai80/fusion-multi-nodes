@@ -1,3 +1,3 @@
-from .autoscaler import Autoscaler, AutoscalerConfig, ScalePolicy, ScaleAction
+from .autoscaler import Autoscaler, AutoscalerConfig, ScaleAction, ScalePolicy
 
-__all__ = ["Autoscaler", "AutoscalerConfig", "ScalePolicy", "ScaleAction"]
+__all__ = ["Autoscaler", "AutoscalerConfig", "ScaleAction", "ScalePolicy"]

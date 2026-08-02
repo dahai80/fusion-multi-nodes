@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -19,19 +19,21 @@ from fusion_multi_node.master import (
     TaskStatus,
 )
 from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
+from fusion_multi_node.security.permission import NodeRole, PermissionManager
 from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
-from fusion_multi_node.security.permission import PermissionManager, NodeRole
 
 logger = logging.getLogger(__name__)
 
 try:
     from importlib.metadata import version as _pkg_version
+
     _VERSION = _pkg_version("fusion-multi-node")
 except Exception:
     _VERSION = "0.2.0"
 
 
 # ── Pydantic 请求/响应模型 ──
+
 
 class NodeRegisterRequest(BaseModel):
     node_id: str
@@ -47,7 +49,7 @@ class NodeRegisterRequest(BaseModel):
     uma_size_gb: float = 0.0
     mlx_version: str = ""
     role: str = "worker"
-    tags: List[str] = []
+    tags: list[str] = []
     active_tasks: int = 0
     max_tasks: int = 4
     network_rtt_ms: float = 0.0
@@ -55,8 +57,8 @@ class NodeRegisterRequest(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     node_id: str
-    available_memory_gb: Optional[float] = None
-    active_tasks: Optional[int] = None
+    available_memory_gb: float | None = None
+    active_tasks: int | None = None
 
 
 class FaultReportRequest(BaseModel):
@@ -103,7 +105,7 @@ class TaskResponse(BaseModel):
     mode: str
     model_name: str
     status: str
-    assigned_nodes: List[str]
+    assigned_nodes: list[str]
     created_at: float
     started_at: float
     completed_at: float
@@ -130,19 +132,21 @@ class NodeResponse(BaseModel):
 
 # ── Master Server ──
 
+
 class MasterServer:
     """集群 Master HTTP 服务。"""
 
-    def __init__(self, master: Optional[ClusterMaster] = None, shared_token: Optional[str] = None):
+    def __init__(self, master: ClusterMaster | None = None, shared_token: str | None = None):
         self.master = master or ClusterMaster()
         self.app = FastAPI(title="Fusion Multi-Node Master", version=_VERSION)
         self._shared_token = shared_token or load_or_create_token()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
         self._permission_manager = PermissionManager()
         self._permission_manager.assign_role("master", NodeRole.MASTER, "system")
-        self._uvicorn_server: Optional[Any] = None
+        self._uvicorn_server: Any | None = None
         try:
             from fusion_multi_node.security.node_approval import NodeApprovalManager
+
             self._approval_manager = NodeApprovalManager()
         except Exception:
             self._approval_manager = None
@@ -162,6 +166,7 @@ class MasterServer:
         @app.post("/api/join")
         async def manual_join(req: dict):
             from fusion_multi_node.discovery.manual_join import ManualJoinManager
+
             if not hasattr(self, "_join_manager"):
                 cluster_secret = getattr(self.master, "_cluster_secret", "")
                 self._join_manager = ManualJoinManager(cluster_secret=cluster_secret)
@@ -186,9 +191,8 @@ class MasterServer:
         @app.post("/api/nodes/register")
         async def register_node(req: NodeRegisterRequest):
             role = self._permission_manager.get_role(req.node_id)
-            if role is not None:
-                if not await _check_permission(req.node_id, "/api/nodes/register", "POST"):
-                    raise HTTPException(status_code=403, detail="权限不足: node register")
+            if role is not None and not await _check_permission(req.node_id, "/api/nodes/register", "POST"):
+                raise HTTPException(status_code=403, detail="权限不足: node register")
             if self._approval_manager:
                 approval = self._approval_manager.request_join(
                     node_id=req.node_id,
@@ -462,7 +466,8 @@ class MasterServer:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             total_shards = len(task.sub_tasks) if task.sub_tasks else 1
             completed_shards = sum(
-                1 for stid in task.sub_tasks
+                1
+                for stid in task.sub_tasks
                 if self.master.tasks.get(stid, None) and self.master.tasks[stid].status == TaskStatus.COMPLETED
             )
             progress = completed_shards / max(total_shards, 1)
@@ -488,21 +493,57 @@ class MasterServer:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             events = []
             if task.created_at > 0:
-                events.append({"timestamp": task.created_at, "event": "created", "detail": f"mode={task.mode.value}"})
+                events.append(
+                    {
+                        "timestamp": task.created_at,
+                        "event": "created",
+                        "detail": f"mode={task.mode.value}",
+                    }
+                )
             if task.started_at > 0:
-                events.append({"timestamp": task.started_at, "event": "started", "detail": f"nodes={task.assigned_nodes}"})
+                events.append(
+                    {
+                        "timestamp": task.started_at,
+                        "event": "started",
+                        "detail": f"nodes={task.assigned_nodes}",
+                    }
+                )
             if task.degraded_from_model:
-                events.append({"timestamp": task.started_at or task.created_at, "event": "degraded", "detail": f"{task.degraded_from_model} → {task.model_name}"})
+                events.append(
+                    {
+                        "timestamp": task.started_at or task.created_at,
+                        "event": "degraded",
+                        "detail": f"{task.degraded_from_model} → {task.model_name}",
+                    }
+                )
             for sub_id in task.sub_tasks:
                 sub = self.master.tasks.get(sub_id)
                 if sub:
                     if sub.started_at > 0:
-                        events.append({"timestamp": sub.started_at, "event": "subtask_started", "detail": f"sub_task={sub_id}"})
+                        events.append(
+                            {
+                                "timestamp": sub.started_at,
+                                "event": "subtask_started",
+                                "detail": f"sub_task={sub_id}",
+                            }
+                        )
                     if sub.completed_at > 0:
-                        events.append({"timestamp": sub.completed_at, "event": "subtask_completed", "detail": f"sub_task={sub_id}"})
+                        events.append(
+                            {
+                                "timestamp": sub.completed_at,
+                                "event": "subtask_completed",
+                                "detail": f"sub_task={sub_id}",
+                            }
+                        )
             if task.completed_at > 0:
                 event_type = "completed" if task.status == TaskStatus.COMPLETED else "failed"
-                events.append({"timestamp": task.completed_at, "event": event_type, "detail": task.error or ""})
+                events.append(
+                    {
+                        "timestamp": task.completed_at,
+                        "event": event_type,
+                        "detail": task.error or "",
+                    }
+                )
             events.sort(key=lambda e: e["timestamp"])
             return {
                 "task_id": task_id,
@@ -533,7 +574,11 @@ class MasterServer:
 
         @app.put("/api/v1/autoscaler/config")
         async def update_autoscaler_config(req: dict):
-            from fusion_multi_node.autoscaler.autoscaler import AutoscalerConfig, ScalePolicy
+            from fusion_multi_node.autoscaler.autoscaler import (
+                AutoscalerConfig,
+                ScalePolicy,
+            )
+
             autoscaler = getattr(self.master, "_autoscaler", None)
             if not autoscaler:
                 raise HTTPException(status_code=404, detail="Autoscaler 未启用")
@@ -541,7 +586,11 @@ class MasterServer:
                 try:
                     policy = ScalePolicy(req["policy"])
                     autoscaler.update_policy(policy)
-                    return {"status": "ok", "action": "policy_updated", "policy": policy.value}
+                    return {
+                        "status": "ok",
+                        "action": "policy_updated",
+                        "policy": policy.value,
+                    }
                 except ValueError:
                     raise HTTPException(status_code=400, detail=f"无效策略: {req['policy']}")
             try:
@@ -571,6 +620,7 @@ class MasterServer:
                 result = obs.export_logs(fmt=fmt, since=since, node_id=node_id)
                 if fmt == "csv":
                     from fastapi.responses import PlainTextResponse
+
                     return PlainTextResponse(content=result, media_type="text/csv")
                 return {"logs": result, "count": len(result)}
             except Exception as e:
@@ -598,21 +648,24 @@ class MasterServer:
                 raw_alerts = obs.get_active_alerts(severity=severity)
                 alerts = []
                 for a in raw_alerts:
-                    alerts.append({
-                        "alert_id": a.alert_id,
-                        "severity": a.severity,
-                        "title": a.title,
-                        "message": a.message,
-                        "node_id": a.node_id,
-                        "created_at": a.created_at,
-                        "resolved": a.resolved,
-                    })
+                    alerts.append(
+                        {
+                            "alert_id": a.alert_id,
+                            "severity": a.severity,
+                            "title": a.title,
+                            "message": a.message,
+                            "node_id": a.node_id,
+                            "created_at": a.created_at,
+                            "resolved": a.resolved,
+                        }
+                    )
                 return {"alerts": alerts, "count": len(alerts)}
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
 
     async def start(self, host: str = "127.0.0.1", port: int = 11452) -> None:
         import uvicorn
+
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)
         logger.info(f"Master 服务启动: {host}:{port}")
@@ -625,7 +678,7 @@ class MasterServer:
         logger.info("Master 服务已停止")
 
 
-def _node_to_resp(n: NodeInfo) -> Dict[str, Any]:
+def _node_to_resp(n: NodeInfo) -> dict[str, Any]:
     return {
         "node_id": n.node_id,
         "hostname": n.hostname,
@@ -646,7 +699,7 @@ def _node_to_resp(n: NodeInfo) -> Dict[str, Any]:
     }
 
 
-def _task_to_resp(t: ClusterTask) -> Dict[str, Any]:
+def _task_to_resp(t: ClusterTask) -> dict[str, Any]:
     return {
         "task_id": t.task_id,
         "name": t.name,

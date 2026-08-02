@@ -13,11 +13,12 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 from .circuit_breaker import CircuitBreaker
-from .fmp_message import FMPMessage, FMPCrypto, PayloadType, ControlType
+from .fmp_message import ControlType, FMPCrypto, FMPMessage, PayloadType
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ DEFAULT_HEARTBEAT_INTERVAL = 10.0
 DEFAULT_READ_TIMEOUT = 30.0
 HEARTBEAT_PAYLOAD = {"type": "heartbeat", "ts": 0}
 
-_tls_manager: Optional[Any] = None
+_tls_manager: Any | None = None
 
 
 def _get_shared_tls_manager():
@@ -35,6 +36,7 @@ def _get_shared_tls_manager():
     if _tls_manager is None:
         try:
             from fusion_multi_node.protocol import TLSCertManager
+
             _tls_manager = TLSCertManager()
         except Exception:
             pass
@@ -44,6 +46,7 @@ def _get_shared_tls_manager():
 @dataclass
 class ConnectionInfo:
     """连接信息。"""
+
     node_id: str
     host: str
     port: int
@@ -66,23 +69,23 @@ class FMPConnection:
         node_id: str,
         host: str,
         port: int,
-        crypto: Optional[FMPCrypto] = None,
-        on_message: Optional[Callable[[FMPMessage], None]] = None,
+        crypto: FMPCrypto | None = None,
+        on_message: Callable[[FMPMessage], None] | None = None,
         use_tls: bool = False,
     ):
         self.info = ConnectionInfo(node_id=node_id, host=host, port=port)
         self._crypto = crypto
         self._on_message = on_message
         self._use_tls = use_tls
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
         self._running = False
         self._reconnect_interval = DEFAULT_RECONNECT_INTERVAL
         self._circuit_breaker = CircuitBreaker(name=f"conn-{node_id}")
         self._send_lock = asyncio.Lock()
-        self._read_task: Optional[asyncio.Task] = None
-        self._reconnect_task: Optional[asyncio.Task] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._read_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_interval = DEFAULT_HEARTBEAT_INTERVAL
 
     @property
@@ -98,7 +101,9 @@ class FMPConnection:
                 if tls_mgr:
                     ssl_ctx = tls_mgr.get_client_ssl_context()
             self._reader, self._writer = await asyncio.open_connection(
-                self.info.host, self.info.port, ssl=ssl_ctx,
+                self.info.host,
+                self.info.port,
+                ssl=ssl_ctx,
             )
             self.info.is_alive = True
             self.info.connected_at = time.time()
@@ -122,7 +127,7 @@ class FMPConnection:
         for i in range(max_retries):
             if await self.connect():
                 return True
-            logger.info(f"FMP 重连 {i+1}/{max_retries}: {self.info.host}:{self.info.port}")
+            logger.info(f"FMP 重连 {i + 1}/{max_retries}: {self.info.host}:{self.info.port}")
             await asyncio.sleep(self._reconnect_interval)
         return False
 
@@ -179,7 +184,8 @@ class FMPConnection:
         while self._running and self._reader:
             try:
                 len_bytes = await asyncio.wait_for(
-                    self._reader.readexactly(4), timeout=DEFAULT_READ_TIMEOUT,
+                    self._reader.readexactly(4),
+                    timeout=DEFAULT_READ_TIMEOUT,
                 )
                 msg_len = int.from_bytes(len_bytes, "big")
                 if msg_len <= 0 or msg_len > 16 * 1024 * 1024:
@@ -187,7 +193,8 @@ class FMPConnection:
                     break
 
                 data = await asyncio.wait_for(
-                    self._reader.readexactly(msg_len), timeout=DEFAULT_READ_TIMEOUT,
+                    self._reader.readexactly(msg_len),
+                    timeout=DEFAULT_READ_TIMEOUT,
                 )
                 msg = FMPMessage.deserialize(data)
 
@@ -199,11 +206,12 @@ class FMPConnection:
                 if self._on_message:
                     import asyncio as _aio
                     import inspect
+
                     result = self._on_message(msg)
                     if inspect.iscoroutine(result):
                         _aio.create_task(result)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.IncompleteReadError:
                 logger.warning(f"FMP 连接断开: {self.info.node_id}")
@@ -248,6 +256,7 @@ class FMPConnection:
         while self._running and self.is_connected:
             try:
                 import copy
+
                 payload = copy.deepcopy(HEARTBEAT_PAYLOAD)
                 payload["ts"] = time.time()
                 msg = FMPMessage.create(
@@ -269,13 +278,13 @@ class FMPConnectionManager:
     def __init__(
         self,
         local_node_id: str = "",
-        crypto: Optional[FMPCrypto] = None,
-        on_message: Optional[Callable[[FMPMessage], None]] = None,
+        crypto: FMPCrypto | None = None,
+        on_message: Callable[[FMPMessage], None] | None = None,
     ):
         self.local_node_id = local_node_id or f"node_{uuid.uuid4().hex[:8]}"
         self._crypto = crypto
         self._on_message = on_message
-        self._connections: Dict[str, FMPConnection] = {}
+        self._connections: dict[str, FMPConnection] = {}
         self._lock = asyncio.Lock()
 
     async def add_connection(self, node_id: str, host: str, port: int) -> FMPConnection:
@@ -305,10 +314,10 @@ class FMPConnectionManager:
         if conn:
             await conn.disconnect()
 
-    def get_connection(self, node_id: str) -> Optional[FMPConnection]:
+    def get_connection(self, node_id: str) -> FMPConnection | None:
         return self._connections.get(node_id)
 
-    async def safe_get_connection(self, node_id: str) -> Optional[FMPConnection]:
+    async def safe_get_connection(self, node_id: str) -> FMPConnection | None:
         async with self._lock:
             return self._connections.get(node_id)
 
@@ -321,7 +330,7 @@ class FMPConnectionManager:
             return False
         return await conn.send(msg)
 
-    async def broadcast(self, msg: FMPMessage) -> Dict[str, bool]:
+    async def broadcast(self, msg: FMPMessage) -> dict[str, bool]:
         """广播消息到所有连接。"""
         async with self._lock:
             targets = {nid: conn for nid, conn in self._connections.items() if conn.is_connected}
@@ -338,7 +347,7 @@ class FMPConnectionManager:
         for conn in conns:
             await conn.disconnect()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return {
             "local_node_id": self.local_node_id,
             "connections": {
@@ -363,8 +372,8 @@ class FMPInterface:
     def __init__(
         self,
         node_id: str = "",
-        crypto: Optional[FMPCrypto] = None,
-        on_message: Optional[Callable[[FMPMessage], None]] = None,
+        crypto: FMPCrypto | None = None,
+        on_message: Callable[[FMPMessage], None] | None = None,
     ):
         self._conn_mgr = FMPConnectionManager(
             local_node_id=node_id,
@@ -390,7 +399,7 @@ class FMPInterface:
         )
         return await self._conn_mgr.send_to(target_id, msg)
 
-    async def send_task_assign(self, target_id: str, task_data: Dict[str, Any]) -> bool:
+    async def send_task_assign(self, target_id: str, task_data: dict[str, Any]) -> bool:
         msg = FMPMessage.create(
             source_id=self._conn_mgr.local_node_id,
             target_id=target_id,
@@ -399,7 +408,7 @@ class FMPInterface:
         )
         return await self._conn_mgr.send_to(target_id, msg)
 
-    async def send_task_result(self, target_id: str, result: Dict[str, Any]) -> bool:
+    async def send_task_result(self, target_id: str, result: dict[str, Any]) -> bool:
         msg = FMPMessage.create(
             source_id=self._conn_mgr.local_node_id,
             target_id=target_id,
@@ -408,7 +417,7 @@ class FMPInterface:
         )
         return await self._conn_mgr.send_to(target_id, msg)
 
-    async def broadcast(self, payload_type: PayloadType, payload: Any) -> Dict[str, bool]:
+    async def broadcast(self, payload_type: PayloadType, payload: Any) -> dict[str, bool]:
         msg = FMPMessage.create(
             source_id=self._conn_mgr.local_node_id,
             target_id="*",
@@ -420,5 +429,5 @@ class FMPInterface:
     async def close(self) -> None:
         await self._conn_mgr.close_all()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return self._conn_mgr.get_stats()

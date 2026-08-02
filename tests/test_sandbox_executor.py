@@ -1,9 +1,10 @@
 """SandboxExecutor + MetalCryptoBackend 单元测试。"""
-import asyncio
+
 import os
-import sys
+
 import pytest
-from fusion_multi_node.security.sandbox import SandboxExecutor, SandboxConfig
+
+from fusion_multi_node.security.sandbox import SandboxConfig, SandboxExecutor
 
 
 @pytest.fixture
@@ -72,11 +73,13 @@ async def test_execute_in_sandbox_not_found(executor):
 class TestMetalCryptoBackend:
     def test_detect(self):
         from fusion_multi_node.security.crypto import MetalCryptoBackend
+
         backend = MetalCryptoBackend()
         assert isinstance(backend.available, bool)
 
     def test_fallback_encrypt_decrypt(self):
         from fusion_multi_node.security.crypto import MetalCryptoBackend
+
         backend = MetalCryptoBackend()
         key = os.urandom(32)
         plaintext = b"hello metal aes-gcm"
@@ -86,6 +89,7 @@ class TestMetalCryptoBackend:
 
     def test_fallback_encrypt_decrypt_with_aad(self):
         from fusion_multi_node.security.crypto import MetalCryptoBackend
+
         backend = MetalCryptoBackend()
         key = os.urandom(32)
         plaintext = b"authenticated data"
@@ -96,6 +100,7 @@ class TestMetalCryptoBackend:
 
     def test_encrypt_decrypt_via_api(self):
         from fusion_multi_node.security.crypto import MetalCryptoBackend
+
         backend = MetalCryptoBackend()
         key = os.urandom(32)
         plaintext = b"test via public api"

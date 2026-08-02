@@ -1,5 +1,5 @@
-from fusion_multi_node.security.secure_transfer import SecureTransferPipeline
 from fusion_multi_node.security.data_scrubber import DataScrubber, ScrubRule
+from fusion_multi_node.security.secure_transfer import SecureTransferPipeline
 
 
 def test_ast_diff_scrubbed_end_to_end():
@@ -63,7 +63,12 @@ def test_ast_diff_with_pii_data():
         "type": "module",
         "children": [
             {"id": "user", "type": "string", "value": "13800138000", "children": []},
-            {"id": "email", "type": "string", "value": "test@example.com", "children": []},
+            {
+                "id": "email",
+                "type": "string",
+                "value": "test@example.com",
+                "children": [],
+            },
         ],
     }
     transfer = pipeline.prepare_transfer(old_ast, new_ast)
@@ -127,10 +132,7 @@ def test_transfer_stats_reduction_ratio():
     new_ast = {
         "id": "root",
         "type": "module",
-        "children": [
-            {"id": f"n{i}", "type": "var", "value": f"val_{i}", "children": []}
-            for i in range(20)
-        ],
+        "children": [{"id": f"n{i}", "type": "var", "value": f"val_{i}", "children": []} for i in range(20)],
     }
     transfer = pipeline.prepare_transfer(old_ast, new_ast)
     stats = transfer["stats"]

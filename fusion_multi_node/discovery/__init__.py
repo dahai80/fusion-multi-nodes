@@ -1,12 +1,12 @@
-from .mdns_discovery import MDNSDiscovery, DiscoveryInfo, SERVICE_TYPE
-from .manual_join import ManualJoinClient, ManualJoinManager, JoinRequest, JoinResponse
+from .manual_join import JoinRequest, JoinResponse, ManualJoinClient, ManualJoinManager
+from .mdns_discovery import SERVICE_TYPE, DiscoveryInfo, MDNSDiscovery
 
 __all__ = [
-    "MDNSDiscovery",
-    "DiscoveryInfo",
     "SERVICE_TYPE",
-    "ManualJoinClient",
-    "ManualJoinManager",
+    "DiscoveryInfo",
     "JoinRequest",
     "JoinResponse",
+    "MDNSDiscovery",
+    "ManualJoinClient",
+    "ManualJoinManager",
 ]

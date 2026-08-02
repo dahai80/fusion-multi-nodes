@@ -11,7 +11,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,10 @@ class TaskShard:
     sharding_type: ShardingType
     shard_index: int
     total_shards: int
-    payload: Dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     assigned_node_id: str = ""
     status: str = "pending"
-    result: Dict[str, Any] = field(default_factory=dict)
+    result: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0.0
     completed_at: float = 0.0
     error: str = ""
@@ -65,7 +65,7 @@ class ShardResult:
 
     shard_id: str
     success: bool
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
     error: str = ""
     duration_ms: float = 0.0
 
@@ -79,8 +79,8 @@ class MergedResult:
     total_shards: int
     success_count: int
     fail_count: int
-    data: Dict[str, Any] = field(default_factory=dict)
-    errors: List[str] = field(default_factory=list)
+    data: dict[str, Any] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
     merged_at: float = 0.0
 
     def __post_init__(self):
@@ -104,13 +104,13 @@ class TaskSharder:
     支持三种分片类型和三种分片策略，自动根据任务特征选择分片方式。
     """
 
-    DEFAULT_STRATEGIES: Dict[ShardingType, ShardingStrategy] = {
+    DEFAULT_STRATEGIES: dict[ShardingType, ShardingStrategy] = {
         ShardingType.INFERENCE: ShardingStrategy.BY_BATCH,
         ShardingType.AST: ShardingStrategy.BY_FILE,
         ShardingType.VECTORIZE: ShardingStrategy.BY_DOCUMENT,
     }
 
-    DEFAULT_SHARD_SIZES: Dict[ShardingType, int] = {
+    DEFAULT_SHARD_SIZES: dict[ShardingType, int] = {
         ShardingType.INFERENCE: 8,
         ShardingType.AST: 1,
         ShardingType.VECTORIZE: 10,
@@ -123,17 +123,17 @@ class TaskSharder:
     ):
         self.default_shard_size = default_shard_size
         self.max_shards = max_shards
-        self._shards: Dict[str, List[TaskShard]] = {}
+        self._shards: dict[str, list[TaskShard]] = {}
         logger.info(f"TaskSharder 初始化: shard_size={default_shard_size}, max={max_shards}")
 
     def create_shards(
         self,
         task_id: str,
         sharding_type: ShardingType,
-        items: List[Dict[str, Any]],
-        strategy: Optional[ShardingStrategy] = None,
-        shard_size: Optional[int] = None,
-    ) -> List[TaskShard]:
+        items: list[dict[str, Any]],
+        strategy: ShardingStrategy | None = None,
+        shard_size: int | None = None,
+    ) -> list[TaskShard]:
         """根据策略创建分片。"""
         if not items:
             logger.warning(f"分片输入为空: {task_id}")
@@ -147,8 +147,8 @@ class TaskSharder:
 
         if total > self.max_shards:
             logger.warning(f"分片数 {total} 超过上限 {self.max_shards}，合并尾部分片")
-            tail_items = [item for g in groups[self.max_shards - 1:] for item in g]
-            groups = groups[:self.max_shards - 1] + [tail_items]
+            tail_items = [item for g in groups[self.max_shards - 1 :] for item in g]
+            groups = groups[: self.max_shards - 1] + [tail_items]
             total = len(groups)
 
         shards = []
@@ -170,10 +170,10 @@ class TaskSharder:
 
     def _group_items(
         self,
-        items: List[Dict[str, Any]],
+        items: list[dict[str, Any]],
         strategy: ShardingStrategy,
         shard_size: int,
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> list[list[dict[str, Any]]]:
         """按策略分组。"""
         if strategy == ShardingStrategy.BY_FILE:
             return self._group_by_key(items, "file_path", shard_size)
@@ -184,18 +184,18 @@ class TaskSharder:
 
     def _group_by_key(
         self,
-        items: List[Dict[str, Any]],
+        items: list[dict[str, Any]],
         key: str,
         shard_size: int,
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> list[list[dict[str, Any]]]:
         """按键值分组。"""
-        key_groups: Dict[str, List[Dict[str, Any]]] = {}
+        key_groups: dict[str, list[dict[str, Any]]] = {}
         for item in items:
             k = item.get(key, "__default__")
             key_groups.setdefault(k, []).append(item)
 
         result = []
-        batch: List[Dict[str, Any]] = []
+        batch: list[dict[str, Any]] = []
         for group_items in key_groups.values():
             for item in group_items:
                 batch.append(item)
@@ -208,26 +208,26 @@ class TaskSharder:
 
     def _group_by_batch(
         self,
-        items: List[Dict[str, Any]],
+        items: list[dict[str, Any]],
         shard_size: int,
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> list[list[dict[str, Any]]]:
         """按固定大小分批。"""
         result = []
         for i in range(0, len(items), shard_size):
-            result.append(items[i:i + shard_size])
+            result.append(items[i : i + shard_size])
         return result
 
-    def get_shards(self, task_id: str) -> List[TaskShard]:
+    def get_shards(self, task_id: str) -> list[TaskShard]:
         return self._shards.get(task_id, [])
 
-    def get_shard(self, shard_id: str) -> Optional[TaskShard]:
+    def get_shard(self, shard_id: str) -> TaskShard | None:
         for shards in self._shards.values():
             for s in shards:
                 if s.shard_id == shard_id:
                     return s
         return None
 
-    def update_shard_status(self, shard_id: str, status: str, result: Optional[Dict[str, Any]] = None) -> bool:
+    def update_shard_status(self, shard_id: str, status: str, result: dict[str, Any] | None = None) -> bool:
         """更新分片状态。"""
         shard = self.get_shard(shard_id)
         if not shard:
@@ -244,13 +244,13 @@ class TaskSharder:
 class ShardMerger:
     """分片结果合并器。"""
 
-    MERGE_STRATEGIES: Dict[ShardingType, str] = {
+    MERGE_STRATEGIES: dict[ShardingType, str] = {
         ShardingType.INFERENCE: "concat_results",
         ShardingType.AST: "merge_trees",
         ShardingType.VECTORIZE: "merge_embeddings",
     }
 
-    def merge(self, task_id: str, shards: List[TaskShard]) -> MergedResult:
+    def merge(self, task_id: str, shards: list[TaskShard]) -> MergedResult:
         """合并分片结果。"""
         if not shards:
             return MergedResult(
@@ -264,8 +264,8 @@ class ShardMerger:
         sharding_type = shards[0].sharding_type
         success_count = 0
         fail_count = 0
-        errors: List[str] = []
-        all_data: List[Dict[str, Any]] = []
+        errors: list[str] = []
+        all_data: list[dict[str, Any]] = []
 
         for shard in shards:
             if shard.status == "completed":
@@ -289,12 +289,11 @@ class ShardMerger:
             errors=errors,
         )
         logger.info(
-            f"分片合并: {task_id} ({sharding_type.value}) "
-            f"成功={success_count}/{len(shards)}, 策略={merge_strategy}"
+            f"分片合并: {task_id} ({sharding_type.value}) 成功={success_count}/{len(shards)}, 策略={merge_strategy}"
         )
         return result
 
-    def _apply_merge(self, all_data: List[Dict[str, Any]], strategy: str) -> Dict[str, Any]:
+    def _apply_merge(self, all_data: list[dict[str, Any]], strategy: str) -> dict[str, Any]:
         """应用合并策略。"""
         if strategy == "merge_trees":
             return self._merge_ast_trees(all_data)
@@ -303,7 +302,7 @@ class ShardMerger:
         else:
             return self._concat_results(all_data)
 
-    def _concat_results(self, all_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _concat_results(self, all_data: list[dict[str, Any]]) -> dict[str, Any]:
         """推理结果拼接。"""
         results = []
         for d in all_data:
@@ -315,7 +314,7 @@ class ShardMerger:
                 results.append(d)
         return {"results": results, "count": len(results)}
 
-    def _merge_ast_trees(self, all_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _merge_ast_trees(self, all_data: list[dict[str, Any]]) -> dict[str, Any]:
         """AST 树合并。"""
         trees = []
         for d in all_data:
@@ -327,7 +326,7 @@ class ShardMerger:
                 trees.append(d["ast"])
         return {"trees": trees, "file_count": len(trees)}
 
-    def _merge_embeddings(self, all_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _merge_embeddings(self, all_data: list[dict[str, Any]]) -> dict[str, Any]:
         """向量化结果合并。"""
         embeddings = []
         total_tokens = 0
@@ -335,4 +334,8 @@ class ShardMerger:
             if "embeddings" in d:
                 embeddings.extend(d["embeddings"])
             total_tokens += d.get("token_count", 0)
-        return {"embeddings": embeddings, "count": len(embeddings), "total_tokens": total_tokens}
+        return {
+            "embeddings": embeddings,
+            "count": len(embeddings),
+            "total_tokens": total_tokens,
+        }

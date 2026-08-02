@@ -10,9 +10,10 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any
 
-from .fmp_message import FMPMessage, FMPCrypto, PayloadType, ControlType
+from .fmp_message import FMPCrypto, FMPMessage, PayloadType
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +29,20 @@ class FMPServer:
         node_id: str = "",
         host: str = "127.0.0.1",
         port: int = DEFAULT_FMP_PORT,
-        crypto: Optional[FMPCrypto] = None,
+        crypto: FMPCrypto | None = None,
     ):
         self.node_id = node_id or f"server_{uuid.uuid4().hex[:8]}"
         self.host = host
         self.port = port
         self._crypto = crypto
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server: asyncio.AbstractServer | None = None
         self._running = False
-        self._handlers: Dict[PayloadType, Callable[[FMPMessage], Any]] = {}
-        self._default_handler: Optional[Callable[[FMPMessage], Any]] = None
-        self._peers: Dict[str, _InboundPeer] = {}
+        self._handlers: dict[PayloadType, Callable[[FMPMessage], Any]] = {}
+        self._default_handler: Callable[[FMPMessage], Any] | None = None
+        self._peers: dict[str, _InboundPeer] = {}
         self._lock = asyncio.Lock()
         self._msg_counter = 0
-        self._fmp_sender: Optional[Callable] = None
+        self._fmp_sender: Callable | None = None
 
     def register_handler(
         self,
@@ -138,13 +139,14 @@ class FMPServer:
         try:
             import asyncio as _aio
             import inspect
+
             result = handler(msg)
             if inspect.iscoroutine(result):
                 _aio.create_task(result)
         except Exception as e:
             logger.error(f"handler 异常: {ptype.value} - {e}")
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
             "host": self.host,
@@ -162,6 +164,7 @@ class FMPServer:
             try:
                 import base64
                 import hashlib
+
                 payload = msg.business.payload_as_json()
                 shard_id = payload["shard_id"]
                 volume_name = payload.get("volume_name", "models")
@@ -197,6 +200,7 @@ class FMPServer:
         def _on_data_sync(msg: FMPMessage) -> None:
             try:
                 from ..security.secure_transfer import SecureTransferPipeline
+
                 payload = msg.business.payload_as_json()
                 pipeline = SecureTransferPipeline()
                 transfer_type = payload.get("type", "")
@@ -285,8 +289,8 @@ class _InboundPeer:
         peer_id: str,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-        crypto: Optional[FMPCrypto] = None,
-        on_message: Optional[Callable[[FMPMessage], Any]] = None,
+        crypto: FMPCrypto | None = None,
+        on_message: Callable[[FMPMessage], Any] | None = None,
     ):
         self.peer_id = peer_id
         self._reader = reader
@@ -306,7 +310,8 @@ class _InboundPeer:
         while self._alive:
             try:
                 len_bytes = await asyncio.wait_for(
-                    self._reader.readexactly(4), timeout=30.0,
+                    self._reader.readexactly(4),
+                    timeout=30.0,
                 )
                 msg_len = int.from_bytes(len_bytes, "big")
                 if msg_len <= 0 or msg_len > 16 * 1024 * 1024:
@@ -314,7 +319,8 @@ class _InboundPeer:
                     break
 
                 data = await asyncio.wait_for(
-                    self._reader.readexactly(msg_len), timeout=30.0,
+                    self._reader.readexactly(msg_len),
+                    timeout=30.0,
                 )
                 msg = FMPMessage.deserialize(data)
 
@@ -326,7 +332,7 @@ class _InboundPeer:
                 if self._on_message:
                     self._on_message(msg)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.IncompleteReadError:
                 break

@@ -62,7 +62,14 @@ def sanitize_node_url_part(node_id: str) -> str:
 class BearerAuthMiddleware:
     """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。"""
 
-    EXEMPT_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc", "/", "/favicon.ico"}
+    EXEMPT_PATHS = {
+        "/api/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/",
+        "/favicon.ico",
+    }
 
     def __init__(self, app, shared_token: str):
         self.app = app
@@ -88,6 +95,7 @@ class BearerAuthMiddleware:
         if not auth_header.startswith(b"Bearer "):
             logger.warning(f"认证失败: 缺少 Bearer token ({path})")
             from starlette.responses import JSONResponse
+
             response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
             await response(scope, receive, send)
             return
@@ -96,6 +104,7 @@ class BearerAuthMiddleware:
         if not secrets.compare_digest(token, self._expected):
             logger.warning(f"认证失败: token 不匹配 ({path})")
             from starlette.responses import JSONResponse
+
             response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
             await response(scope, receive, send)
             return

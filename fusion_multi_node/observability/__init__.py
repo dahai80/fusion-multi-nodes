@@ -1,16 +1,16 @@
 """Observability module exports."""
 
-from .observability import ClusterObservability, MetricPoint, Alert, LogEntry, LogLevel
-from .log_store import LogStore, StoredLog, FaultDiagnoser, DiagnosisResult
+from .log_store import DiagnosisResult, FaultDiagnoser, LogStore, StoredLog
+from .observability import Alert, ClusterObservability, LogEntry, LogLevel, MetricPoint
 
 __all__ = [
-    "ClusterObservability",
-    "MetricPoint",
     "Alert",
+    "ClusterObservability",
+    "DiagnosisResult",
+    "FaultDiagnoser",
     "LogEntry",
     "LogLevel",
     "LogStore",
+    "MetricPoint",
     "StoredLog",
-    "FaultDiagnoser",
-    "DiagnosisResult",
 ]

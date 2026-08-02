@@ -7,7 +7,6 @@
 import os
 import tempfile
 
-
 from fusion_multi_node.config.config import ClusterConfig
 
 

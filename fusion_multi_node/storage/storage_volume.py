@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class VolumeType(Enum):
 @dataclass
 class VolumeSpec:
     """卷规格。"""
+
     name: str
     volume_type: VolumeType = VolumeType.LOCAL
     path: str = ""
@@ -37,12 +38,13 @@ class VolumeSpec:
     replication_factor: int = 1
     encrypted: bool = False
     compress: bool = False
-    labels: Dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class VolumeInfo:
     """卷运行时信息。"""
+
     name: str
     spec: VolumeSpec
     used_bytes: int = 0
@@ -55,6 +57,7 @@ class VolumeInfo:
 @dataclass
 class FileEntry:
     """文件条目，用于 LRU 追踪。"""
+
     path: str
     volume_name: str
     size_bytes: int
@@ -65,6 +68,7 @@ class FileEntry:
 @dataclass
 class CapacityReport:
     """容量报告。"""
+
     volume_name: str
     total_mb: float
     used_mb: float
@@ -90,9 +94,9 @@ class StorageVolume:
 
     def __init__(self, base_dir: str = ""):
         self._base_dir = base_dir or str(Path.home() / ".fusion" / "volumes")
-        self._volumes: Dict[str, VolumeInfo] = {}
-        self._file_entries: Dict[str, Dict[str, FileEntry]] = {}
-        self._shard_distributions: Dict[str, List[Dict[str, Any]]] = {}
+        self._volumes: dict[str, VolumeInfo] = {}
+        self._file_entries: dict[str, dict[str, FileEntry]] = {}
+        self._shard_distributions: dict[str, list[dict[str, Any]]] = {}
 
     def create_volume(self, spec: VolumeSpec) -> bool:
         vol_path = self._resolve_path(spec.name, spec)
@@ -162,7 +166,7 @@ class StorageVolume:
             logger.error(f"写入文件失败: {volume_name}/{file_path}: {e}")
             return False
 
-    def read_file(self, volume_name: str, file_path: str) -> Optional[bytes]:
+    def read_file(self, volume_name: str, file_path: str) -> bytes | None:
         info = self._volumes.get(volume_name)
         if not info:
             return None
@@ -198,7 +202,7 @@ class StorageVolume:
             logger.error(f"删除文件失败: {volume_name}/{file_path}: {e}")
             return False
 
-    def list_files(self, volume_name: str, prefix: str = "") -> List[str]:
+    def list_files(self, volume_name: str, prefix: str = "") -> list[str]:
         info = self._volumes.get(volume_name)
         if not info:
             return []
@@ -213,20 +217,20 @@ class StorageVolume:
                     results.append(str(f.relative_to(vol_path)))
         return results
 
-    def get_volume_info(self, name: str) -> Optional[VolumeInfo]:
+    def get_volume_info(self, name: str) -> VolumeInfo | None:
         return self._volumes.get(name)
 
-    def list_volumes(self) -> List[VolumeInfo]:
+    def list_volumes(self) -> list[VolumeInfo]:
         return list(self._volumes.values())
 
     # ── M9-03 容量监控 ──
 
-    def get_capacity_report(self, volume_name: str) -> Optional[CapacityReport]:
+    def get_capacity_report(self, volume_name: str) -> CapacityReport | None:
         """获取卷容量报告。"""
         info = self._volumes.get(volume_name)
         if not info:
             return None
-        total_mb = info.spec.size_limit_mb if info.spec.size_limit_mb > 0 else 0
+        total_mb = max(0, info.spec.size_limit_mb)
         used_mb = info.used_bytes / (1024 * 1024)
         if total_mb > 0:
             available_mb = max(0, total_mb - used_mb)
@@ -246,7 +250,7 @@ class StorageVolume:
             needs_eviction=needs_eviction,
         )
 
-    def check_all_capacities(self) -> List[CapacityReport]:
+    def check_all_capacities(self) -> list[CapacityReport]:
         """检查所有卷容量。"""
         reports = []
         for name in self._volumes:
@@ -294,18 +298,20 @@ class StorageVolume:
         ok = self.write_file(target_volume, shard_path, shard_data)
         if ok:
             dist = self._shard_distributions.setdefault(shard_id, [])
-            dist.append({
-                "shard_id": shard_id,
-                "volume_name": target_volume,
-                "shard_path": shard_path,
-                "node_id": node_id,
-                "size_bytes": len(shard_data),
-                "distributed_at": time.time(),
-            })
+            dist.append(
+                {
+                    "shard_id": shard_id,
+                    "volume_name": target_volume,
+                    "shard_path": shard_path,
+                    "node_id": node_id,
+                    "size_bytes": len(shard_data),
+                    "distributed_at": time.time(),
+                }
+            )
             logger.info(f"分片分发: {shard_id} → {node_id}:{target_volume}/{shard_path}")
         return ok
 
-    def get_shard_distribution(self, shard_id: str) -> List[Dict[str, Any]]:
+    def get_shard_distribution(self, shard_id: str) -> list[dict[str, Any]]:
         """获取分片分发记录。"""
         return self._shard_distributions.get(shard_id, [])
 

@@ -2,4 +2,4 @@
 
 from .node_agent import AgentConfig, FusionMLXBackend, InferenceBackend, NodeAgent
 
-__all__ = ["NodeAgent", "AgentConfig", "InferenceBackend", "FusionMLXBackend"]
+__all__ = ["AgentConfig", "FusionMLXBackend", "InferenceBackend", "NodeAgent"]

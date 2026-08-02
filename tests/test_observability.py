@@ -24,7 +24,13 @@ class TestMetricPoint:
         assert mp.tags == {}
 
     def test_with_tags(self):
-        mp = MetricPoint(timestamp=100.0, node_id="n1", metric_name="mem", value=0.5, tags={"role": "worker"})
+        mp = MetricPoint(
+            timestamp=100.0,
+            node_id="n1",
+            metric_name="mem",
+            value=0.5,
+            tags={"role": "worker"},
+        )
         assert mp.tags["role"] == "worker"
 
 
@@ -36,18 +42,37 @@ class TestAlert:
         assert a.resolved is False
 
     def test_with_node(self):
-        a = Alert(alert_id="a2", severity="critical", title="offline", message="node down", node_id="n1")
+        a = Alert(
+            alert_id="a2",
+            severity="critical",
+            title="offline",
+            message="node down",
+            node_id="n1",
+        )
         assert a.node_id == "n1"
 
 
 class TestLogEntry:
     def test_basic(self):
-        entry = LogEntry(timestamp=100.0, node_id="n1", level="INFO", module="master", message="started")
+        entry = LogEntry(
+            timestamp=100.0,
+            node_id="n1",
+            level="INFO",
+            module="master",
+            message="started",
+        )
         assert entry.level == "INFO"
         assert entry.module == "master"
 
     def test_with_task(self):
-        entry = LogEntry(timestamp=100.0, node_id="n1", level="ERROR", module="agent", message="fail", task_id="t1")
+        entry = LogEntry(
+            timestamp=100.0,
+            node_id="n1",
+            level="ERROR",
+            module="agent",
+            message="fail",
+            task_id="t1",
+        )
         assert entry.task_id == "t1"
 
 
@@ -101,6 +126,7 @@ class TestClusterObservabilityMetrics:
         obs = ClusterObservability()
         obs.record_metric("n1", "cpu", 0.5)
         import time
+
         time.sleep(0.01)
         obs.record_metric("n1", "cpu", 0.7)
         mid_ts = obs.metrics[0].timestamp + 0.005
@@ -134,18 +160,42 @@ class TestClusterObservabilityMetrics:
 class TestClusterObservabilityLogs:
     def test_add_log(self):
         obs = ClusterObservability()
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="master", message="started"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="master",
+                message="started",
+            )
+        )
         assert len(obs.logs) == 1
 
     def test_add_log_error_creates_alert(self):
         obs = ClusterObservability()
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="agent", message="fail"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="ERROR",
+                module="agent",
+                message="fail",
+            )
+        )
         assert len(obs.alerts) == 1
         assert obs.alerts[0].severity == "warning"
 
     def test_add_log_critical_creates_alert(self):
         obs = ClusterObservability()
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="CRITICAL", module="agent", message="fatal"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="CRITICAL",
+                module="agent",
+                message="fatal",
+            )
+        )
         assert len(obs.alerts) == 1
         assert obs.alerts[0].severity == "critical"
 
@@ -153,40 +203,120 @@ class TestClusterObservabilityLogs:
         obs = ClusterObservability()
         obs.logs = collections.deque(maxlen=3)
         for i in range(5):
-            obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m", message=f"msg{i}"))
+            obs.add_log(
+                LogEntry(
+                    timestamp=time.time(),
+                    node_id="n1",
+                    level="INFO",
+                    module="m",
+                    message=f"msg{i}",
+                )
+            )
         assert len(obs.logs) == 3
 
     def test_get_logs(self):
         obs = ClusterObservability()
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="a"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="m2", message="b"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="INFO", module="m3", message="c"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="m1",
+                message="a",
+            )
+        )
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="ERROR",
+                module="m2",
+                message="b",
+            )
+        )
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n2",
+                level="INFO",
+                module="m3",
+                message="c",
+            )
+        )
         assert len(obs.get_logs()) == 3
 
     def test_get_logs_by_level(self):
         obs = ClusterObservability()
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="a"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="m2", message="b"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="m1",
+                message="a",
+            )
+        )
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="ERROR",
+                module="m2",
+                message="b",
+            )
+        )
         errors = obs.get_logs(level="ERROR")
         assert len(errors) == 1
 
     def test_get_logs_by_node(self):
         obs = ClusterObservability()
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="a"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="INFO", module="m2", message="b"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="m1",
+                message="a",
+            )
+        )
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n2",
+                level="INFO",
+                module="m2",
+                message="b",
+            )
+        )
         assert len(obs.get_logs(node_id="n1")) == 1
 
     def test_get_logs_since(self):
         obs = ClusterObservability()
         obs.add_log(LogEntry(timestamp=100.0, node_id="n1", level="INFO", module="m1", message="old"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m2", message="new"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="m2",
+                message="new",
+            )
+        )
         recent = obs.get_logs(since=200.0)
         assert len(recent) == 1
 
     def test_get_logs_limit(self):
         obs = ClusterObservability()
         for i in range(20):
-            obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m", message=f"msg{i}"))
+            obs.add_log(
+                LogEntry(
+                    timestamp=time.time(),
+                    node_id="n1",
+                    level="INFO",
+                    module="m",
+                    message=f"msg{i}",
+                )
+            )
         result = obs.get_logs(limit=5)
         assert len(result) == 5
 
@@ -207,8 +337,10 @@ class TestClusterObservabilityAlerts:
 
     def test_create_alert_handler_exception(self):
         obs = ClusterObservability()
+
         def bad_handler(a):
             raise RuntimeError("handler failed")
+
         obs.on_alert(bad_handler)
         alert = obs.create_alert(severity="warning", title="test", message="test")
         assert alert is not None
@@ -251,7 +383,13 @@ class TestClusterObservabilityAlertRules:
     @pytest.mark.asyncio
     async def test_check_alert_rules_low_memory(self):
         obs = ClusterObservability()
-        nodes = {"n1": {"status": "online", "available_memory_gb": 1.0, "total_memory_gb": 100.0}}
+        nodes = {
+            "n1": {
+                "status": "online",
+                "available_memory_gb": 1.0,
+                "total_memory_gb": 100.0,
+            }
+        }
         alerts = await obs.check_alert_rules(nodes)
         assert len(alerts) >= 1
         assert any("内存" in a.title for a in alerts)
@@ -259,7 +397,13 @@ class TestClusterObservabilityAlertRules:
     @pytest.mark.asyncio
     async def test_check_alert_rules_healthy(self):
         obs = ClusterObservability()
-        nodes = {"n1": {"status": "online", "available_memory_gb": 50.0, "total_memory_gb": 64.0}}
+        nodes = {
+            "n1": {
+                "status": "online",
+                "available_memory_gb": 50.0,
+                "total_memory_gb": 64.0,
+            }
+        }
         alerts = await obs.check_alert_rules(nodes)
         assert len(alerts) == 0
 
@@ -276,7 +420,15 @@ class TestClusterObservabilityReport:
         obs = ClusterObservability()
         obs.record_metric("n1", "latency_ms", 10.0)
         obs.record_metric("n1", "tokens_per_sec", 100.0)
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="ok"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="m1",
+                message="ok",
+            )
+        )
         obs.create_alert(severity="warning", title="test", message="test")
         report = obs.get_cluster_report()
         assert "metrics_collected" in report
@@ -321,10 +473,20 @@ class TestClusterObservabilityLifecycle:
         obs = ClusterObservability(retention_hours=0.00001)
         obs._running = True
         obs.record_metric("n1", "cpu", 0.5)
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="m1", message="ok"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="m1",
+                message="ok",
+            )
+        )
         old_sleep = asyncio.sleep
+
         async def fast_sleep(delay):
             await old_sleep(0.01)
+
         with patch("asyncio.sleep", fast_sleep):
             task = asyncio.create_task(obs._cleanup_loop())
             await old_sleep(0.1)
@@ -339,23 +501,63 @@ class TestClusterObservabilityLifecycle:
 class TestExportLogs:
     def test_export_json(self):
         obs = ClusterObservability(retention_hours=168.0)
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="src", message="hello"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="ERROR", module="src2", message="fail"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="src",
+                message="hello",
+            )
+        )
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n2",
+                level="ERROR",
+                module="src2",
+                message="fail",
+            )
+        )
         result = obs.export_logs(fmt="json")
         assert len(result) == 2
         assert result[0]["message"] == "hello"
 
     def test_export_csv(self):
         obs = ClusterObservability(retention_hours=168.0)
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="src", message="hello"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="src",
+                message="hello",
+            )
+        )
         csv = obs.export_logs(fmt="csv")
         assert "timestamp,level" in csv
         assert "hello" in csv
 
     def test_export_with_filters(self):
         obs = ClusterObservability(retention_hours=168.0)
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="src", message="msg1"))
-        obs.add_log(LogEntry(timestamp=time.time(), node_id="n2", level="ERROR", module="src", message="msg2"))
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n1",
+                level="INFO",
+                module="src",
+                message="msg1",
+            )
+        )
+        obs.add_log(
+            LogEntry(
+                timestamp=time.time(),
+                node_id="n2",
+                level="ERROR",
+                module="src",
+                message="msg2",
+            )
+        )
         result = obs.export_logs(node_id="n2")
         assert len(result) == 1
         assert result[0]["node_id"] == "n2"
@@ -383,6 +585,14 @@ class TestOptimizationSuggestions:
     def test_suggestions_error_logs(self):
         obs = ClusterObservability(retention_hours=168.0)
         for _ in range(5):
-            obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="ERROR", module="inference_engine", message="crash"))
+            obs.add_log(
+                LogEntry(
+                    timestamp=time.time(),
+                    node_id="n1",
+                    level="ERROR",
+                    module="inference_engine",
+                    message="crash",
+                )
+            )
         suggestions = obs.generate_optimization_suggestions()
         assert any("inference_engine" in s["title"] for s in suggestions)

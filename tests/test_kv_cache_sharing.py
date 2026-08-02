@@ -5,7 +5,6 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-
 import pytest
 
 from fusion_multi_node.distributed_mlx.kv_cache_sharing import (
@@ -34,15 +33,17 @@ def _make_entry(
         total_size_bytes=total_size_bytes,
         created_at=time.time(),
         ttl_seconds=ttl_seconds,
-        shards=[KVShard(
-            shard_id="s1",
-            model_name=model_name,
-            layer_index=0,
-            node_id="node_1",
-            token_count=total_tokens,
-            size_bytes=total_size_bytes,
-            created_at=time.time(),
-        )],
+        shards=[
+            KVShard(
+                shard_id="s1",
+                model_name=model_name,
+                layer_index=0,
+                node_id="node_1",
+                token_count=total_tokens,
+                size_bytes=total_size_bytes,
+                created_at=time.time(),
+            )
+        ],
     )
 
 
@@ -60,8 +61,13 @@ def _make_mock_client(mock_resp=None, side_effect=None):
 class TestKVShard:
     def test_basic(self):
         shard = KVShard(
-            shard_id="s0", model_name="test", layer_index=0,
-            node_id="n1", token_count=100, size_bytes=1024, created_at=time.time(),
+            shard_id="s0",
+            model_name="test",
+            layer_index=0,
+            node_id="n1",
+            token_count=100,
+            size_bytes=1024,
+            created_at=time.time(),
         )
         assert shard.shard_id == "s0"
         assert shard.access_count == 0
@@ -309,9 +315,17 @@ class TestKVSharingManagerDeserialize:
             "model_name": "model-x",
             "prompt_hash": "h1",
             "prompt_prefix": "prefix",
-            "shards": [{"shard_id": "s1", "model_name": "model-x", "layer_index": 0,
-                        "node_id": "n1", "token_count": 10, "size_bytes": 100,
-                        "created_at": time.time()}],
+            "shards": [
+                {
+                    "shard_id": "s1",
+                    "model_name": "model-x",
+                    "layer_index": 0,
+                    "node_id": "n1",
+                    "token_count": 10,
+                    "size_bytes": 100,
+                    "created_at": time.time(),
+                }
+            ],
             "total_tokens": 10,
             "total_size_bytes": 100,
             "created_at": time.time(),

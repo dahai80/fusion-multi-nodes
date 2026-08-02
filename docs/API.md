@@ -173,7 +173,7 @@ mdns.unregister()
 
 ```python
 msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
-data = msg.serialize()     # bytes
+data = msg.serialize()  # bytes
 msg2 = FMPMessage.deserialize(data)  # FMPMessage
 ```
 
@@ -191,7 +191,7 @@ Three layers:
 ### FMPCrypto
 
 ```python
-key = FMPCrypto.generate_key()        # 32 bytes
+key = FMPCrypto.generate_key()  # 32 bytes
 crypto = FMPCrypto(key=key)
 encrypted = crypto.encrypt_message(msg)
 crypto.decrypt_message(msg)
@@ -234,8 +234,8 @@ States: `CLOSED` -> `OPEN` (after threshold failures) -> `HALF_OPEN` (after reco
 ```python
 bridge = DistributedMLXBridge()
 shards = await bridge.shard_model("llama-70b", num_shards=4)
-result = await bridge.pipeline_inference("llama-70b", "Hello", ["n1","n2","n3","n4"])
-result = await bridge.data_parallel_inference("qwen-7b", ["prompt1","prompt2"], ["n1","n2"])
+result = await bridge.pipeline_inference("llama-70b", "Hello", ["n1", "n2", "n3", "n4"])
+result = await bridge.data_parallel_inference("qwen-7b", ["prompt1", "prompt2"], ["n1", "n2"])
 ```
 
 | Method | Signature | Description |
@@ -289,8 +289,13 @@ decompressed = await manager.decompress_tensor(compressed, method, original_shap
 
 ```python
 gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
-gateway.register_tool(MCPTool(name="code_review", description="Review code",
-                               parameters={"type":"object","properties":{"code":{"type":"string"}}}))
+gateway.register_tool(
+    MCPTool(
+        name="code_review",
+        description="Review code",
+        parameters={"type": "object", "properties": {"code": {"type": "string"}}},
+    )
+)
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
 ```
 
