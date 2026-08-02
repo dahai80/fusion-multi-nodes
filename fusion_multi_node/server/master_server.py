@@ -174,7 +174,7 @@ class MasterServer:
                     node_id=req.get("node_id", ""),
                     hostname=req.get("hostname", ""),
                     ip_address=req.get("ip_address", ""),
-                    port=req.get("port", 9755),
+                    port=req.get("port", 11445),
                     status=NodeStatus.ONLINE,
                     last_heartbeat=time.time(),
                 )
@@ -611,7 +611,7 @@ class MasterServer:
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
 
-    async def start(self, host: str = "127.0.0.1", port: int = 9753) -> None:
+    async def start(self, host: str = "127.0.0.1", port: int = 11452) -> None:
         import uvicorn
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)

@@ -18,10 +18,10 @@ class ClusterConfig:
         "cluster": {
             "name": "fusion-cluster",
             "master_host": "127.0.0.1",
-            "master_port": 9753,
+            "master_port": 11452,
             "discovery_port": 9754,
-            "agent_port": 9755,
-            "mcp_port": 9756,
+            "agent_port": 11445,
+            "mcp_port": 11446,
             "heartbeat_timeout": 15.0,
             "heartbeat_interval": 3.0,
             "report_interval": 15.0,

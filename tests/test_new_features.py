@@ -280,7 +280,7 @@ class TestNodeApproval:
             node_id="node-1",
             hostname="mac-1",
             ip_address="192.168.1.10",
-            port=9755,
+            port=11445,
         )
         assert req.node_id == "node-1"
         assert req.status.value == "pending"
@@ -288,27 +288,27 @@ class TestNodeApproval:
     def test_approve(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
         mgr = NodeApprovalManager()
-        mgr.request_join("node-1", "mac-1", "192.168.1.10", 9755)
+        mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         mgr.approve("node-1", approved_by="admin")
         assert mgr.is_approved("node-1") is True
 
     def test_reject(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
         mgr = NodeApprovalManager()
-        mgr.request_join("node-1", "mac-1", "192.168.1.10", 9755)
+        mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         mgr.reject("node-1", reason="untrusted")
         assert mgr.is_approved("node-1") is False
 
     def test_auto_approve_patterns(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
         mgr = NodeApprovalManager(auto_approve_patterns=["192.168."])
-        mgr.request_join("node-1", "mac-1", "192.168.1.10", 9755)
+        mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         assert mgr.is_approved("node-1") is True
 
     def test_revoke(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
         mgr = NodeApprovalManager(auto_approve_patterns=["192.168.*"])
-        mgr.request_join("node-1", "mac-1", "192.168.1.10", 9755)
+        mgr.request_join("node-1", "mac-1", "192.168.1.10", 11445)
         mgr.revoke_approval("node-1")
         assert mgr.is_approved("node-1") is False
 
@@ -706,7 +706,7 @@ class TestManualJoin:
             "node_id": "node-1",
             "hostname": "mac-1",
             "ip_address": "192.168.1.10",
-            "port": 9755,
+            "port": 11445,
             "cluster_secret": "test-secret",
         })
         assert result["status"] == "ok"
@@ -730,16 +730,16 @@ class TestManualJoin:
     def test_join_history(self):
         from fusion_multi_node.discovery.manual_join import ManualJoinManager
         mgr = ManualJoinManager()
-        mgr.handle_join_request({"node_id": "n1", "hostname": "h1", "ip_address": "1.1.1.1", "port": 9755})
+        mgr.handle_join_request({"node_id": "n1", "hostname": "h1", "ip_address": "1.1.1.1", "port": 11445})
         history = mgr.get_join_history()
         assert len(history) == 1
         assert mgr.join_count == 1
 
     def test_join_request_response_dataclass(self):
         from fusion_multi_node.discovery.manual_join import JoinRequest, JoinResponse
-        req = JoinRequest(node_id="n1", hostname="h1", ip_address="1.1.1.1", port=9755)
+        req = JoinRequest(node_id="n1", hostname="h1", ip_address="1.1.1.1", port=11445)
         assert req.node_id == "n1"
-        resp = JoinResponse(success=True, master_host="1.2.3.4", master_port=9753)
+        resp = JoinResponse(success=True, master_host="1.2.3.4", master_port=11452)
         assert resp.success is True
 
 
@@ -894,7 +894,7 @@ class TestLoadRouterIntegration:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=9755,
+                node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=11445,
                 total_memory_gb=16.0, available_memory_gb=12.0,
                 active_tasks=1, network_rtt_ms=5.0,
             )
@@ -908,7 +908,7 @@ class TestLoadRouterIntegration:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=9755,
+                node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=11445,
                 total_memory_gb=16.0, available_memory_gb=12.0,
             )
             await cm.register_node(info)
@@ -922,7 +922,7 @@ class TestLoadRouterIntegration:
     def test_unregister_removes_from_router(self):
         async def _test():
             cm = ClusterMaster()
-            info = NodeInfo(node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=9755)
+            info = NodeInfo(node_id="n1", hostname="mac1", ip_address="192.168.1.10", port=11445)
             await cm.register_node(info)
             assert cm.load_router.get_metrics("n1") is not None
             await cm.unregister_node("n1")
@@ -945,7 +945,7 @@ class TestLocalForceGate:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=9755,
+                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=11445,
                 total_memory_gb=16.0, available_memory_gb=14.0,
             )
             await cm.register_node(info)
@@ -962,7 +962,7 @@ class TestLocalForceGate:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=9755,
+                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=11445,
                 total_memory_gb=16.0, available_memory_gb=14.0,
             )
             await cm.register_node(info)
@@ -979,7 +979,7 @@ class TestLocalForceGate:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="remote", hostname="mac2", ip_address="192.168.1.11", port=9755,
+                node_id="remote", hostname="mac2", ip_address="192.168.1.11", port=11445,
                 total_memory_gb=32.0, available_memory_gb=28.0,
             )
             await cm.register_node(info)
@@ -996,7 +996,7 @@ class TestLocalForceGate:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=9755,
+                node_id="local", hostname="mac1", ip_address="127.0.0.1", port=11445,
                 total_memory_gb=64.0, available_memory_gb=60.0,
             )
             await cm.register_node(info)
@@ -1015,11 +1015,11 @@ class TestVRAMFirstScheduling:
         async def _test():
             cm = ClusterMaster()
             low_vram = NodeInfo(
-                node_id="n_low", hostname="low", ip_address="10.0.0.1", port=9755,
+                node_id="n_low", hostname="low", ip_address="10.0.0.1", port=11445,
                 total_memory_gb=16.0, available_memory_gb=14.0,
             )
             high_vram = NodeInfo(
-                node_id="n_high", hostname="high", ip_address="10.0.0.2", port=9755,
+                node_id="n_high", hostname="high", ip_address="10.0.0.2", port=11445,
                 total_memory_gb=64.0, available_memory_gb=58.0,
             )
             await cm.register_node(low_vram)
@@ -1038,7 +1038,7 @@ class TestVRAMFirstScheduling:
             cm = ClusterMaster()
             assert cm.load_router.strategy == RoutingStrategy.BALANCED
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
                 total_memory_gb=64.0, available_memory_gb=60.0,
             )
             await cm.register_node(info)
@@ -1054,7 +1054,7 @@ class TestVRAMFirstScheduling:
         async def _test():
             cm = ClusterMaster()
             info = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
                 total_memory_gb=16.0, available_memory_gb=14.0,
             )
             await cm.register_node(info)
@@ -1647,7 +1647,7 @@ class TestDeviceModelUMA:
             node_id="n1",
             hostname="mac1",
             ip_address="192.168.1.1",
-            port=9755,
+            port=11445,
             device_model="Apple M2 Ultra",
             uma_size_gb=192.0,
         )
@@ -1659,7 +1659,7 @@ class TestDeviceModelUMA:
             node_id="n2",
             hostname="mac2",
             ip_address="192.168.1.2",
-            port=9755,
+            port=11445,
         )
         assert info.device_model == ""
         assert info.uma_size_gb == 0.0
@@ -1671,7 +1671,7 @@ class TestDeviceModelUMA:
                 node_id="n1",
                 hostname="mac1",
                 ip_address="192.168.1.1",
-                port=9755,
+                port=11445,
                 device_model="Apple M3 Max",
                 uma_size_gb=128.0,
                 total_memory_gb=128.0,
@@ -1692,7 +1692,7 @@ class TestDeviceModelUMA:
             "uma_size_gb": "192.0",
         }
         try:
-            ok = mdns.register(port=9753, properties=props)
+            ok = mdns.register(port=11452, properties=props)
         except Exception:
             ok = False
         if ok:
@@ -1710,11 +1710,11 @@ class TestTaskMigration:
         async def _test():
             cm = ClusterMaster()
             n1 = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
                 total_memory_gb=64.0, available_memory_gb=32.0, status=NodeStatus.ONLINE,
             )
             n2 = NodeInfo(
-                node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=9755,
+                node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
                 total_memory_gb=64.0, available_memory_gb=48.0, status=NodeStatus.ONLINE,
             )
             await cm.register_node(n1)
@@ -1746,7 +1746,7 @@ class TestTaskMigration:
             from fusion_multi_node.master.cluster_master import TaskStatus
             cm = ClusterMaster()
             n1 = NodeInfo(
-                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+                node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
                 total_memory_gb=64.0, available_memory_gb=32.0, status=NodeStatus.ONLINE,
             )
             await cm.register_node(n1)

@@ -47,7 +47,7 @@ class ManualJoinClient:
 
     用法:
         client = ManualJoinClient(node_id="node-1")
-        result = await client.join("192.168.1.100", 9753)
+        result = await client.join("192.168.1.100", 11452)
     """
 
     def __init__(self, node_id: str = "", cluster_secret: str = "", timeout: float = 10.0):
@@ -64,10 +64,10 @@ class ManualJoinClient:
     async def join(
         self,
         master_host: str,
-        master_port: int = 9753,
+        master_port: int = 11452,
         hostname: str = "",
         ip_address: str = "",
-        agent_port: int = 9755,
+        agent_port: int = 11445,
         capabilities: Optional[List[str]] = None,
     ) -> JoinResponse:
         """通过 IP 直连方式加入集群。"""
@@ -120,7 +120,7 @@ class ManualJoinClient:
             logger.error(error)
             return JoinResponse(success=False, error=error)
 
-    async def verify_master(self, master_host: str, master_port: int = 9753) -> bool:
+    async def verify_master(self, master_host: str, master_port: int = 11452) -> bool:
         """验证 Master 是否可达。"""
         try:
             client = await self._get_client()

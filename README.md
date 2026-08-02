@@ -135,10 +135,10 @@ The single source of truth for the cluster — node registration, health checks,
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
 
-master = ClusterMaster(host="0.0.0.0", port=9753)
+master = ClusterMaster(host="127.0.0.1", port=11452)
 
 node = NodeInfo(node_id="node_1", hostname="mac-studio-1", ip_address="10.0.0.1",
-                port=9755, total_memory_gb=64.0, available_memory_gb=48.0)
+                port=11445, total_memory_gb=64.0, available_memory_gb=48.0)
 master.register_node(node)
 
 task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA,
@@ -201,12 +201,12 @@ from fusion_multi_node.discovery.manual_join import ManualJoinClient, ManualJoin
 
 # mDNS auto-discovery
 mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=9753, properties={"role": "master"})
+mdns.register(port=11452, properties={"role": "master"})
 master = await mdns.find_master_async(timeout=5.0)
 
 # Manual IP join (mDNS fallback)
 client = ManualJoinClient()
-resp = await client.join(master_host="10.0.0.1", master_port=9753, node_id="node-1")
+resp = await client.join(master_host="10.0.0.1", master_port=11452, node_id="node-1")
 
 mgr = ManualJoinManager(cluster_secret="my-secret", auto_approve=True)
 result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": "my-secret"})
@@ -259,7 +259,7 @@ pm.check_path_access("worker-1", "/api/execute", "POST") # True
 
 # Node approval
 mgr = NodeApprovalManager(auto_approve_patterns=["192.168."])
-req = mgr.request_join(node_id="n1", hostname="mac-1", ip_address="192.168.1.10", port=9755)
+req = mgr.request_join(node_id="n1", hostname="mac-1", ip_address="192.168.1.10", port=11445)
 mgr.approve("n1", approved_by="admin")
 
 # Worker sandbox
@@ -380,7 +380,7 @@ Unified MCP endpoint for Claude Desktop/Code, aggregating tools from all nodes.
 ```python
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 
-gateway = MCPClusterGateway(host="0.0.0.0", port=9756)
+gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
 tool = MCPTool(name="code_review", description="Review code",
                parameters={"type": "object", "properties": {"code": {"type": "string"}}})
 gateway.register_tool(tool)
@@ -396,10 +396,10 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```json
 {
   "cluster": {
-    "master_host": "0.0.0.0",
-    "master_port": 9753,
+    "master_host": "127.0.0.1",
+    "master_port": 11452,
     "discovery_port": 9754,
-    "agent_port": 9755,
+    "agent_port": 11445,
     "heartbeat_timeout": 15.0,
     "heartbeat_interval": 3.0
   },
@@ -447,10 +447,10 @@ pytest tests/test_new_features.py -v
 
 | Constant | Default | Purpose |
 |----------|---------|---------|
-| Master port | 9753 | Cluster Master service port |
+| Master port | 11452 | Cluster Master service port |
 | Discovery port | 9754 | mDNS discovery port |
-| Agent port | 9755 | Node Agent port |
-| MCP port | 9756 | MCP Gateway port |
+| Agent port | 11445 | Node Agent port |
+| MCP port | 11446 | MCP Gateway port |
 | Heartbeat timeout | 15.0s | Stale node threshold |
 | Task timeout | 300.0s | Default task timeout |
 | KV cache TTL | 3600.0s | Default KV cache expiry |

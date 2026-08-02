@@ -58,8 +58,8 @@ class TestMCPClusterGateway:
         assert len(gw.tools) == 0
 
     def test_init_custom(self):
-        gw = MCPClusterGateway(host="0.0.0.0", port=9756)
-        assert gw.port == 9756
+        gw = MCPClusterGateway(host="127.0.0.1", port=11446)
+        assert gw.port == 11446
 
     def test_register_tool(self):
         gw = MCPClusterGateway()

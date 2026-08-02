@@ -23,7 +23,7 @@
 ### ClusterMaster
 
 ```python
-master = ClusterMaster(host="0.0.0.0", port=9753)
+master = ClusterMaster(host="127.0.0.1", port=11452)
 ```
 
 | Method | Signature | Description |
@@ -46,7 +46,7 @@ node = NodeInfo(
     node_id="node_1",
     hostname="mac-studio-1",
     ip_address="10.0.0.1",
-    port=9755,
+    port=11445,
     total_memory_gb=64.0,
     available_memory_gb=48.0,
 )
@@ -58,7 +58,7 @@ print(node.score)  # 0.0-1.0, mem_weight=0.4 + task_weight=0.4 + net_penalty=0.2
 | `node_id` | `str` | required | Unique node identifier |
 | `hostname` | `str` | `""` | Machine hostname |
 | `ip_address` | `str` | `""` | IP address |
-| `port` | `int` | `9755` | Agent port |
+| `port` | `int` | `11445` | Agent port |
 | `total_memory_gb` | `float` | `0.0` | Total unified memory |
 | `available_memory_gb` | `float` | `0.0` | Available memory |
 | `status` | `NodeStatus` | `OFFLINE` | Node status |
@@ -126,7 +126,7 @@ agent = NodeAgent(config)
 |-------|------|---------|-------------|
 | `node_id` | `str` | `""` | Node identifier |
 | `master_host` | `str` | `"localhost"` | Master hostname |
-| `master_port` | `int` | `9753` | Master port |
+| `master_port` | `int` | `11452` | Master port |
 | `discovery_port` | `int` | `9754` | mDNS discovery port |
 | `heartbeat_interval` | `float` | `5.0` | Heartbeat interval (seconds) |
 | `task_poll_interval` | `float` | `2.0` | Task poll interval (seconds) |
@@ -141,7 +141,7 @@ agent = NodeAgent(config)
 
 ```python
 mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=9753, properties={"role": "master"})
+mdns.register(port=11452, properties={"role": "master"})
 master_info = await mdns.find_master_async(timeout=5.0)
 mdns.unregister()
 ```
@@ -288,7 +288,7 @@ decompressed = await manager.decompress_tensor(compressed, method, original_shap
 ### MCPClusterGateway
 
 ```python
-gateway = MCPClusterGateway(host="0.0.0.0", port=9756)
+gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
 gateway.register_tool(MCPTool(name="code_review", description="Review code",
                                parameters={"type":"object","properties":{"code":{"type":"string"}}}))
 result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")

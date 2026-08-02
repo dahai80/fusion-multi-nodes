@@ -60,7 +60,7 @@ class MDNSDiscovery:
 
     def register(
         self,
-        port: int = 9753,
+        port: int = 11452,
         properties: Optional[Dict[str, str]] = None,
     ) -> bool:
         """注册 mDNS 服务，使局域网内其他节点可发现。"""

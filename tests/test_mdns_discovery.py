@@ -163,7 +163,7 @@ class TestMDNSDiscoveryFindMaster:
     def test_find_master_no_master_role(self):
         d = MDNSDiscovery(node_id="test-node")
         agent_info = DiscoveryInfo(
-            name="agent1", host="10.0.0.2", port=9755,
+            name="agent1", host="10.0.0.2", port=11445,
             properties={"role": "agent"},
         )
         with patch.object(d, "browse", return_value=[agent_info]):

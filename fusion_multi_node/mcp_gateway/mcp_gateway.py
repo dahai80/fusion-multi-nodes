@@ -57,7 +57,7 @@ class MCPClusterGateway:
     对外暴露标准 MCP 协议接口，对内聚合所有节点插件能力。
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 9756):
+    def __init__(self, host: str = "127.0.0.1", port: int = 11446):
         self.host = host
         self.port = port
         self.tools: Dict[str, MCPTool] = {}
@@ -186,7 +186,7 @@ class MCPClusterGateway:
             )
             return resp.json()
         else:
-            node_port = 9755
+            node_port = 11445
             safe_node = sanitize_node_url_part(node_id)
             resp = await client.post(
                 f"http://{safe_node}:{node_port}/api/mcp/execute",

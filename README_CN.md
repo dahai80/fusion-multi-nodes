@@ -140,8 +140,8 @@ fusion-multi-node kv stats/warm                # KV 缓存管理
 
 | 命令 | 说明 |
 |------|------|
-| `cluster start --mode master` | 启动集群主控（端口 9753） |
-| `cluster start --mode agent` | 启动节点代理（端口 9755） |
+| `cluster start --mode master` | 启动集群主控（端口 11452） |
+| `cluster start --mode agent` | 启动节点代理（端口 11445） |
 | `cluster start --mode both` | 同时启动主控和代理 |
 | `cluster stop` | 停止所有集群服务 |
 | `cluster status` | 显示集群概览 |
@@ -194,10 +194,10 @@ fusion-multi-node kv stats/warm                # KV 缓存管理
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
 
-master = ClusterMaster(host="0.0.0.0", port=9753)
+master = ClusterMaster(host="127.0.0.1", port=11452)
 
 node = NodeInfo(node_id="node_1", hostname="mac-studio-1", ip_address="10.0.0.1",
-                port=9755, total_memory_gb=64.0, available_memory_gb=48.0)
+                port=11445, total_memory_gb=64.0, available_memory_gb=48.0)
 master.register_node(node)
 
 task = ClusterTask(task_id="task_1", name="batch-inference", mode=ParallelMode.DATA)
@@ -230,7 +230,7 @@ result = await agent.execute_task({"task_id": "t1", "type": "inference", "model"
 from fusion_multi_node.discovery import MDNSDiscovery
 
 mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=9753, properties={"role": "master"})
+mdns.register(port=11452, properties={"role": "master"})
 
 master = await mdns.find_master_async(timeout=5.0)
 mdns.unregister()
@@ -291,7 +291,7 @@ found = kv.lookup_local("qwen", "abc123")
 ```python
 from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 
-gateway = MCPClusterGateway(host="0.0.0.0", port=9756)
+gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
 tool = MCPTool(name="code_review", description="Review code",
                parameters={"type": "object", "properties": {"code": {"type": "string"}}})
 gateway.register_tool(tool)
@@ -321,10 +321,10 @@ await obs.check_alert_rules(nodes)
 ```json
 {
   "cluster": {
-    "master_host": "0.0.0.0",
-    "master_port": 9753,
+    "master_host": "127.0.0.1",
+    "master_port": 11452,
     "discovery_port": 9754,
-    "agent_port": 9755,
+    "agent_port": 11445,
     "heartbeat_timeout": 15.0,
     "heartbeat_interval": 5.0
   },
@@ -371,10 +371,10 @@ pytest tests/test_protocol.py -v
 
 | 常量 | 默认值 | 用途 |
 |------|--------|------|
-| Master 端口 | 9753 | 集群主控服务端口 |
+| Master 端口 | 11452 | 集群主控服务端口 |
 | 发现端口 | 9754 | mDNS 发现端口 |
-| Agent 端口 | 9755 | 节点代理端口 |
-| MCP 端口 | 9756 | MCP 网关端口 |
+| Agent 端口 | 11445 | 节点代理端口 |
+| MCP 端口 | 11446 | MCP 网关端口 |
 | 心跳超时 | 15.0s | 失活节点判定阈值 |
 | 任务超时 | 300.0s | 默认任务超时 |
 | KV 缓存 TTL | 3600.0s | 默认 KV 缓存过期 |
