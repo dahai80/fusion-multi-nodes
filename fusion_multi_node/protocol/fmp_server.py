@@ -16,7 +16,7 @@ from .fmp_message import FMPMessage, FMPCrypto, PayloadType, ControlType
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FMP_PORT = 9756
+DEFAULT_FMP_PORT = 11446
 MAX_INBOUND_CONNECTIONS = 64
 
 
@@ -26,7 +26,7 @@ class FMPServer:
     def __init__(
         self,
         node_id: str = "",
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = DEFAULT_FMP_PORT,
         crypto: Optional[FMPCrypto] = None,
     ):

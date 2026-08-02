@@ -89,21 +89,21 @@ def fmp_send_and_hold_handler(messages_to_send, hold_timeout=5.0):
 
 class TestConnectionInfo:
     def test_basic(self):
-        info = ConnectionInfo(node_id="n1", host="10.0.1.5", port=9753)
+        info = ConnectionInfo(node_id="n1", host="10.0.1.5", port=11452)
         assert info.node_id == "n1"
         assert not info.is_alive
         assert info.uptime == 0.0
 
     def test_uptime_when_alive(self):
         info = ConnectionInfo(
-            node_id="n1", host="10.0.1.5", port=9753,
+            node_id="n1", host="10.0.1.5", port=11452,
             is_alive=True, connected_at=time.time(),
         )
         assert info.uptime > 0
 
     def test_uptime_zero_when_not_alive(self):
         info = ConnectionInfo(
-            node_id="n1", host="10.0.1.5", port=9753,
+            node_id="n1", host="10.0.1.5", port=11452,
             is_alive=False, connected_at=time.time(),
         )
         assert info.uptime == 0.0
@@ -111,7 +111,7 @@ class TestConnectionInfo:
 
 class TestFMPConnection:
     def test_init(self):
-        conn = FMPConnection(node_id="n1", host="localhost", port=9753)
+        conn = FMPConnection(node_id="n1", host="localhost", port=11452)
         assert conn.info.node_id == "n1"
         assert not conn.is_connected
         assert conn._reconnect_interval == DEFAULT_RECONNECT_INTERVAL
@@ -125,7 +125,7 @@ class TestFMPConnection:
 
     @pytest.mark.asyncio
     async def test_disconnect_when_not_connected(self):
-        conn = FMPConnection(node_id="n1", host="localhost", port=9753)
+        conn = FMPConnection(node_id="n1", host="localhost", port=11452)
         await conn.disconnect()
         assert not conn.is_connected
 
@@ -184,7 +184,7 @@ class TestFMPConnection:
 
     @pytest.mark.asyncio
     async def test_send_when_not_connected(self):
-        conn = FMPConnection(node_id="n1", host="localhost", port=9753)
+        conn = FMPConnection(node_id="n1", host="localhost", port=11452)
         msg = FMPMessage.create("s1", "t1", PayloadType.HEARTBEAT, {"ok": True})
         ok = await conn.send(msg)
         assert not ok
@@ -214,7 +214,7 @@ class TestFMPConnection:
 
     @pytest.mark.asyncio
     async def test_send_exception_sets_alive_false(self):
-        conn = FMPConnection(node_id="n1", host="localhost", port=9753)
+        conn = FMPConnection(node_id="n1", host="localhost", port=11452)
         conn._running = False
         conn.info.is_alive = True
 
@@ -371,7 +371,7 @@ class TestFMPConnection:
 
     @pytest.mark.asyncio
     async def test_is_connected_writer_closing(self):
-        conn = FMPConnection(node_id="n1", host="localhost", port=9753)
+        conn = FMPConnection(node_id="n1", host="localhost", port=11452)
         conn.info.is_alive = True
         assert not conn.is_connected
 

@@ -42,7 +42,7 @@ def master_with_nodes():
     for i in range(3):
         info = NodeInfo(
             node_id=f"n{i}", hostname=f"mac{i}", ip_address=f"10.0.0.{i}",
-            port=9755, status=NodeStatus.ONLINE, last_heartbeat=time.time(),
+            port=11445, status=NodeStatus.ONLINE, last_heartbeat=time.time(),
             available_memory_gb=50.0 - i * 10, total_memory_gb=64.0,
             active_tasks=i, max_tasks=4,
         )
@@ -217,7 +217,7 @@ class TestClusterCommands:
         old_obs = cli_mod._observability
         try:
             mock_master = AsyncMock()
-            mock_master.port = 9753
+            mock_master.port = 11452
             mock_obs = AsyncMock()
             with patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master):
                 with patch("fusion_multi_node.cli.ClusterObservability", return_value=mock_obs):

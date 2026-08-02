@@ -36,7 +36,7 @@ def _register_node(client, node_id="n1", **kwargs):
         "node_id": node_id,
         "hostname": kwargs.get("hostname", "mac-studio"),
         "ip_address": kwargs.get("ip_address", "10.0.1.5"),
-        "port": kwargs.get("port", 9755),
+        "port": kwargs.get("port", 11445),
         "arch": kwargs.get("arch", "arm64"),
         "total_memory_gb": kwargs.get("total_memory_gb", 64.0),
         "available_memory_gb": kwargs.get("available_memory_gb", 48.0),
@@ -307,6 +307,6 @@ class TestMasterServerLifecycle:
         mock_server_instance.serve = AsyncMock()
         with patch("uvicorn.Config", return_value=mock_config), \
              patch("uvicorn.Server", return_value=mock_server_instance):
-            await master_server.start(host="0.0.0.0", port=9999)
+            await master_server.start(host="127.0.0.1", port=9999)
         assert mock_server_instance.serve.called
         master_server.master._running = False

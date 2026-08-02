@@ -120,8 +120,8 @@ class AgentConfig:
     """节点代理配置。"""
     node_id: str = ""
     master_host: str = "localhost"
-    master_port: int = 9753
-    agent_port: int = 9755
+    master_port: int = 11452
+    agent_port: int = 11445
     fusion_desk_port: int = 9000
     fusion_mlx_port: int = 8000
     heartbeat_interval: float = 3.0

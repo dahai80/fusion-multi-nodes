@@ -27,7 +27,7 @@ class TestClusterMaster:
             node_id="test_node_1",
             hostname="test-mac-1",
             ip_address="192.168.1.100",
-            port=9755,
+            port=11445,
             total_memory_gb=32.0,
             available_memory_gb=16.0,
             cpu_cores=12,
@@ -44,7 +44,7 @@ class TestClusterMaster:
             node_id="test_node_2",
             hostname="test-mac-2",
             ip_address="192.168.1.101",
-            port=9755,
+            port=11445,
             total_memory_gb=64.0,
             available_memory_gb=32.0,
             cpu_cores=16,
@@ -63,7 +63,7 @@ class TestClusterMaster:
                 node_id=f"node_{i}",
                 hostname=f"mac-{i}",
                 ip_address=f"192.168.1.{100+i}",
-                port=9755,
+                port=11445,
                 total_memory_gb=32.0,
                 available_memory_gb=16.0 + i * 8.0,
                 cpu_cores=12,
@@ -80,7 +80,7 @@ class TestClusterMaster:
             node_id="worker_1",
             hostname="worker-1",
             ip_address="192.168.1.10",
-            port=9755,
+            port=11445,
             total_memory_gb=32.0,
             available_memory_gb=24.0,
             cpu_cores=12,
@@ -121,7 +121,7 @@ class TestClusterMaster:
             node_id="score_test",
             hostname="score-test",
             ip_address="10.0.0.1",
-            port=9755,
+            port=11445,
             total_memory_gb=64.0,
             available_memory_gb=48.0,
             cpu_cores=16,
@@ -141,8 +141,8 @@ class TestNodeAgent:
         config = AgentConfig(
             node_id="test_agent",
             master_host="192.168.1.1",
-            master_port=9753,
-            agent_port=9755,
+            master_port=11452,
+            agent_port=11445,
         )
         assert config.node_id == "test_agent"
         assert config.master_host == "192.168.1.1"
@@ -267,7 +267,7 @@ class TestClusterConfig:
         from fusion_multi_node.config import ClusterConfig
         config_path = str(tmp_path / "test_config.json")
         config = ClusterConfig(config_path=config_path)
-        assert config.get("cluster.master_port") == 9753
+        assert config.get("cluster.master_port") == 11452
         assert config.get("mlx.fusion_mlx_port") == 8000
         assert config.get("mcp.token_budget") == 10_000_000
 

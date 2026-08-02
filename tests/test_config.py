@@ -27,8 +27,8 @@ class TestClusterConfigInit:
 class TestClusterConfigGet:
     def test_get_existing_key(self):
         config = ClusterConfig()
-        val = config.get("cluster.master_port", 9753)
-        assert val == 9753 or isinstance(val, int)
+        val = config.get("cluster.master_port", 11452)
+        assert val == 11452 or isinstance(val, int)
 
     def test_get_missing_key_default(self):
         config = ClusterConfig()
@@ -37,7 +37,7 @@ class TestClusterConfigGet:
 
     def test_get_nested_key(self):
         config = ClusterConfig()
-        val = config.get("cluster.master_host", "0.0.0.0")
+        val = config.get("cluster.master_host", "127.0.0.1")
         assert isinstance(val, str)
 
 

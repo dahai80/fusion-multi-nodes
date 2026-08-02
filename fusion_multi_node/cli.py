@@ -109,7 +109,7 @@ def node_info(node_id: str):
 @click.option("--host", default="127.0.0.1", help="监听地址")
 @click.option("--port", default=0, help="监听端口 (0=默认)")
 @click.option("--master-host", default="localhost", help="Master 地址 (agent)")
-@click.option("--master-port", default=9753, help="Master 端口 (agent)")
+@click.option("--master-port", default=11452, help="Master 端口 (agent)")
 @click.option("--transport", type=click.Choice(["http", "fmp"]), default="http",
               help="通信协议: http 或 fmp")
 @click.option("--no-mdns", is_flag=True, help="禁用 mDNS 发现")
@@ -129,7 +129,7 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
     click.echo(f"🚀 启动 {role} 节点 (transport={transport})")
 
     if role == "master":
-        actual_port = port or 9753
+        actual_port = port or 11452
         _master = ClusterMaster(host=host, port=actual_port)
         with_mdns = not no_mdns
         await _master.start(with_server=True, with_mdns=with_mdns)
@@ -137,14 +137,14 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
         if transport == "fmp":
             from .protocol import FMPServer
             fmp_server = FMPServer()
-            await fmp_server.start(host=host, port=9756)
+            await fmp_server.start(host=host, port=11446)
             _master._fmp_server = fmp_server
-            click.echo(f"  FMP 服务已启动: {host}:9756")
+            click.echo(f"  FMP 服务已启动: {host}:11446")
 
         click.echo(f"✅ Master 已启动: {host}:{actual_port} (mDNS={'ON' if with_mdns else 'OFF'}, transport={transport})")
     else:
         from .agent import AgentConfig
-        actual_port = port or 9755
+        actual_port = port or 11445
         config = AgentConfig(
             master_host=master_host,
             master_port=master_port,
@@ -156,9 +156,9 @@ async def _async_node_start(role: str, host: str, port: int, master_host: str,
         if transport == "fmp":
             from .protocol import FMPConnectionManager
             fmp_conn = FMPConnectionManager()
-            await fmp_conn.connect(master_host, 9756)
+            await fmp_conn.connect(master_host, 11446)
             _agent._fmp_conn = fmp_conn
-            click.echo(f"  FMP 已连接 Master: {master_host}:9756")
+            click.echo(f"  FMP 已连接 Master: {master_host}:11446")
 
         click.echo(f"✅ Agent 已启动: {_agent.config.node_id} (auto_discover={auto_discover}, transport={transport})")
 
@@ -227,14 +227,14 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
     if mode in ("master", "both"):
         _master = ClusterMaster(
             host=_config.get("cluster.master_host", "127.0.0.1"),
-            port=_config.get("cluster.master_port", 9753),
+            port=_config.get("cluster.master_port", 11452),
         )
         await _master.start()
 
         if transport == "fmp":
             from .protocol import FMPServer
             fmp_server = FMPServer()
-            await fmp_server.start(host=_master.host, port=9756)
+            await fmp_server.start(host=_master.host, port=11446)
             _master._fmp_server = fmp_server
 
         click.echo(f"✅ Cluster Master 已启动 (端口 {_master.port}, transport={transport})")
@@ -433,7 +433,7 @@ def _get_master() -> ClusterMaster:
     if _master is None:
         _master = ClusterMaster(
             host=_config.get("cluster.master_host", "127.0.0.1"),
-            port=_config.get("cluster.master_port", 9753),
+            port=_config.get("cluster.master_port", 11452),
         )
     return _master
 

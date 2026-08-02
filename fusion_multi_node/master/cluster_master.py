@@ -151,7 +151,7 @@ class ClusterMaster:
     def __init__(
         self,
         host: str = "127.0.0.1",
-        port: int = 9753,
+        port: int = 11452,
         discovery_port: int = 9754,
         heartbeat_timeout: float = 15.0,
     ):
@@ -917,7 +917,7 @@ class StandbyMaster:
     def __init__(
         self,
         master_host: str,
-        master_port: int = 9753,
+        master_port: int = 11452,
         heartbeat_timeout: float = 30.0,
         take_over_delay: float = 10.0,
     ):
@@ -983,7 +983,7 @@ class StandbyMaster:
             if self.state == self.HAState.ACTIVE:
                 return
             self._promoted_master = ClusterMaster(
-                host="0.0.0.0",
+                host="127.0.0.1",
                 port=self.master_port,
             )
             await self._promoted_master.start()

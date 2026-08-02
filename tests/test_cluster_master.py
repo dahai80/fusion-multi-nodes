@@ -42,7 +42,7 @@ class TestTaskStatus:
 
 class TestNodeInfo:
     def test_basic(self):
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         assert info.node_id == "n1"
         assert info.status == NodeStatus.OFFLINE
         assert info.active_tasks == 0
@@ -50,7 +50,7 @@ class TestNodeInfo:
 
     def test_score_high_resources(self):
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             total_memory_gb=64.0, available_memory_gb=50.0,
             active_tasks=0, max_tasks=4, network_rtt_ms=5.0,
         )
@@ -59,7 +59,7 @@ class TestNodeInfo:
 
     def test_score_low_resources(self):
         info = NodeInfo(
-            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=9755,
+            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
             total_memory_gb=64.0, available_memory_gb=5.0,
             active_tasks=4, max_tasks=4, network_rtt_ms=50.0,
         )
@@ -112,7 +112,7 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_register_node(self):
         master = ClusterMaster()
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         assert "n1" in master.nodes
         assert master.nodes["n1"].status == NodeStatus.ONLINE
@@ -120,7 +120,7 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_unregister_node(self):
         master = ClusterMaster()
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         await master.unregister_node("n1")
         assert "n1" not in master.nodes
@@ -135,7 +135,7 @@ class TestClusterMaster:
     async def test_get_online_nodes(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -146,7 +146,7 @@ class TestClusterMaster:
     async def test_assign_task(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -167,7 +167,7 @@ class TestClusterMaster:
     async def test_complete_task(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -181,7 +181,7 @@ class TestClusterMaster:
     async def test_complete_task_with_error_sets_failed(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -196,12 +196,12 @@ class TestClusterMaster:
     async def test_migrate_task(self):
         master = ClusterMaster()
         info1 = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         info2 = NodeInfo(
-            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=9755,
+            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=60.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -223,7 +223,7 @@ class TestClusterMaster:
     async def test_check_heartbeat(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -233,7 +233,7 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_check_heartbeat_stale_sets_offline(self):
         master = ClusterMaster(heartbeat_timeout=5.0)
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         master.nodes["n1"].last_heartbeat = time.time() - 100
         ok = await master.check_heartbeat("n1")
@@ -250,7 +250,7 @@ class TestClusterMaster:
     async def test_check_timeouts(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -270,12 +270,12 @@ class TestClusterMaster:
     async def test_select_nodes(self):
         master = ClusterMaster()
         info1 = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
         info2 = NodeInfo(
-            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=9755,
+            node_id="n2", hostname="mac2", ip_address="10.0.0.2", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=60.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -288,7 +288,7 @@ class TestClusterMaster:
     async def test_select_nodes_insufficient(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=5.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
@@ -310,7 +310,7 @@ class TestClusterMaster:
     async def test_find_kv_cache(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -332,7 +332,7 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_find_kv_cache_offline_node_skips(self):
         master = ClusterMaster()
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         master.nodes["n1"].status = NodeStatus.OFFLINE
         entry = KVCacheEntry(
@@ -348,7 +348,7 @@ class TestClusterMaster:
     async def test_find_kv_cache_expired(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, last_heartbeat=time.time(),
         )
         await master.register_node(info)
@@ -364,7 +364,7 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_get_stats(self):
         master = ClusterMaster()
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         stats = await master.get_stats()
         assert "total_nodes" in stats
@@ -379,7 +379,7 @@ class TestClusterMaster:
     @pytest.mark.asyncio
     async def test_get_online_nodes_stale_goes_offline(self):
         master = ClusterMaster(heartbeat_timeout=0.01)
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         master.nodes["n1"].last_heartbeat = time.time() - 100
         online = await master.get_online_nodes()
@@ -390,7 +390,7 @@ class TestClusterMaster:
     async def test_complete_task_decrements_active(self):
         master = ClusterMaster()
         info = NodeInfo(
-            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=9755,
+            node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445,
             status=NodeStatus.ONLINE, available_memory_gb=50.0, total_memory_gb=64.0,
             last_heartbeat=time.time(),
         )
