@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from fusion_multi_node.master import (
     ClusterMaster,
+    ClusterSyncManager,
     ClusterTask,
     KVCacheEntry,
     NodeInfo,
@@ -71,6 +72,7 @@ class TaskSubmitRequest(BaseModel):
     name: str
     mode: str = "data"
     model_name: str = ""
+    model_id: str | None = None
     timeout_seconds: float = 300.0
     user: str = ""
     required_capability: str = ""
@@ -159,8 +161,66 @@ class MasterServer:
             return self._permission_manager.check_path_access(node_id, path, method)
 
         @app.get("/api/health")
+        @app.get("/health")
         async def health():
             return {"status": "ok", "role": "master"}
+
+        # ── 集群同步 API (Issue #5) ──
+
+        @app.get("/api/models/{model_name}/manifest")
+        async def get_model_manifest(model_name: str):
+            sync_mgr = getattr(self, "_sync_manager", None)
+            if not sync_mgr:
+                sync_mgr = ClusterSyncManager(node_id="master")
+                self._sync_manager = sync_mgr
+            manifest = sync_mgr.get_manifest(model_name)
+            return manifest.to_dict()
+
+        @app.post("/api/sync/incremental")
+        async def incremental_sync(req: dict):
+            model_name = req.get("model_name", "")
+            source_host = req.get("source_host", "")
+            source_port = req.get("source_port", 11452)
+            remote_manifest_data = req.get("remote_manifest", {})
+            if not model_name or not source_host:
+                raise HTTPException(status_code=400, detail="model_name and source_host required")
+            sync_mgr = getattr(self, "_sync_manager", None)
+            if not sync_mgr:
+                sync_mgr = ClusterSyncManager(node_id="master")
+                self._sync_manager = sync_mgr
+            from fusion_multi_node.master.cluster_sync import ModelManifest
+            remote_manifest = ModelManifest.from_dict(remote_manifest_data) if remote_manifest_data else None
+            if not remote_manifest:
+                try:
+                    import httpx
+                    client = httpx.AsyncClient(timeout=30.0)
+                    safe_host = source_host.replace("/", "").replace("..", "")
+                    resp = await client.get(f"http://{safe_host}:{source_port}/api/models/{model_name}/manifest")
+                    remote_manifest = ModelManifest.from_dict(resp.json())
+                    await client.aclose()
+                except Exception as e:
+                    raise HTTPException(status_code=502, detail=f"获取远端 manifest 失败: {e}")
+            result = await sync_mgr.incremental_sync(model_name, remote_manifest, source_host, source_port)
+            return result
+
+        @app.get("/api/cluster/status")
+        async def cluster_sync_status():
+            sync_mgr = getattr(self, "_sync_manager", None)
+            if not sync_mgr:
+                return {"partition": None, "sync_available": False}
+            return {"partition": sync_mgr.get_cluster_status(), "sync_available": True}
+
+        @app.get("/api/nodes/{node_id}/load")
+        async def get_node_load(node_id: str):
+            node = self.master.nodes.get(node_id)
+            if not node:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            sync_mgr = getattr(self, "_sync_manager", None)
+            if not sync_mgr:
+                sync_mgr = ClusterSyncManager(node_id="master")
+                self._sync_manager = sync_mgr
+            report = sync_mgr.collect_load_report()
+            return report.to_dict()
 
         # M1-05 手动 IP 加入
         @app.post("/api/join")
@@ -317,6 +377,7 @@ class MasterServer:
                 name=req.name,
                 mode=mode,
                 model_name=req.model_name,
+                model_id=req.model_id,
                 timeout_seconds=req.timeout_seconds,
                 user=req.user,
                 created_at=time.time(),

@@ -99,6 +99,7 @@ class ClusterTask:
     name: str
     mode: ParallelMode
     model_name: str = ""
+    model_id: str | None = None
     model_shards: list[dict[str, Any]] = field(default_factory=list)
     assigned_nodes: list[str] = field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING

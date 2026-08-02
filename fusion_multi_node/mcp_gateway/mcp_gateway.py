@@ -1,5 +1,9 @@
 """MCP 集群网关 — Claude 兼容的全局统一 MCP 服务入口。
 
+⚠️ AR审计 P2: MCP协议路由+Token额度管理，职责更像API Gateway。
+整改方案: 标记为待迁移至 fusion-gateway，后续版本移除。
+调用此模块时将发出 DeprecationWarning。
+
 核心职责：
 - 聚合所有节点插件能力，统一供给 Claude Desktop / Claude Code
 - 自动路由工具调用到最优节点
@@ -61,6 +65,12 @@ class MCPClusterGateway:
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 11446):
+        import warnings
+        warnings.warn(
+            "MCPClusterGateway 将迁移至 fusion-gateway，后续版本移除 (AR审计 P2)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.host = host
         self.port = port
         self.tools: dict[str, MCPTool] = {}

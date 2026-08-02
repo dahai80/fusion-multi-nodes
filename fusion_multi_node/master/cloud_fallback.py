@@ -1,5 +1,9 @@
 """M4-05 云端 API 回退 — LiteLLM 风格 OpenAI/Anthropic 集成。
 
+⚠️ AR审计 P2 违规: 直接调用外部云端API，违背"本地算力基座/断网可用"定位。
+整改方案: 此模块为可选插件，默认禁用(enabled=False)。
+云端回退应由 fusion-gateway 负责，后续版本将迁移。
+
 当本地集群资源不足时，自动回退到云端 API:
 - OpenAI GPT 系列
 - Anthropic Claude 系列
@@ -45,7 +49,7 @@ class CloudConfig:
     temperature: float = 0.7
     timeout: float = 120.0
     max_cost_per_day: float = 10.0
-    enabled: bool = True
+    enabled: bool = False
 
 
 @dataclass

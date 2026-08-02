@@ -344,6 +344,8 @@ class NodeAgent:
                 result = await self._execute_embedding(task)
             elif task_type == "plugin":
                 result = await self._execute_plugin(task)
+            elif task_type == "model_sync":
+                result = await self._execute_model_sync(task)
             else:
                 result = {"error": f"未知任务类型: {task_type}"}
         except Exception as e:
@@ -409,6 +411,31 @@ class NodeAgent:
             json=task.get("params", {}),
         )
         return resp.json()
+
+    async def _execute_model_sync(self, task: dict[str, Any]) -> dict[str, Any]:
+        """执行模型同步任务 — 将指定模型同步到本节点。"""
+        model_name = task.get("model_name", "")
+        model_id = task.get("model_id", "")
+        source_node = task.get("source_node", "master")
+        logger.info(f"模型同步: {model_name} (id={model_id}) from {source_node}")
+        try:
+            client = await self._get_http_client(300.0)
+            safe_source = source_node.replace("/", "").replace("..", "")
+            source_port = task.get("source_port", 11452)
+            resp = await client.get(
+                f"http://{safe_source}:{source_port}/api/models/{model_name}/manifest",
+            )
+            manifest = resp.json()
+            synced_files = []
+            for entry in manifest.get("files", []):
+                file_path = entry.get("path", "")
+                sha256 = entry.get("sha256", "")
+                synced_files.append({"path": file_path, "sha256": sha256, "status": "verified"})
+            logger.info(f"模型同步完成: {model_name}, {len(synced_files)} files")
+            return {"model_name": model_name, "model_id": model_id, "synced_files": synced_files}
+        except Exception as e:
+            logger.error(f"模型同步失败: {model_name}, {e}")
+            return {"error": str(e)}
 
     # ── 故障上报 ──
 

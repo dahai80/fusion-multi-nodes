@@ -1,5 +1,9 @@
 """M6-04 AST Diff-only 传输 — 仅传输 AST 变更部分，减少网络开销。
 
+⚠️ AR审计 P2: AST差异计算属代码协作，与fusion-cowork职责重叠。
+整改方案: 标记为待迁移至 fusion-cowork，后续版本移除。
+调用此模块时将发出 DeprecationWarning。
+
 - compute_ast_diff: 计算 old_ast 与 new_ast 之间的差异
 - apply_ast_diff: 从 base_ast + diff 重建完整 AST
 - 差异类型: added_nodes, removed_nodes, modified_nodes
@@ -35,6 +39,12 @@ def _collect_nodes(tree: dict[str, Any], prefix: str = "") -> dict[str, dict[str
 
 
 def compute_ast_diff(old_ast: dict[str, Any], new_ast: dict[str, Any]) -> dict[str, Any]:
+    import warnings
+    warnings.warn(
+        "ast_diff 将迁移至 fusion-cowork，后续版本移除 (AR审计 P2)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     old_nodes = _collect_nodes(old_ast)
     new_nodes = _collect_nodes(new_ast)
 

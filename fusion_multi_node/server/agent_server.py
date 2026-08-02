@@ -23,7 +23,7 @@ try:
 except Exception:
     _VERSION = "0.2.0"
 
-ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin"}
+ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin", "model_sync"}
 ALLOWED_EXTRA_KEYS = {"temperature", "top_p", "top_k", "repeat_penalty", "seed"}
 
 
@@ -179,6 +179,7 @@ class AgentServer:
         app = self.app
 
         @app.get("/api/health")
+        @app.get("/health")
         async def health():
             return {"status": "ok"}
 

@@ -131,7 +131,7 @@ class TestCloudFallback:
 
         config = CloudConfig()
         assert config.provider == CloudProvider.OPENAI
-        assert config.enabled is True
+        assert config.enabled is False
         assert config.max_cost_per_day == 10.0
 
     def test_cloud_usage(self):
@@ -156,7 +156,7 @@ class TestCloudFallback:
         from fusion_multi_node.master.cloud_fallback import CloudFallbackClient
 
         client = CloudFallbackClient()
-        assert client.config.enabled is True
+        assert client.config.enabled is False
 
     @pytest.mark.asyncio
     async def test_cloud_chat_disabled(self):
