@@ -34,7 +34,7 @@ class ClusterConfig:
             "communication": "auto",
         },
         "mlx": {
-            "fusion_mlx_port": 8000,
+            "fusion_mlx_port": 11432,
             "fusion_kb_port": 11434,
             "fusion_desk_port": 9000,
             "model_hub_port": 11435,

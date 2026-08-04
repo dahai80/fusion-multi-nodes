@@ -285,7 +285,7 @@ class TestClusterConfig:
         config_path = str(tmp_path / "test_config.json")
         config = ClusterConfig(config_path=config_path)
         assert config.get("cluster.master_port") == 11452
-        assert config.get("mlx.fusion_mlx_port") == 8000
+        assert config.get("mlx.fusion_mlx_port") == 11432
         assert config.get("mcp.token_budget") == 10_000_000
 
     def test_set_and_get(self, tmp_path):

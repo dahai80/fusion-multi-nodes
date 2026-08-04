@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -281,7 +282,8 @@ class DistributedMLXBridge:
         """获取模型配置（通过 fusion-mlx API）。"""
         try:
             client = await self._get_http_client(10.0)
-            resp = await client.get(f"http://localhost:8000/v1/models/{model_name}")
+            _mlx_base = os.environ.get("FUSION_MLX_URL") or "http://localhost:11432"
+            resp = await client.get(f"{_mlx_base}/v1/models/{model_name}")
             if resp.status_code == 200:
                 return resp.json()
         except Exception:

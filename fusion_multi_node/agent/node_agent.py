@@ -60,8 +60,9 @@ class InferenceBackend:
 class FusionMLXBackend(InferenceBackend):
     """默认推理后端 — 通过 HTTP 调用本地 fusion-mlx (OpenAI-compatible API)。"""
 
-    def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 120.0):
-        self._base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str = "http://localhost:11432", timeout: float = 120.0):
+        env_url = os.environ.get("FUSION_MLX_URL")
+        self._base_url = (env_url or base_url).rstrip("/")
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
@@ -124,7 +125,7 @@ class AgentConfig:
     master_port: int = 11452
     agent_port: int = 11445
     fusion_desk_port: int = 9000
-    fusion_mlx_port: int = 8000
+    fusion_mlx_port: int = 11432
     heartbeat_interval: float = 3.0
     report_interval: float = 15.0
 
@@ -220,7 +221,8 @@ class NodeAgent:
     def _get_mlx_version(self) -> str:
         """获取 fusion-mlx 底座版本。"""
         try:
-            resp = httpx.get("http://localhost:11434/v1/models", timeout=3.0)
+            _mlx_url = os.environ.get("FUSION_MLX_URL") or f"http://localhost:{self.config.fusion_mlx_port}"
+            resp = httpx.get(f"{_mlx_url}/v1/models", timeout=3.0)
             if resp.status_code == 200:
                 return "fusion-mlx running"
         except Exception:
