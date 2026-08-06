@@ -1,6 +1,6 @@
 #!/bin/bash
 # fusion-multi-node lifecycle manager (start|stop|restart|status)
-# Starts the cluster Master node on 127.0.0.1:11452 (GET /api/health).
+# Starts the cluster Master node on 127.0.0.1:11449 (GET /api/health).
 # Callers: fusion-studio UpstreamServiceManager (manual start; optional service).
 # Affected API: start.sh start|stop|restart|status; status exits 0 if running, 1 if not.
 # Data schemas: PID file .fusion-multi-node.pid; logs/stdout.log + logs/stderr.log.
@@ -13,7 +13,7 @@ cd "$SCRIPT_DIR"
 
 VENV="${SCRIPT_DIR}/.venv"
 HOST="${FUSION_MULTINODE_HOST:-127.0.0.1}"
-PORT="${FUSION_MULTINODE_PORT:-11452}"
+PORT="${FUSION_MULTINODE_PORT:-11449}"
 PID_FILE="${SCRIPT_DIR}/.fusion-multi-node.pid"
 LOG_DIR="${SCRIPT_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/stdout.log"
@@ -49,7 +49,7 @@ is_healthy() {
     MN_HOST="$HOST" MN_PORT="$PORT" python3 - <<'PY' 2>/dev/null
 import os, sys, urllib.request
 host = os.environ.get("MN_HOST", "127.0.0.1")
-port = os.environ.get("MN_PORT", "11452")
+port = os.environ.get("MN_PORT", "11449")
 try:
     with urllib.request.urlopen(f"http://{host}:{port}/api/health", timeout=2.0) as r:
         sys.exit(0 if r.status == 200 else 1)
