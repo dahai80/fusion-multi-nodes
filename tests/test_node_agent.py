@@ -22,7 +22,7 @@ class TestAgentConfig:
     def test_defaults(self):
         cfg = AgentConfig()
         assert cfg.master_host == "localhost"
-        assert cfg.master_port == 11452
+        assert cfg.master_port == 11449
         assert cfg.agent_port == 11445
         assert cfg.heartbeat_interval > 0
 
@@ -335,7 +335,7 @@ class TestNodeAgentLifecycle:
         agent = NodeAgent()
         mock_master_info = MagicMock()
         mock_master_info.host = "10.0.1.100"
-        mock_master_info.port = 11452
+        mock_master_info.port = 11449
 
         mock_mdns_class = MagicMock()
         mock_mdns_instance = MagicMock()

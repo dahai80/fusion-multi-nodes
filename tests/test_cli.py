@@ -154,7 +154,7 @@ class TestNodeCommands:
         from fusion_multi_node.discovery.mdns_discovery import DiscoveryInfo
 
         mock_mdns = MagicMock()
-        nodes = [DiscoveryInfo(name="m1", host="10.0.0.1", port=9754, properties={"role": "master"})]
+        nodes = [DiscoveryInfo(name="m1", host="10.0.0.1", port=11450, properties={"role": "master"})]
         mock_mdns.browse_async = AsyncMock(return_value=nodes)
         with patch("fusion_multi_node.discovery.MDNSDiscovery", return_value=mock_mdns):
             await _async_node_discover(timeout=0.01)
@@ -229,7 +229,7 @@ class TestClusterCommands:
         old_obs = cli_mod._observability
         try:
             mock_master = AsyncMock()
-            mock_master.port = 11452
+            mock_master.port = 11449
             mock_obs = AsyncMock()
             with (
                 patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master),

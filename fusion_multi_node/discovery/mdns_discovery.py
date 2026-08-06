@@ -20,7 +20,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 SERVICE_TYPE = "_fusionmlx._tcp.local."
-DEFAULT_DISCOVERY_PORT = 9754
+DEFAULT_DISCOVERY_PORT = 11450
 
 
 def _hash_cluster_secret(secret: str) -> str:
@@ -66,7 +66,7 @@ class MDNSDiscovery:
 
     def register(
         self,
-        port: int = 11452,
+        port: int = 11449,
         properties: dict[str, str] | None = None,
     ) -> bool:
         """注册 mDNS 服务，使局域网内其他节点可发现。"""

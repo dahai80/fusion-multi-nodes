@@ -19,22 +19,22 @@ from fusion_multi_node.discovery.mdns_discovery import (
 
 class TestDiscoveryInfo:
     def test_basic(self):
-        info = DiscoveryInfo(name="node1", host="10.0.0.1", port=9754)
+        info = DiscoveryInfo(name="node1", host="10.0.0.1", port=11450)
         assert info.name == "node1"
         assert info.host == "10.0.0.1"
-        assert info.port == 9754
+        assert info.port == 11450
         assert info.discovered_at == 0.0
         assert info.properties == {}
 
     def test_server_name(self):
-        info = DiscoveryInfo(name="node1", host="10.0.0.1", port=9754)
+        info = DiscoveryInfo(name="node1", host="10.0.0.1", port=11450)
         assert info.server_name == f"node1.{SERVICE_TYPE}"
 
     def test_with_properties(self):
         info = DiscoveryInfo(
             name="master",
             host="10.0.0.1",
-            port=9754,
+            port=11450,
             properties={"role": "master", "version": "1.0"},
             discovered_at=time.time(),
         )
@@ -76,7 +76,7 @@ class TestMDNSDiscoveryRegister:
             ),
         ):
             try:
-                d.register(port=9754, properties={"role": "master"})
+                d.register(port=11450, properties={"role": "master"})
                 assert d._registered is True
             except Exception:
                 pass  # zeroconf may not be installed
@@ -85,7 +85,7 @@ class TestMDNSDiscoveryRegister:
         d = MDNSDiscovery(node_id="test-node")
         with patch.dict("sys.modules", {"zeroconf": None}):
             try:
-                d.register(port=9754)
+                d.register(port=11450)
             except Exception:
                 pass
 
@@ -157,7 +157,7 @@ class TestMDNSDiscoveryGetDiscovered:
 
     def test_with_entries(self):
         d = MDNSDiscovery(node_id="test-node")
-        info = DiscoveryInfo(name="node1", host="10.0.0.1", port=9754)
+        info = DiscoveryInfo(name="node1", host="10.0.0.1", port=11450)
         d._discovered["node1"] = info
         result = d.get_discovered()
         assert len(result) == 1
@@ -176,7 +176,7 @@ class TestMDNSDiscoveryFindMaster:
         master_info = DiscoveryInfo(
             name="master",
             host="10.0.0.1",
-            port=9754,
+            port=11450,
             properties={"role": "master", "node_id": "master-1"},
         )
         with patch.object(d, "browse", return_value=[master_info]):
@@ -210,7 +210,7 @@ class TestMDNSDiscoveryFindMaster:
         master_info = DiscoveryInfo(
             name="master",
             host="10.0.0.1",
-            port=9754,
+            port=11450,
             properties={"role": "master", "node_id": "master-1"},
         )
         d.browse_async = AsyncMock(return_value=[master_info])
@@ -230,18 +230,18 @@ class TestServiceInfoToDiscovery:
     def test_basic_conversion(self):
         mock_info = MagicMock()
         mock_info.parsed_addresses.return_value = ["10.0.0.1"]
-        mock_info.port = 9754
+        mock_info.port = 11450
         mock_info.properties = {b"role": b"master"}
         result = _service_info_to_discovery("test-node." + SERVICE_TYPE, mock_info)
         assert result.name == "test-node"
         assert result.host == "10.0.0.1"
-        assert result.port == 9754
+        assert result.port == 11450
         assert result.properties["role"] == "master"
 
     def test_no_addresses(self):
         mock_info = MagicMock()
         mock_info.parsed_addresses.return_value = []
-        mock_info.port = 9754
+        mock_info.port = 11450
         mock_info.properties = {}
         result = _service_info_to_discovery("test", mock_info)
         assert result.host == "127.0.0.1"
@@ -249,7 +249,7 @@ class TestServiceInfoToDiscovery:
     def test_string_properties(self):
         mock_info = MagicMock()
         mock_info.parsed_addresses.return_value = ["10.0.0.1"]
-        mock_info.port = 9754
+        mock_info.port = 11450
         mock_info.properties = {"key": "value"}
         result = _service_info_to_discovery("test", mock_info)
         assert result.properties["key"] == "value"
@@ -257,7 +257,7 @@ class TestServiceInfoToDiscovery:
     def test_no_dot_in_name(self):
         mock_info = MagicMock()
         mock_info.parsed_addresses.return_value = ["10.0.0.1"]
-        mock_info.port = 9754
+        mock_info.port = 11450
         mock_info.properties = {}
         result = _service_info_to_discovery("simple", mock_info)
         assert result.name == "simple"
@@ -265,7 +265,7 @@ class TestServiceInfoToDiscovery:
     def test_none_property_value(self):
         mock_info = MagicMock()
         mock_info.parsed_addresses.return_value = ["10.0.0.1"]
-        mock_info.port = 9754
+        mock_info.port = 11450
         mock_info.properties = {b"key": None}
         result = _service_info_to_discovery("test", mock_info)
         assert result.properties["key"] == ""

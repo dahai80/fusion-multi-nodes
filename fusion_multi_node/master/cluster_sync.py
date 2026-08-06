@@ -301,7 +301,7 @@ class ClusterSyncManager:
         model_name: str,
         remote_manifest: ModelManifest,
         source_host: str,
-        source_port: int = 11452,
+        source_port: int = 11449,
     ) -> dict[str, Any]:
         """增量同步: 对比 manifest，仅下载差异文件。"""
         local_manifest = self.get_manifest(model_name)
@@ -332,7 +332,7 @@ class ClusterSyncManager:
         logger.info(f"增量同步完成: {model_name}, {synced}/{len(diff_files)} files")
         return {"model_name": model_name, "synced": synced, "total_diff": len(diff_files)}
 
-    def trigger_sync(self, model_name: str, source_host: str, source_port: int = 11452) -> None:
+    def trigger_sync(self, model_name: str, source_host: str, source_port: int = 11449) -> None:
         """触发异步同步任务。"""
         self._sync_queue.put_nowait((model_name, source_host, source_port))
         logger.info(f"同步任务入队: {model_name} from {source_host}")

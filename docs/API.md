@@ -23,7 +23,7 @@
 ### ClusterMaster
 
 ```python
-master = ClusterMaster(host="127.0.0.1", port=11452)
+master = ClusterMaster(host="127.0.0.1", port=11449)
 ```
 
 | Method | Signature | Description |
@@ -126,8 +126,8 @@ agent = NodeAgent(config)
 |-------|------|---------|-------------|
 | `node_id` | `str` | `""` | Node identifier |
 | `master_host` | `str` | `"localhost"` | Master hostname |
-| `master_port` | `int` | `11452` | Master port |
-| `discovery_port` | `int` | `9754` | mDNS discovery port |
+| `master_port` | `int` | `11449` | Master port |
+| `discovery_port` | `int` | `11450` | mDNS discovery port |
 | `heartbeat_interval` | `float` | `5.0` | Heartbeat interval (seconds) |
 | `task_poll_interval` | `float` | `2.0` | Task poll interval (seconds) |
 
@@ -141,7 +141,7 @@ agent = NodeAgent(config)
 
 ```python
 mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=11452, properties={"role": "master"})
+mdns.register(port=11449, properties={"role": "master"})
 master_info = await mdns.find_master_async(timeout=5.0)
 mdns.unregister()
 ```
