@@ -110,7 +110,7 @@ def node_info(node_id: str):
 @click.option("--host", default="127.0.0.1", help="监听地址")
 @click.option("--port", default=0, help="监听端口 (0=默认)")
 @click.option("--master-host", default="localhost", help="Master 地址 (agent)")
-@click.option("--master-port", default=11449, help="Master 端口 (agent)")
+@click.option("--master-port", default=11452, help="Master 端口 (agent)")
 @click.option(
     "--transport",
     type=click.Choice(["http", "fmp"]),
@@ -159,7 +159,7 @@ async def _async_node_start(
     click.echo(f"🚀 启动 {role} 节点 (transport={transport})")
 
     if role == "master":
-        actual_port = port or 11449
+        actual_port = port or 11452
         _master = ClusterMaster(host=host, port=actual_port)
         with_mdns = not no_mdns
         await _master.start(with_server=True, with_mdns=with_mdns)
@@ -262,7 +262,7 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
     if mode in ("master", "both"):
         _master = ClusterMaster(
             host=_config.get("cluster.master_host", "127.0.0.1"),
-            port=_config.get("cluster.master_port", 11449),
+            port=_config.get("cluster.master_port", 11452),
         )
         await _master.start()
 
@@ -468,7 +468,7 @@ def _get_master() -> ClusterMaster:
     if _master is None:
         _master = ClusterMaster(
             host=_config.get("cluster.master_host", "127.0.0.1"),
-            port=_config.get("cluster.master_port", 11449),
+            port=_config.get("cluster.master_port", 11452),
         )
     return _master
 

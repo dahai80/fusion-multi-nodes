@@ -979,7 +979,7 @@ class TestManualJoin:
 
         req = JoinRequest(node_id="n1", hostname="h1", ip_address="1.1.1.1", port=11445)
         assert req.node_id == "n1"
-        resp = JoinResponse(success=True, master_host="1.2.3.4", master_port=11449)
+        resp = JoinResponse(success=True, master_host="1.2.3.4", master_port=11452)
         assert resp.success is True
 
 
@@ -2144,7 +2144,7 @@ class TestDeviceModelUMA:
             "uma_size_gb": "192.0",
         }
         try:
-            ok = mdns.register(port=11449, properties=props)
+            ok = mdns.register(port=11452, properties=props)
         except Exception:
             ok = False
         if ok:

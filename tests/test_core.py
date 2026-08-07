@@ -151,7 +151,7 @@ class TestNodeAgent:
         config = AgentConfig(
             node_id="test_agent",
             master_host="192.168.1.1",
-            master_port=11449,
+            master_port=11452,
             agent_port=11445,
         )
         assert config.node_id == "test_agent"
@@ -284,7 +284,7 @@ class TestClusterConfig:
 
         config_path = str(tmp_path / "test_config.json")
         config = ClusterConfig(config_path=config_path)
-        assert config.get("cluster.master_port") == 11449
+        assert config.get("cluster.master_port") == 11452
         assert config.get("mlx.fusion_mlx_port") == 11432
         assert config.get("mcp.token_budget") == 10_000_000
 

@@ -34,7 +34,7 @@ class ElectionCandidate:
     priority: int = 0
     hostname: str = ""
     ip_address: str = ""
-    port: int = 11449
+    port: int = 11452
     term: int = 0
     voted_for: str = ""
     last_heartbeat: float = 0.0
