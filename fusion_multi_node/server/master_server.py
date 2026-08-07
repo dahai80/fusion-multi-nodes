@@ -180,7 +180,7 @@ class MasterServer:
         async def incremental_sync(req: dict):
             model_name = req.get("model_name", "")
             source_host = req.get("source_host", "")
-            source_port = req.get("source_port", 11449)
+            source_port = req.get("source_port", 11452)
             remote_manifest_data = req.get("remote_manifest", {})
             if not model_name or not source_host:
                 raise HTTPException(status_code=400, detail="model_name and source_host required")
@@ -726,7 +726,7 @@ class MasterServer:
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
 
-    async def start(self, host: str = "127.0.0.1", port: int = 11449) -> None:
+    async def start(self, host: str = "127.0.0.1", port: int = 11452) -> None:
         import uvicorn
 
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")

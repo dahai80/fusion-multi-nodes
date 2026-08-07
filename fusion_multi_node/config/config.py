@@ -18,7 +18,7 @@ class ClusterConfig:
         "cluster": {
             "name": "fusion-cluster",
             "master_host": "127.0.0.1",
-            "master_port": 11449,
+            "master_port": 11452,
             "discovery_port": 11450,
             "agent_port": 11445,
             "mcp_port": 11446,

@@ -135,7 +135,7 @@ The single source of truth for the cluster — node registration, health checks,
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
 
-master = ClusterMaster(host="127.0.0.1", port=11449)
+master = ClusterMaster(host="127.0.0.1", port=11452)
 
 node = NodeInfo(
     node_id="node_1",
@@ -213,12 +213,12 @@ from fusion_multi_node.discovery.manual_join import ManualJoinClient, ManualJoin
 
 # mDNS auto-discovery
 mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=11449, properties={"role": "master"})
+mdns.register(port=11452, properties={"role": "master"})
 master = await mdns.find_master_async(timeout=5.0)
 
 # Manual IP join (mDNS fallback)
 client = ManualJoinClient()
-resp = await client.join(master_host="10.0.0.1", master_port=11449, node_id="node-1")
+resp = await client.join(master_host="10.0.0.1", master_port=11452, node_id="node-1")
 
 mgr = ManualJoinManager(cluster_secret="my-secret", auto_approve=True)
 result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": "my-secret"})
@@ -444,7 +444,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 {
   "cluster": {
     "master_host": "127.0.0.1",
-    "master_port": 11449,
+    "master_port": 11452,
     "discovery_port": 11450,
     "agent_port": 11445,
     "heartbeat_timeout": 15.0,
@@ -494,7 +494,7 @@ pytest tests/test_new_features.py -v
 
 | Constant | Default | Purpose |
 |----------|---------|---------|
-| Master port | 11449 | Cluster Master service port |
+| Master port | 11452 | Cluster Master service port |
 | Discovery port | 11450 | mDNS discovery port |
 | Agent port | 11445 | Node Agent port |
 | MCP port | 11446 | MCP Gateway port |

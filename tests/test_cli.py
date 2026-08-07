@@ -229,7 +229,7 @@ class TestClusterCommands:
         old_obs = cli_mod._observability
         try:
             mock_master = AsyncMock()
-            mock_master.port = 11449
+            mock_master.port = 11452
             mock_obs = AsyncMock()
             with (
                 patch("fusion_multi_node.cli.ClusterMaster", return_value=mock_master),

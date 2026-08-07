@@ -1,7 +1,7 @@
 #!/bin/bash
 # fusion-multi-node lifecycle manager (start|stop|restart|status)
 # Starts the cluster Master node on 127.0.0.1:11452 (GET /api/health).
-# Port 11452 对齐 fusion-studio multiNodePort；11449 让给 fusion-doc（避免端口冲突）。
+# Port 11452 对齐 fusion-studio multiNodePort；11452 让给 fusion-doc（避免端口冲突）。
 # Callers: fusion-studio UpstreamServiceManager (manual start; optional service).
 # Affected API: start.sh start|stop|restart|status; status exits 0 if running, 1 if not.
 # Data schemas: PID file .fusion-multi-node.pid; logs/stdout.log + logs/stderr.log.

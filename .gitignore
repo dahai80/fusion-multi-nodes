@@ -31,6 +31,7 @@ htmlcov/
 # Project
 .claude/
 .remember/
+.fusion-multi-node.pid
 *.log
 CLAUDE.md
 audit_multi_node.md

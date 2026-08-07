@@ -122,7 +122,7 @@ class AgentConfig:
 
     node_id: str = ""
     master_host: str = "localhost"
-    master_port: int = 11449
+    master_port: int = 11452
     agent_port: int = 11445
     fusion_desk_port: int = 9000
     fusion_mlx_port: int = 11432
@@ -423,7 +423,7 @@ class NodeAgent:
         try:
             client = await self._get_http_client(300.0)
             safe_source = source_node.replace("/", "").replace("..", "")
-            source_port = task.get("source_port", 11449)
+            source_port = task.get("source_port", 11452)
             resp = await client.get(
                 f"http://{safe_source}:{source_port}/api/models/{model_name}/manifest",
             )
