@@ -145,6 +145,9 @@ fusion-multi-node kv stats/warm                # KV 缓存管理
 | `cluster start --mode both` | 同时启动主控和代理 |
 | `cluster stop` | 停止所有集群服务 |
 | `cluster status` | 显示集群概览 |
+| `cluster pending` | 列出待审批节点 |
+| `cluster approve <node_id>` | 审批通过待加入节点 |
+| `cluster reject <node_id>` | 拒绝待加入节点 |
 
 ### 节点管理
 

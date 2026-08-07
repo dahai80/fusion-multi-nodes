@@ -295,6 +295,50 @@ class MasterServer:
             logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={req.role}")
             return {"status": "ok", "node_id": req.node_id}
 
+        @app.post("/api/nodes/approve")
+        async def approve_node(req: dict):
+            if not self._approval_manager:
+                raise HTTPException(status_code=400, detail="审批管理器未启用")
+            node_id = req.get("node_id", "")
+            approved_by = req.get("approved_by", "admin")
+            if not node_id:
+                raise HTTPException(status_code=400, detail="缺少 node_id")
+            ok = self._approval_manager.approve(node_id, approved_by)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"无待审批请求: {node_id}")
+            logger.info(f"节点审批通过: {node_id} (by {approved_by})")
+            return {"status": "ok", "node_id": node_id, "approved_by": approved_by}
+
+        @app.post("/api/nodes/reject")
+        async def reject_node(req: dict):
+            if not self._approval_manager:
+                raise HTTPException(status_code=400, detail="审批管理器未启用")
+            node_id = req.get("node_id", "")
+            reason = req.get("reason", "")
+            if not node_id:
+                raise HTTPException(status_code=400, detail="缺少 node_id")
+            ok = self._approval_manager.reject(node_id, reason)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"无待审批请求: {node_id}")
+            logger.info(f"节点审批拒绝: {node_id} (reason={reason})")
+            return {"status": "ok", "node_id": node_id, "rejected": True}
+
+        @app.get("/api/nodes/pending")
+        async def list_pending():
+            if not self._approval_manager:
+                return {"pending": []}
+            pending = [
+                {
+                    "node_id": r.node_id,
+                    "hostname": r.hostname,
+                    "ip_address": r.ip_address,
+                    "port": r.port,
+                    "requested_at": r.requested_at,
+                }
+                for r in self._approval_manager._pending.values()
+            ]
+            return {"pending": pending}
+
         @app.post("/api/nodes/heartbeat")
         async def heartbeat(req: HeartbeatRequest):
             node = self.master.nodes.get(req.node_id)

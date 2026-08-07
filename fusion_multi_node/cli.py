@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 
 import click
@@ -327,6 +328,61 @@ async def _async_cluster_status():
     click.echo(f"  KV 缓存:    {stats['kv_cache_entries']} 条目")
     click.echo(f"  总内存:     {stats['total_memory_gb']:.1f} GB")
     click.echo(f"  可用内存:   {stats['available_memory_gb']:.1f} GB")
+
+
+# ── 节点审批 ──
+
+
+async def _master_http(method: str, path: str, json_body: dict | None = None) -> dict:
+    """通过 HTTP 调用远程 Master（带 Bearer token）。"""
+    import httpx
+
+    from fusion_multi_node.utils.auth import load_or_create_token
+
+    host = os.environ.get("FUSION_MULTINODE_HOST") or _config.get("cluster.master_host", "127.0.0.1")
+    port = int(os.environ.get("FUSION_MULTINODE_PORT") or _config.get("cluster.master_port", 11452))
+    token = load_or_create_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"http://{host}:{port}{path}"
+    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+        if method == "GET":
+            resp = await client.get(url)
+        else:
+            resp = await client.post(url, json=json_body or {})
+        if resp.status_code >= 400:
+            raise click.ClickException(f"Master 返回 {resp.status_code}: {resp.text}")
+        return resp.json()
+
+
+@cluster.command("approve")
+@click.argument("node_id")
+@click.option("--by", "approved_by", default="admin", help="审批人")
+def cluster_approve(node_id: str, approved_by: str):
+    """审批通过待加入节点。"""
+    result = asyncio.run(_master_http("POST", "/api/nodes/approve", {"node_id": node_id, "approved_by": approved_by}))
+    click.echo(f"✅ 节点 {result.get('node_id')} 审批通过 (by {result.get('approved_by')})")
+
+
+@cluster.command("reject")
+@click.argument("node_id")
+@click.option("--reason", default="", help="拒绝原因")
+def cluster_reject(node_id: str, reason: str):
+    """拒绝待加入节点。"""
+    result = asyncio.run(_master_http("POST", "/api/nodes/reject", {"node_id": node_id, "reason": reason}))
+    click.echo(f"❌ 节点 {result.get('node_id')} 已拒绝")
+
+
+@cluster.command("pending")
+def cluster_pending():
+    """列出待审批节点。"""
+    result = asyncio.run(_master_http("GET", "/api/nodes/pending"))
+    pending = result.get("pending", [])
+    if not pending:
+        click.echo("暂无待审批节点")
+        return
+    click.echo(f"待审批节点 ({len(pending)}):")
+    for p in pending:
+        click.echo(f"  {p['node_id']:<20} {p.get('hostname', ''):<16} {p.get('ip_address', '')}")
 
 
 # ── 任务管理 ──

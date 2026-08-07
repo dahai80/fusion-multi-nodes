@@ -483,3 +483,108 @@ class TestGetMaster:
             assert m is test_master
         finally:
             cli_mod._master = old_master
+
+
+# ── 节点审批 CLI 命令 ──
+
+
+class TestClusterApprovalCLI:
+    def test_cluster_approve(self, runner):
+        with patch(
+            "fusion_multi_node.cli._master_http",
+            new=AsyncMock(return_value={"status": "ok", "node_id": "n1", "approved_by": "admin"}),
+        ):
+            result = runner.invoke(cli, ["cluster", "approve", "n1", "--by", "admin"])
+        assert result.exit_code == 0
+        assert "n1" in result.output
+        assert "审批通过" in result.output
+
+    def test_cluster_reject(self, runner):
+        with patch(
+            "fusion_multi_node.cli._master_http",
+            new=AsyncMock(return_value={"status": "ok", "node_id": "n2", "rejected": True}),
+        ):
+            result = runner.invoke(cli, ["cluster", "reject", "n2", "--reason", "bad"])
+        assert result.exit_code == 0
+        assert "n2" in result.output
+
+    def test_cluster_pending_empty(self, runner):
+        with patch("fusion_multi_node.cli._master_http", new=AsyncMock(return_value={"pending": []})):
+            result = runner.invoke(cli, ["cluster", "pending"])
+        assert result.exit_code == 0
+        assert "暂无待审批节点" in result.output
+
+    def test_cluster_pending_with_nodes(self, runner):
+        with patch(
+            "fusion_multi_node.cli._master_http",
+            new=AsyncMock(
+                return_value={
+                    "pending": [
+                        {
+                            "node_id": "p1",
+                            "hostname": "mac1",
+                            "ip_address": "10.0.0.1",
+                            "port": 11445,
+                            "requested_at": 1.0,
+                        },
+                    ]
+                }
+            ),
+        ):
+            result = runner.invoke(cli, ["cluster", "pending"])
+        assert result.exit_code == 0
+        assert "p1" in result.output
+
+    def test_cluster_approve_error(self, runner):
+        import click
+
+        with patch(
+            "fusion_multi_node.cli._master_http",
+            new=AsyncMock(side_effect=click.ClickException("Master 返回 404: nope")),
+        ):
+            result = runner.invoke(cli, ["cluster", "approve", "ghost"])
+        assert result.exit_code != 0
+
+    def test_master_http_env_override(self):
+        import os
+        from unittest.mock import patch
+
+        import fusion_multi_node.cli as cli_mod
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {}
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                captured["headers"] = k.get("headers", {})
+                captured["base_url"] = a[0] if a else ""
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *x):
+                return False
+
+            async def get(self, url):
+                captured["url"] = url
+                return FakeResp()
+
+            async def post(self, url, **k):
+                captured["url"] = url
+                return FakeResp()
+
+        with (
+            patch.dict(os.environ, {"FUSION_MULTINODE_PORT": "11999", "FUSION_MULTINODE_HOST": "1.2.3.4"}),
+            patch("fusion_multi_node.utils.auth.load_or_create_token", return_value="tok"),
+            patch("httpx.AsyncClient", new=FakeClient),
+        ):
+            import asyncio
+
+            asyncio.run(cli_mod._master_http("GET", "/api/nodes/pending"))
+        assert "1.2.3.4:11999" in captured["url"]
+        assert captured["headers"].get("Authorization") == "Bearer tok"
