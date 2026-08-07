@@ -116,6 +116,7 @@ fusion-multi-node node list
 
 ```bash
 fusion-multi-node cluster start/stop/status    # Cluster management
+fusion-multi-node cluster pending/approve/reject # Node approval
 fusion-multi-node node list/info/discover      # Node management
 fusion-multi-node task submit/list/cancel      # Task management
 fusion-multi-node config list/get/set          # Configuration

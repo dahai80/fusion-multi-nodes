@@ -177,6 +177,29 @@ class TestFMPCrypto:
         with pytest.raises(ValueError):
             FMPCrypto(key=b"short")
 
+    def test_encrypted_message_survives_wire(self):
+        # 加密消息经 serialize -> deserialize -> decrypt 必须完整还原
+        # （历史 bug: to_dict 用 utf-8 errors=replace 破坏二进制密文）
+        key = FMPCrypto.generate_key()
+        crypto = FMPCrypto(key=key)
+        msg = FMPMessage.create(
+            source_id="m1",
+            target_id="n1",
+            payload_type=PayloadType.TASK_RESULT,
+            payload={"result": "done", "n": 123},
+        )
+        original = msg.business.payload
+        encrypted_msg = crypto.encrypt_message(msg)
+        assert encrypted_msg.encrypted
+
+        data = encrypted_msg.serialize()
+        roundtripped = FMPMessage.deserialize(data)
+        assert roundtripped.encrypted
+        decrypted_msg = crypto.decrypt_message(roundtripped)
+        assert not decrypted_msg.encrypted
+        assert decrypted_msg.business.payload == original
+        assert decrypted_msg.business.payload_as_json() == {"result": "done", "n": 123}
+
 
 class TestCircuitBreaker:
     def test_initial_state(self):

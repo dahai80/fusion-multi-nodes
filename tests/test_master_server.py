@@ -384,3 +384,102 @@ class TestMasterServerLifecycle:
             await master_server.start(host="127.0.0.1", port=9999)
         assert mock_server_instance.serve.called
         master_server.master._running = False
+
+
+# ── 节点审批 API ──
+
+
+@pytest.fixture
+def approval_server():
+    master = ClusterMaster(heartbeat_timeout=60.0)
+    server = MasterServer(master=master, shared_token=TEST_TOKEN)
+    # 保留默认 NodeApprovalManager（不置 None）
+    return server
+
+
+@pytest.fixture
+def app2(approval_server):
+    return approval_server.app
+
+
+@pytest.fixture
+async def client2(app2):
+    transport = ASGITransport(app=app2)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+def _register_payload(node_id="apprv-1"):
+    return {
+        "node_id": node_id,
+        "hostname": "mac-studio",
+        "ip_address": "10.0.1.9",
+        "port": 11445,
+        "arch": "arm64",
+        "total_memory_gb": 128.0,
+        "available_memory_gb": 64.0,
+        "cpu_cores": 12,
+        "gpu_cores": 40,
+        "role": "worker",
+        "tags": [],
+        "active_tasks": 0,
+        "max_tasks": 4,
+    }
+
+
+class TestNodeApprovalAPI:
+    @pytest.mark.asyncio
+    async def test_register_pending_then_approve_then_register_ok(self, client2):
+        # 1. 首次注册 -> 403 pending
+        resp = await client2.post("/api/nodes/register", json=_register_payload(), headers=AUTH_HEADERS)
+        assert resp.status_code == 403
+        assert "pending" in resp.json()["detail"]
+
+        # 2. 列出待审批
+        resp = await client2.get("/api/nodes/pending", headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        pending = resp.json()["pending"]
+        assert any(p["node_id"] == "apprv-1" for p in pending)
+
+        # 3. 审批通过
+        resp = await client2.post(
+            "/api/nodes/approve", json={"node_id": "apprv-1", "approved_by": "admin"}, headers=AUTH_HEADERS
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+        # 4. 再次注册 -> 200
+        resp = await client2.post("/api/nodes/register", json=_register_payload(), headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+
+        # 5. 心跳 -> 200
+        resp = await client2.post(
+            "/api/nodes/heartbeat",
+            json={"node_id": "apprv-1", "available_memory_gb": 60.0, "active_tasks": 0},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_approve_nonexistent_returns_404(self, client2):
+        resp = await client2.post("/api/nodes/approve", json={"node_id": "ghost"}, headers=AUTH_HEADERS)
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_reject_pending(self, client2):
+        await client2.post("/api/nodes/register", json=_register_payload("rej-1"), headers=AUTH_HEADERS)
+        resp = await client2.post(
+            "/api/nodes/reject", json={"node_id": "rej-1", "reason": "test"}, headers=AUTH_HEADERS
+        )
+        assert resp.status_code == 200
+        assert resp.json()["rejected"] is True
+
+    @pytest.mark.asyncio
+    async def test_approve_missing_node_id(self, client2):
+        resp = await client2.post("/api/nodes/approve", json={}, headers=AUTH_HEADERS)
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_pending_requires_auth(self, client2):
+        resp = await client2.get("/api/nodes/pending")
+        assert resp.status_code == 401

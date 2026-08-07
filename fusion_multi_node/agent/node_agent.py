@@ -128,6 +128,7 @@ class AgentConfig:
     fusion_mlx_port: int = 11432
     heartbeat_interval: float = 3.0
     report_interval: float = 15.0
+    cluster_token: str = ""
 
 
 class NodeAgent:
@@ -143,6 +144,14 @@ class NodeAgent:
     ):
         self.config = config or AgentConfig()
         self.config.node_id = self.config.node_id or f"node_{uuid.uuid4().hex[:8]}"
+        if not self.config.cluster_token:
+            try:
+                from fusion_multi_node.utils.auth import load_or_create_token
+
+                self.config.cluster_token = load_or_create_token()
+                logger.info("已加载集群共享密钥用于 Master 鉴权")
+            except Exception as e:
+                logger.warning(f"加载集群密钥失败，Master 通信可能被 401 拒绝: {e}")
         self._running = False
         self._current_task: dict[str, Any] | None = None
         self._heartbeat_task: asyncio.Task | None = None
@@ -267,7 +276,10 @@ class NodeAgent:
 
     async def _get_http_client(self, timeout: float = 5.0) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=timeout)
+            headers = {}
+            if self.config.cluster_token:
+                headers["Authorization"] = f"Bearer {self.config.cluster_token}"
+            self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers)
         return self._http_client
 
     async def send_heartbeat(self) -> bool:

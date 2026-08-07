@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -132,7 +133,7 @@ class FMPBusinessLayer:
     def to_dict(self) -> dict[str, Any]:
         return {
             "payload_type": self.payload_type.value,
-            "payload": self.payload.decode("utf-8", errors="replace"),
+            "payload": base64.b64encode(self.payload).decode("ascii"),
             "round_id": self.round_id,
             "round_number": self.round_number,
             "max_rounds": self.max_rounds,
@@ -140,9 +141,16 @@ class FMPBusinessLayer:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FMPBusinessLayer:
+        raw = d["payload"]
+        if isinstance(raw, str):
+            payload = base64.b64decode(raw)
+        elif isinstance(raw, (bytes, bytearray)):
+            payload = bytes(raw)
+        else:
+            payload = bytes(raw)
         return cls(
             payload_type=PayloadType(d["payload_type"]),
-            payload=d["payload"].encode("utf-8") if isinstance(d["payload"], str) else d["payload"],
+            payload=payload,
             round_id=d.get("round_id", ""),
             round_number=d.get("round_number", 0),
             max_rounds=d.get("max_rounds", MAX_ROUNDS),
