@@ -1,6 +1,6 @@
 [project]
 name = "fusion-multi-node"
-version = "0.6.5"
+version = "0.6.6"
 description = "Multi-node cluster for Apple Silicon — node discovery, FMP routing, load balancing, distributed MLX inference"
 requires-python = ">=3.11"
 dependencies = [
