@@ -444,31 +444,44 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```json
 {
   "cluster": {
+    "name": "fusion-cluster",
     "master_host": "127.0.0.1",
     "master_port": 11452,
     "discovery_port": 11450,
     "agent_port": 11445,
+    "mcp_port": 11446,
     "heartbeat_timeout": 15.0,
-    "heartbeat_interval": 3.0
+    "heartbeat_interval": 3.0,
+    "report_interval": 15.0
   },
   "parallel": {
     "default_mode": "pipeline",
     "pipeline_timeout": 300.0,
-    "caveman_compress": true
+    "data_parallel_timeout": 120.0,
+    "caveman_compress": true,
+    "communication": "auto"
   },
   "mlx": {
-    "fusion_mlx_port": 8000,
-    "fusion_desk_port": 9000
+    "fusion_mlx_port": 11432,
+    "fusion_kb_port": 11434,
+    "fusion_desk_port": 9000,
+    "model_hub_port": 11435
   },
   "mcp": {
+    "enabled": true,
     "token_budget": 10000000,
     "tool_timeout": 60.0
   },
   "observability": {
-    "retention_hours": 168.0
+    "retention_hours": 24.0,
+    "alert_enabled": true,
+    "log_level": "info"
   }
 }
 ```
+
+**端口迁移**: v0.6.5 旧端口（master 9753 / discovery 9754 / agent 9755 / mcp 9756 / fusion_mlx 8000）会在加载配置时自动迁移到当前默认值，并把误设的 `master_host=0.0.0.0` 回退为 `127.0.0.1`，迁移后写回 `config.json`。`ClusterConfig` 加载使用深拷贝，`set()` 不会污染类级 `DEFAULT_CONFIG`。
+
 
 ---
 
@@ -477,7 +490,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (793 tests)
+# Run all tests (805 tests)
 pytest tests/ -v
 
 # With coverage
