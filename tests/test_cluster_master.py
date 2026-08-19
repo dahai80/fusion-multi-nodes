@@ -467,9 +467,20 @@ class TestClusterMaster:
 
     @pytest.mark.asyncio
     async def test_start_mdns(self):
+        from unittest.mock import MagicMock, patch
+
         master = ClusterMaster()
-        master._start_mdns()
-        master._stop_mdns()
+        # mock 真实 Zeroconf，避免后台线程事件循环与 close() 竞态
+        # （Python 3.14 + zeroconf 0.150：_async_setup 未完成即 close → RuntimeError Event loop is closed）
+        mock_zc = MagicMock()
+        with (
+            patch("zeroconf.Zeroconf", return_value=mock_zc),
+            patch("zeroconf.ServiceInfo"),
+        ):
+            master._start_mdns()
+            master._stop_mdns()
+            mock_zc.register_service.assert_called_once()
+            mock_zc.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_online_nodes_stale_goes_offline(self):

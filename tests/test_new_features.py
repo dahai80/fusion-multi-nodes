@@ -2135,6 +2135,8 @@ class TestDeviceModelUMA:
         asyncio.run(_test())
 
     def test_mdns_register_passes_device_model(self):
+        from unittest.mock import MagicMock, patch
+
         from fusion_multi_node.discovery import MDNSDiscovery
 
         mdns = MDNSDiscovery(node_id="test-master")
@@ -2143,12 +2145,24 @@ class TestDeviceModelUMA:
             "device_model": "Apple M2 Ultra",
             "uma_size_gb": "192.0",
         }
-        try:
+        mock_zc = MagicMock()
+        mock_si_cls = MagicMock()
+        with (
+            patch("zeroconf.Zeroconf", return_value=mock_zc),
+            patch("zeroconf.ServiceInfo", mock_si_cls),
+        ):
             ok = mdns.register(port=11452, properties=props)
-        except Exception:
-            ok = False
-        if ok:
+            assert ok is True
+            assert mdns._registered is True
+            # device_model / uma_size_gb 透传到 ServiceInfo.properties
+            call_kwargs = mock_si_cls.call_args.kwargs
+            passed_props = call_kwargs.get("properties", {})
+            assert passed_props.get("device_model") == "Apple M2 Ultra"
+            assert passed_props.get("uma_size_gb") == "192.0"
+            assert passed_props.get("role") == "master"
+            mock_zc.register_service.assert_called_once()
             mdns.unregister()
+            mock_zc.close.assert_called_once()
 
     def test_heartbeat_interval_default_3s(self):
         from fusion_multi_node.config.config import ClusterConfig
