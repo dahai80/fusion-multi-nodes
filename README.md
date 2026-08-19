@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.6.8-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-793%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-805%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -593,7 +593,7 @@ pytest tests/test_new_features.py -v
 - [x] P1: SandboxExecutor (macOS sandbox-exec / Linux unshare / python-resource fallback)
 - [x] P2: Metal AES-GCM acceleration (Apple Silicon CommonCrypto bridge + auto-fallback)
 - [x] P2: CLI --transport fmp wiring (FMPServer + FMPConnectionManager)
-- [x] 793 tests, 0 ruff errors
+- [x] 805 tests, 0 ruff errors
 
 ### Future
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
