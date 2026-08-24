@@ -141,6 +141,7 @@ class NodeAgent:
         self,
         config: AgentConfig | None = None,
         backend: InferenceBackend | None = None,
+        sandbox: Any = None,
     ):
         self.config = config or AgentConfig()
         self.config.node_id = self.config.node_id or f"node_{uuid.uuid4().hex[:8]}"
@@ -162,6 +163,12 @@ class NodeAgent:
         self._backend = backend or FusionMLXBackend(
             base_url=f"http://localhost:{self.config.fusion_mlx_port}",
         )
+        # M6-02 Worker 沙箱 (AR审计 #24 硬伤5: security/ 原为死代码, 零路径/网络过滤)
+        # 仅启用入口 gate 检查 (check_path_access/check_network_access) — 纯 Python, 进程内。
+        # 不调 apply_limits/resource.setrlimit: NodeAgent 是单长跑进程服务多任务,
+        # 进程级 RLIMIT_AS/CPU 会整 agent 一起限制, 误杀在途任务。OS 级强隔离走
+        # SandboxExecutor (subprocess 插件), 推理为 HTTP 调用无子进程, 不适用。
+        self._sandbox = sandbox
 
     # ── 硬件信息收集 ──
 
@@ -352,6 +359,13 @@ class NodeAgent:
         temp_dir = os.path.join(tempfile.gettempdir(), f"fusion_task_{task_id}")
         logger.info(f"执行任务: {task_id} ({task_type})")
 
+        # M6-02 沙箱入口 gate — 派发前校验路径/网络, 拒则不执行 (AR审计 #24)
+        gate_err = self._sandbox_gate(task, task_type, temp_dir)
+        if gate_err:
+            self._current_task = None
+            logger.warning(f"沙箱 gate 拒绝任务 {task_id}: {gate_err}")
+            return {"task_id": task_id, "error": gate_err, "sandbox_blocked": True}
+
         # 把执行体包成可取消的 asyncio.Task 并登记, 供 cancel_task 中止
         async def _run():
             try:
@@ -391,6 +405,28 @@ class NodeAgent:
             logger.error(f"任务执行失败: {task_id}: {e}")
 
         return result
+
+    def _sandbox_gate(self, task: dict[str, Any], task_type: str, temp_dir: str) -> str | None:
+        """M6-02 沙箱入口校验 — 校验任务携带的不可信路径/网络, 拒则返回原因字符串。
+
+        纯 Python 进程内检查, 不做 OS 级资源限制 (见 __init__ 注释)。
+        只过滤任务方下发的路径/对端 (model_path、model_sync source), 不校验 agent
+        自建临时目录 — 后者是 agent 内部工作目录 (macOS 上为 $TMPDIR 非 /tmp),
+        对其加沙箱 allowed_paths 会误拒所有任务。
+        无沙箱或允许时返回 None。
+        """
+        if self._sandbox is None:
+            return None
+        # model_sync 出站对端主机走网络白名单
+        if task_type == "model_sync":
+            source_node = task.get("source_node", "")
+            if source_node and not self._sandbox.check_network_access(source_node):
+                return f"模型同步对端 {source_node} 不在沙箱允许网络白名单内"
+        # 推理/插件模型路径 (如显式给出) 走只读路径校验
+        model_path = task.get("params", {}).get("model_path", "") if isinstance(task.get("params"), dict) else ""
+        if model_path and not self._sandbox.check_path_access(model_path, write=False):
+            return f"模型路径 {model_path} 不在沙箱允许访问路径内"
+        return None
 
     async def cancel_task(self, task_id: str) -> bool:
         """取消正在运行的任务 — 真中止运行推理协程, 非假动作。"""
@@ -453,17 +489,27 @@ class NodeAgent:
 
     async def _execute_model_sync(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行模型同步任务 — 将指定模型同步到本节点。"""
+        from fusion_multi_node.utils.auth import (
+            build_safe_url,
+            is_safe_path_segment,
+            is_safe_peer_host,
+        )
+
         model_name = task.get("model_name", "")
         model_id = task.get("model_id", "")
         source_node = task.get("source_node", "master")
         logger.info(f"模型同步: {model_name} (id={model_id}) from {source_node}")
         try:
+            if not is_safe_path_segment(model_name):
+                return {"error": f"非法 model_name: {model_name!r}"}
+            if not is_safe_peer_host(source_node):
+                return {"error": f"不安全对端主机: {source_node!r}"}
             client = await self._get_http_client(300.0)
-            safe_source = source_node.replace("/", "").replace("..", "")
             source_port = task.get("source_port", 11452)
-            resp = await client.get(
-                f"http://{safe_source}:{source_port}/api/models/{model_name}/manifest",
+            url = build_safe_url(
+                "http", source_node, source_port, f"/api/models/{model_name}/manifest"
             )
+            resp = await client.get(url)
             manifest = resp.json()
             synced_files = []
             for entry in manifest.get("files", []):

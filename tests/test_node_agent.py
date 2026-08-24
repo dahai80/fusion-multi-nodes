@@ -249,6 +249,106 @@ class TestNodeAgentExecuteTask:
         assert agent._current_task is None
 
 
+class TestNodeAgentSandboxGate:
+    """M6-02 WorkerSandbox 接 NodeAgent 执行路径 (AR审计 #24 硬伤5)。"""
+
+    @pytest.mark.asyncio
+    async def test_no_sandbox_passthrough(self):
+        # 无沙箱 = 原行为, 不 gate
+        agent = NodeAgent()
+        assert agent._sandbox is None
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {},
+        }
+        mock_ac_class = _make_mock_client(mock_resp)
+        with patch("httpx.AsyncClient", mock_ac_class):
+            result = await agent.execute_task(
+                {"task_id": "s1", "type": "inference", "model": "m", "params": {"prompt": "hi"}}
+            )
+        assert result.get("sandbox_blocked") is None
+        assert result["content"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_sandbox_allows_tmp_inference(self):
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
+        sandbox = WorkerSandbox(SandboxConfig(allowed_paths=["/tmp"]))
+        agent = NodeAgent(sandbox=sandbox)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "ran"}}],
+            "usage": {},
+        }
+        mock_ac_class = _make_mock_client(mock_resp)
+        with patch("httpx.AsyncClient", mock_ac_class):
+            result = await agent.execute_task(
+                {"task_id": "s2", "type": "inference", "model": "m", "params": {"prompt": "hi"}}
+            )
+        assert result.get("sandbox_blocked") is None
+        assert result["content"] == "ran"
+
+    @pytest.mark.asyncio
+    async def test_sandbox_blocks_forbidden_model_path(self):
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
+        sandbox = WorkerSandbox(SandboxConfig(allowed_paths=["/tmp"]))
+        agent = NodeAgent(sandbox=sandbox)
+        result = await agent.execute_task(
+            {
+                "task_id": "s3",
+                "type": "inference",
+                "model": "m",
+                "params": {"prompt": "hi", "model_path": "/etc/shadow"},
+            }
+        )
+        assert result.get("sandbox_blocked") is True
+        assert "模型路径" in result["error"]
+        assert agent._current_task is None
+
+    @pytest.mark.asyncio
+    async def test_sandbox_blocks_model_sync_network(self):
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
+        sandbox = WorkerSandbox(SandboxConfig(allowed_network_hosts=["192.168.1.10"]))
+        agent = NodeAgent(sandbox=sandbox)
+        result = await agent.execute_task(
+            {
+                "task_id": "s4",
+                "type": "model_sync",
+                "model_name": "qwen",
+                "source_node": "evil.com",
+                "source_port": 11452,
+            }
+        )
+        assert result.get("sandbox_blocked") is True
+        assert "模型同步对端" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_model_sync_rejects_unsafe_model_name(self):
+        # 硬化 _execute_model_sync: 无沙箱也拒 ../ 与分隔符 (与 master_server 一致)
+        agent = NodeAgent()
+        result = await agent._execute_model_sync(
+            {"model_name": "../etc", "model_id": "x", "source_node": "192.168.1.10"}
+        )
+        assert "error" in result
+        assert "非法 model_name" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_model_sync_rejects_ssrf_host(self):
+        agent = NodeAgent()
+        result = await agent._execute_model_sync(
+            {"model_name": "qwen", "model_id": "x", "source_node": "169.254.169.254"}
+        )
+        assert "error" in result
+        assert "不安全对端主机" in result["error"]
+
+
 class TestNodeAgentReportFault:
     @pytest.mark.asyncio
     async def test_report_fault_success(self):

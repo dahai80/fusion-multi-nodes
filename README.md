@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-813%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-819%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -551,9 +551,10 @@ pytest tests/test_new_features.py -v
 **P2 未接线原型门禁 + security 接线 + 无界增长**
 - [x] #17 DataScrubber 补 openai_key/github_pat/slack_token/jwt_token + 数字边界修 CJK 邻接; DataIsolation realpath+commonpath 防符号链接绕过; PermissionManager block-by-default (已验证 fail-closed)
 - [x] #18 _metric_times list→deque(maxlen=10000) 对齐 metrics, 修无界增长+索引错位
-- [x] M9/M10/shard_replication/WorkerSandbox 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除)
+- [x] #24 WorkerSandbox 接 NodeAgent 执行路径: `execute_task` 入口 `_sandbox_gate` 校验任务携带路径/网络 (`check_path_access`/`check_network_access`), 拒则不派发 (硬伤5: security/ 原死代码零过滤 → 进程内 gate 实防御); `_execute_model_sync` 走 `is_safe_peer_host`+`build_safe_url`+`is_safe_path_segment` (与 master_server 一致, 修弱 `.replace()`); 不接 `apply_limits`/`setrlimit` (进程级资源限制误杀单长跑 agent), `SandboxExecutor` 仅子进程插件适用
+- [x] M9/M10/shard_replication 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除); WorkerSandbox 已接 (#24)
 
-回归: 813 tests passed, 0 ruff errors.
+回归: 819 tests passed, 0 ruff errors.
 
 ---
 
