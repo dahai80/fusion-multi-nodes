@@ -144,6 +144,8 @@ class KVTransferRequest(BaseModel):
 class KVWarmRequest(BaseModel):
     model_name: str
     prompts: list[str]
+    # 目标节点列表; 不提供则仅本节点预存 (无远端推送)。
+    nodes: list[str] = []
 
 
 class TaskCancelRequest(BaseModel):
@@ -177,6 +179,9 @@ class AgentServer:
         self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
         self._uvicorn_server: Any | None = None
         self._started_at: float = 0.0
+        # 本节点对外可寻址地址 — transfer_from_remote 据此回连本机拉缓存。
+        # 默认 127.0.0.1, start() 时更新为实际监听 host。
+        self._host: str = "127.0.0.1"
         self._setup_routes()
 
     def _setup_routes(self):
@@ -245,9 +250,12 @@ class AgentServer:
 
         @app.post("/api/kv/transfer")
         async def kv_transfer(req: KVTransferRequest):
-            ok = self.kv_manager.transfer_from_remote(
+            # E2: source_node 用本节点真实可寻址地址, 非 "self"。
+            # transfer_from_remote 向 source 回连拉缓存; "self" 解析为 0.0.0.0/失败。
+            source_addr = f"{self._host}:{self.agent.config.agent_port}"
+            ok = await self.kv_manager.transfer_from_remote(
                 req.cache_id,
-                source_node="self",
+                source_node=source_addr,
                 target_node=req.target_node,
             )
             if not ok:
@@ -256,12 +264,17 @@ class AgentServer:
 
         @app.post("/api/kv/warm")
         async def kv_warm(req: KVWarmRequest):
-            result = self.kv_manager.warm_cache(
+            # E7: nodes 由调用方提供 (Master/CLI 持有在线节点表)。
+            # Agent 不知集群拓扑, 不可硬编码 []; 空 nodes = 仅本节点预存, 远端无推送。
+            if not req.nodes:
+                logger.warning("kv_warm: 未提供目标节点, 仅本节点预存, 无远端推送")
+            result = await self.kv_manager.warm_cache(
                 req.model_name,
                 req.prompts,
-                nodes=[],
+                nodes=req.nodes,
             )
-            return {"status": "ok", "warmed": result.get("warmed", 0)}
+            warmed = result.get("success", 0)
+            return {"status": "ok", "warmed": warmed, "success": warmed, "failed": result.get("failed", 0)}
 
         @app.get("/api/kv/stats")
         async def kv_stats():
@@ -277,6 +290,7 @@ class AgentServer:
     async def start(self, host: str = "127.0.0.1", port: int = 11445) -> None:
         import uvicorn
 
+        self._host = host
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)
         self._started_at = time.time()

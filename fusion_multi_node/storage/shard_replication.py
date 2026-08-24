@@ -360,7 +360,19 @@ class ShardReplicator:
         """M9-02 Quorum 写入：写入多数副本成功即视为写入成功。
 
         写入 ⌈N/2⌉ 个副本即返回成功，其余异步补齐。
+
+        E9: quorum 语义依赖真实多副本持久化 (每副本独立物理介质)。无 storage_volume 时
+        本地写路径 (_sync_local) 会跳过 storage_volume.write_file, 仅登记内存元数据
+        (replica.checksum/last_synced) 却返回 success=True → 谎报多数持久化成功。
+        故无 storage_volume 一律拒绝, 不降级到内存自欺。
         """
+        if storage_volume is None:
+            logger.warning(f"Quorum 写入拒绝：分片 {shard_id} 无存储卷，quorum 需真实多副本持久化")
+            return {
+                "shard_id": shard_id,
+                "success": False,
+                "error": "no_storage_volume",
+            }
         self.register_shard_data(shard_id, data)
         replicas = self._replicas.get(shard_id, [])
         if not replicas:
@@ -391,7 +403,18 @@ class ShardReplicator:
         """M9-02 Quorum 读取：从多数副本读取并校验一致性。
 
         读取 ⌈N/2⌉ 个副本，校验 checksum 一致后返回数据。
+
+        E9: 无 storage_volume 时所有副本读同一内存 dict (self._shard_data) → checksum
+        恒一致, consistent 恒 True, 掩盖真实跨副本不一致。quorum 读必须从每副本独立
+        物理介质读取才有意义, 故无 storage_volume 一律拒绝。
         """
+        if storage_volume is None:
+            logger.warning(f"Quorum 读取拒绝：分片 {shard_id} 无存储卷，quorum 需真实多副本读取")
+            return {
+                "shard_id": shard_id,
+                "success": False,
+                "error": "no_storage_volume",
+            }
         replicas = self._replicas.get(shard_id, [])
         if not replicas:
             return {"shard_id": shard_id, "success": False, "error": "no_replicas"}
@@ -402,19 +425,13 @@ class ShardReplicator:
         for replica in replicas:
             if replica.status != "active":
                 continue
-            if storage_volume is None:
-                cached = self._shard_data.get(shard_id)
-                if cached is not None:
-                    reads[replica.node_id] = cached
-                    checksums[replica.node_id] = hashlib.sha256(cached).hexdigest()
-            else:
-                try:
-                    data = storage_volume.read_file(replica.volume_name, replica.file_path)
-                    if data is not None:
-                        reads[replica.node_id] = data
-                        checksums[replica.node_id] = hashlib.sha256(data).hexdigest()
-                except Exception as e:
-                    logger.debug(f"Quorum 读取跳过节点: {replica.node_id}: {e}")
+            try:
+                data = storage_volume.read_file(replica.volume_name, replica.file_path)
+                if data is not None:
+                    reads[replica.node_id] = data
+                    checksums[replica.node_id] = hashlib.sha256(data).hexdigest()
+            except Exception as e:
+                logger.debug(f"Quorum 读取跳过节点: {replica.node_id}: {e}")
             if len(reads) >= quorum:
                 break
 

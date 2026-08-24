@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -186,7 +187,14 @@ class ClusterMaster:
         # 内部状态
         self._running = False
         self._server: asyncio.AbstractServer | None = None
-        self._lock = asyncio.Lock()
+        # H2: 按资源域分锁 (nodes/tasks/kv), 替代单全局锁。
+        # 锁序约定: nodes -> tasks -> kv。跨域写操作须按此序同时获取所需域锁, 防死锁。
+        # 注: asyncio 单线程协作, 锁仅在临界区含 await 时才实际阻塞;
+        #     此处分锁主要为 master_server 等外部读取者提供快照接口
+        #     (snapshot_nodes/snapshot_tasks/snapshot_kv), 避免边迭代边改 dict。
+        self._nodes_lock = asyncio.Lock()
+        self._tasks_lock = asyncio.Lock()
+        self._kv_lock = asyncio.Lock()
         self._health_task: asyncio.Task | None = None
         self._retry_task: asyncio.Task | None = None
         self._pending_retry: list[ClusterTask] = []
@@ -203,7 +211,7 @@ class ClusterMaster:
 
     async def register_node(self, info: NodeInfo) -> None:
         """注册或更新节点。"""
-        async with self._lock:
+        async with self._nodes_lock:
             info.status = NodeStatus.ONLINE
             info.last_heartbeat = time.time()
             self.nodes[info.node_id] = info
@@ -213,7 +221,7 @@ class ClusterMaster:
 
     async def unregister_node(self, node_id: str) -> None:
         """注销节点。"""
-        async with self._lock:
+        async with self._nodes_lock:
             self.nodes.pop(node_id, None)
             self.load_router.remove_node(node_id)
             logger.info(f"节点离线: {node_id}")
@@ -225,7 +233,7 @@ class ClusterMaster:
         active_tasks: int | None = None,
     ) -> bool:
         """加锁更新节点心跳 — 禁止路由层裸改 node 字段 (与 _health_check_loop 竞态)。"""
-        async with self._lock:
+        async with self._nodes_lock:
             node = self.nodes.get(node_id)
             if not node:
                 return False
@@ -241,7 +249,7 @@ class ClusterMaster:
 
     async def report_fault(self, node_id: str, fault_type: str = "", message: str = "") -> bool:
         """加锁标记节点故障 — 禁止路由层裸改 node.status。"""
-        async with self._lock:
+        async with self._nodes_lock:
             node = self.nodes.get(node_id)
             if not node:
                 return False
@@ -250,33 +258,43 @@ class ClusterMaster:
             return True
 
     async def get_online_nodes(self) -> list[NodeInfo]:
+        """纯快照: 返回当前 ONLINE/BUSY 且心跳未超时的节点, 不改任何状态。
+
+        状态跃迁 (ONLINE→BUSY/OFFLINE, BUSY→ONLINE/OFFLINE) 由 _refresh_node_statuses
+        在 _health_check_loop 中统一执行 — 读操作不应有副作用 (R6)。
+        """
         now = time.time()
         online = []
-        async with self._lock:
+        async with self._nodes_lock:
+            for node in self.nodes.values():
+                if node.status in (NodeStatus.ONLINE, NodeStatus.BUSY):
+                    if now - node.last_heartbeat < self.heartbeat_timeout:
+                        online.append(node)
+        return online
+
+    async def _refresh_node_statuses(self) -> None:
+        """统一状态跃迁 — 仅在 _health_check_loop 调用, 不在读取路径。"""
+        now = time.time()
+        async with self._nodes_lock:
             for node in self.nodes.values():
                 if node.status == NodeStatus.ONLINE:
-                    if now - node.last_heartbeat < self.heartbeat_timeout:
-                        if node.active_tasks >= node.max_tasks:
-                            node.status = NodeStatus.BUSY
-                            logger.info(f"节点任务满载: {node.hostname} ({node.active_tasks}/{node.max_tasks})")
-                        else:
-                            online.append(node)
-                    else:
+                    if now - node.last_heartbeat >= self.heartbeat_timeout:
                         node.status = NodeStatus.OFFLINE
                         logger.warning(f"节点心跳超时: {node.hostname}")
+                    elif node.active_tasks >= node.max_tasks:
+                        node.status = NodeStatus.BUSY
+                        logger.info(f"节点任务满载: {node.hostname} ({node.active_tasks}/{node.max_tasks})")
                 elif node.status == NodeStatus.BUSY:
                     if now - node.last_heartbeat >= self.heartbeat_timeout:
                         node.status = NodeStatus.OFFLINE
                         logger.warning(f"节点心跳超时(BUSY): {node.hostname}")
                     elif node.active_tasks < node.max_tasks:
                         node.status = NodeStatus.ONLINE
-                        online.append(node)
                         logger.info(f"节点恢复空闲: {node.hostname}")
-        return online
 
     async def check_heartbeat(self, node_id: str) -> bool:
         """检查节点心跳是否超时。"""
-        async with self._lock:
+        async with self._nodes_lock:
             node = self.nodes.get(node_id)
             if not node:
                 return False
@@ -301,7 +319,7 @@ class ClusterMaster:
 
     async def update_node_load(self, node_id: str, metrics: LoadMetrics) -> None:
         """更新节点负载指标（由 Worker 上报调用）。"""
-        async with self._lock:
+        async with self._nodes_lock:
             node = self.nodes.get(node_id)
             if not node:
                 logger.warning(f"更新负载: 节点不存在 {node_id}")
@@ -365,18 +383,19 @@ class ClusterMaster:
 
     async def complete_task(self, task_id: str, error: str = "") -> None:
         """完成任务。"""
-        async with self._lock:
-            task = self.tasks.get(task_id)
-            if not task:
-                return
-            task.status = TaskStatus.COMPLETED if not error else TaskStatus.FAILED
-            task.completed_at = time.time()
-            task.error = error
+        async with self._nodes_lock:
+            async with self._tasks_lock:
+                task = self.tasks.get(task_id)
+                if not task:
+                    return
+                task.status = TaskStatus.COMPLETED if not error else TaskStatus.FAILED
+                task.completed_at = time.time()
+                task.error = error
 
-            for nid in task.assigned_nodes:
-                node = self.nodes.get(nid)
-                if node:
-                    node.active_tasks = max(0, node.active_tasks - 1)
+                for nid in task.assigned_nodes:
+                    node = self.nodes.get(nid)
+                    if node:
+                        node.active_tasks = max(0, node.active_tasks - 1)
 
     async def assign_task(self, task: ClusterTask) -> bool:
         """分配任务到节点 — 幂等: 已 RUNNING 的任务直接返回 True。
@@ -384,7 +403,7 @@ class ClusterMaster:
         M4-02: 轻量级任务/≤0.5B 模型强制本地执行。
         M4-03: 大模型(≥13B) 使用 VRAM 优先策略。
         """
-        async with self._lock:
+        async with self._tasks_lock:
             existing = self.tasks.get(task.task_id)
             if existing and existing.status == TaskStatus.RUNNING:
                 logger.debug(f"任务已分配，跳过: {task.task_id}")
@@ -396,25 +415,33 @@ class ClusterMaster:
         if self._is_local_force(task, required_mem):
             preferred = task.preferred_node_id
             if preferred and preferred in self.nodes:
-                node = self.nodes[preferred]
-                if node.status == NodeStatus.ONLINE and node.available_memory_gb >= required_mem:
-                    async with self._lock:
-                        # TOCTOU 再确认: 并发 assign_task 可能已分配本任务或抢空容量
-                        existing = self.tasks.get(task.task_id)
-                        if existing and existing.status == TaskStatus.RUNNING:
-                            logger.debug(f"M4-02 本地强制: 任务已被并发分配: {task.task_id}")
-                            return True
-                        node = self.nodes.get(preferred)
-                        if not node or node.status != NodeStatus.ONLINE or node.active_tasks >= node.max_tasks:
-                            logger.info("M4-02 本地强制: 首选节点并发抢占后不可用，退回普通调度")
-                        else:
-                            task.assigned_nodes = [preferred]
-                            task.status = TaskStatus.RUNNING
-                            task.started_at = time.time()
-                            self.tasks[task.task_id] = task
-                            node.active_tasks += 1
-                            logger.info(f"M4-02 本地强制: {task.name} → {preferred} (轻量级任务)")
-                            return True
+                # nodes 读取也走 nodes 锁, 与 register_node 写隔离 (R6/H2)
+                async with self._nodes_lock:
+                    node = self.nodes.get(preferred)
+                    available_ok = bool(
+                        node
+                        and node.status == NodeStatus.ONLINE
+                        and node.available_memory_gb >= required_mem
+                    )
+                if available_ok:
+                    async with self._nodes_lock:
+                        async with self._tasks_lock:
+                            # TOCTOU 再确认: 并发 assign_task 可能已分配本任务或抢空容量
+                            existing = self.tasks.get(task.task_id)
+                            if existing and existing.status == TaskStatus.RUNNING:
+                                logger.debug(f"M4-02 本地强制: 任务已被并发分配: {task.task_id}")
+                                return True
+                            node = self.nodes.get(preferred)
+                            if not node or node.status != NodeStatus.ONLINE or node.active_tasks >= node.max_tasks:
+                                logger.info("M4-02 本地强制: 首选节点并发抢占后不可用，退回普通调度")
+                            else:
+                                task.assigned_nodes = [preferred]
+                                task.status = TaskStatus.RUNNING
+                                task.started_at = time.time()
+                                self.tasks[task.task_id] = task
+                                node.active_tasks += 1
+                                logger.info(f"M4-02 本地强制: {task.name} → {preferred} (轻量级任务)")
+                                return True
             logger.info(f"M4-02 本地强制: {task.name} 首选节点不可用，退回普通调度")
 
         # M4-03 VRAM 优先: 大模型切换路由策略
@@ -441,29 +468,30 @@ class ClusterMaster:
                 logger.info(f"M4-05 尝试云端回退: {task.name}")
             return False
 
-        async with self._lock:
-            # TOCTOU 再确认: 并发 assign_task 可能已分配本任务 (双计 active_tasks)
-            existing = self.tasks.get(task.task_id)
-            if existing and existing.status == TaskStatus.RUNNING:
-                logger.debug(f"任务已被并发分配，跳过重复计 active_tasks: {task.task_id}")
-                return True
-            # 重新确认所选节点仍在线且未满载 (select_nodes 在锁外执行)
-            confirmed = []
-            for n in nodes:
-                node = self.nodes.get(n.node_id)
-                if node and node.status == NodeStatus.ONLINE and node.active_tasks < node.max_tasks:
-                    confirmed.append(node)
-            need = len(task.model_shards) or 1
-            if len(confirmed) < need:
-                logger.error(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)}")
-                return False
-            task.assigned_nodes = [n.node_id for n in confirmed]
-            task.status = TaskStatus.RUNNING
-            task.started_at = time.time()
-            self.tasks[task.task_id] = task
+        async with self._nodes_lock:
+            async with self._tasks_lock:
+                # TOCTOU 再确认: 并发 assign_task 可能已分配本任务 (双计 active_tasks)
+                existing = self.tasks.get(task.task_id)
+                if existing and existing.status == TaskStatus.RUNNING:
+                    logger.debug(f"任务已被并发分配，跳过重复计 active_tasks: {task.task_id}")
+                    return True
+                # 重新确认所选节点仍在线且未满载 (select_nodes 在锁外执行)
+                confirmed = []
+                for n in nodes:
+                    node = self.nodes.get(n.node_id)
+                    if node and node.status == NodeStatus.ONLINE and node.active_tasks < node.max_tasks:
+                        confirmed.append(node)
+                need = len(task.model_shards) or 1
+                if len(confirmed) < need:
+                    logger.error(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)}")
+                    return False
+                task.assigned_nodes = [n.node_id for n in confirmed]
+                task.status = TaskStatus.RUNNING
+                task.started_at = time.time()
+                self.tasks[task.task_id] = task
 
-            for node in confirmed:
-                node.active_tasks += 1
+                for node in confirmed:
+                    node.active_tasks += 1
 
         logger.info(f"任务分配: {task.name} → {[n.hostname for n in nodes]}")
         return True
@@ -490,20 +518,21 @@ class ClusterMaster:
 
     async def migrate_task(self, task_id: str) -> bool:
         """故障迁移任务到其他节点。"""
-        async with self._lock:
-            task = self.tasks.get(task_id)
-            if not task or task.status != TaskStatus.RUNNING:
-                return False
+        async with self._nodes_lock:
+            async with self._tasks_lock:
+                task = self.tasks.get(task_id)
+                if not task or task.status != TaskStatus.RUNNING:
+                    return False
 
-            logger.info(f"迁移任务: {task.name} ({task_id})")
-            task.status = TaskStatus.MIGRATED
-            for nid in task.assigned_nodes:
-                node = self.nodes.get(nid)
-                if node:
-                    node.active_tasks = max(0, node.active_tasks - 1)
+                logger.info(f"迁移任务: {task.name} ({task_id})")
+                task.status = TaskStatus.MIGRATED
+                for nid in task.assigned_nodes:
+                    node = self.nodes.get(nid)
+                    if node:
+                        node.active_tasks = max(0, node.active_tasks - 1)
 
-            task.assigned_nodes = []
-            task.status = TaskStatus.PENDING
+                task.assigned_nodes = []
+                task.status = TaskStatus.PENDING
 
         ok = await self.assign_task(task)
         if not ok:
@@ -513,44 +542,45 @@ class ClusterMaster:
     # M5-04 任务全生命周期取消
     async def cancel_task(self, task_id: str, reason: str = "", cancel_sub_tasks: bool = True) -> bool:
         """取消任务及其子任务。"""
-        async with self._lock:
-            task = self.tasks.get(task_id)
-            if not task:
-                logger.warning(f"取消任务未找到: {task_id}")
-                return False
-            if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                logger.warning(f"任务无法取消 (状态: {task.status.value}): {task_id}")
-                return False
+        async with self._nodes_lock:
+            async with self._tasks_lock:
+                task = self.tasks.get(task_id)
+                if not task:
+                    logger.warning(f"取消任务未找到: {task_id}")
+                    return False
+                if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                    logger.warning(f"任务无法取消 (状态: {task.status.value}): {task_id}")
+                    return False
 
-            task.cancel_reason = reason or "用户取消"
-            for nid in task.assigned_nodes:
-                node = self.nodes.get(nid)
-                if node:
-                    node.active_tasks = max(0, node.active_tasks - 1)
-            task.assigned_nodes = []
+                task.cancel_reason = reason or "用户取消"
+                for nid in task.assigned_nodes:
+                    node = self.nodes.get(nid)
+                    if node:
+                        node.active_tasks = max(0, node.active_tasks - 1)
+                task.assigned_nodes = []
 
-            # 递归取消子任务（支持多层）
-            cancelled_sub = []
-            if cancel_sub_tasks and task.sub_tasks:
-                cancel_stack = list(task.sub_tasks)
-                while cancel_stack:
-                    sub_id = cancel_stack.pop()
-                    sub = self.tasks.get(sub_id)
-                    if sub and sub.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
-                        for nid in sub.assigned_nodes:
-                            node = self.nodes.get(nid)
-                            if node:
-                                node.active_tasks = max(0, node.active_tasks - 1)
-                        sub.assigned_nodes = []
-                        sub.status = TaskStatus.CANCELLED
-                        sub.cancel_reason = f"父任务取消: {task_id}"
-                        sub.error = sub.cancel_reason
-                        cancelled_sub.append(sub_id)
-                        if sub.sub_tasks:
-                            cancel_stack.extend(sub.sub_tasks)
+                # 递归取消子任务（支持多层）
+                cancelled_sub = []
+                if cancel_sub_tasks and task.sub_tasks:
+                    cancel_stack = list(task.sub_tasks)
+                    while cancel_stack:
+                        sub_id = cancel_stack.pop()
+                        sub = self.tasks.get(sub_id)
+                        if sub and sub.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                            for nid in sub.assigned_nodes:
+                                node = self.nodes.get(nid)
+                                if node:
+                                    node.active_tasks = max(0, node.active_tasks - 1)
+                            sub.assigned_nodes = []
+                            sub.status = TaskStatus.CANCELLED
+                            sub.cancel_reason = f"父任务取消: {task_id}"
+                            sub.error = sub.cancel_reason
+                            cancelled_sub.append(sub_id)
+                            if sub.sub_tasks:
+                                cancel_stack.extend(sub.sub_tasks)
 
-            task.status = TaskStatus.CANCELLED
-            task.error = task.cancel_reason
+                task.status = TaskStatus.CANCELLED
+                task.error = task.cancel_reason
 
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
         return True
@@ -566,39 +596,41 @@ class ClusterMaster:
 
     async def degrade_task(self, task_id: str) -> bool:
         """将任务降级到更小的模型并重新分配。"""
-        async with self._lock:
-            task = self.tasks.get(task_id)
-            if not task or task.status not in (
-                TaskStatus.RUNNING,
-                TaskStatus.PENDING,
-                TaskStatus.FAILED,
-            ):
-                return False
+        async with self._nodes_lock:
+            async with self._tasks_lock:
+                task = self.tasks.get(task_id)
+                if not task or task.status not in (
+                    TaskStatus.RUNNING,
+                    TaskStatus.PENDING,
+                    TaskStatus.FAILED,
+                ):
+                    return False
 
-            if task.degradation_count >= task.max_degradations:
-                logger.error(f"任务降级次数超限: {task_id} ({task.degradation_count})")
-                return False
+                if task.degradation_count >= task.max_degradations:
+                    logger.error(f"任务降级次数超限: {task_id} ({task.degradation_count})")
+                    return False
 
-            current_size = self._extract_model_size(task.model_name)
-            next_size = self.MODEL_DEGRADATION_CHAIN.get(current_size)
-            if not next_size:
-                logger.warning(f"任务无法降级，无更小模型: {task.model_name}")
-                return False
+                current_size = self._extract_model_size(task.model_name)
+                next_size = self.MODEL_DEGRADATION_CHAIN.get(current_size)
+                if not next_size:
+                    logger.warning(f"任务无法降级，无更小模型: {task.model_name}")
+                    return False
 
-            # 释放原节点
-            for nid in task.assigned_nodes:
-                node = self.nodes.get(nid)
-                if node:
-                    node.active_tasks = max(0, node.active_tasks - 1)
-            task.assigned_nodes = []
+                # 释放原节点
+                for nid in task.assigned_nodes:
+                    node = self.nodes.get(nid)
+                    if node:
+                        node.active_tasks = max(0, node.active_tasks - 1)
+                task.assigned_nodes = []
 
-            # 降级模型
-            old_model = task.model_name
-            task.model_name = task.model_name.replace(current_size, next_size)
-            task.degraded_from_model = old_model
-            task.degradation_count += 1
-            task.status = TaskStatus.PENDING
-            task.error = ""
+                # 降级模型 (R7: 用正则边界替换, 避免 130b→320b 这类子串误伤)
+                old_model = task.model_name
+                pattern = rf"(?<!\d){re.escape(current_size)}(?!\d)"
+                task.model_name = re.sub(pattern, next_size, task.model_name, flags=re.IGNORECASE)
+                task.degraded_from_model = old_model
+                task.degradation_count += 1
+                task.status = TaskStatus.PENDING
+                task.error = ""
 
         logger.info(f"任务降级: {task_id} {old_model} → {task.model_name} (第{task.degradation_count}次)")
 
@@ -607,18 +639,35 @@ class ClusterMaster:
             self._enqueue_retry(task)
         return ok
 
-    def _extract_model_size(self, model_name: str) -> str:
-        name_lower = model_name.lower()
-        for size_key in self.MODEL_DEGRADATION_CHAIN:
-            if size_key in name_lower:
+    def _match_model_size(self, model_name: str, size_keys: set[str] | dict) -> str | None:
+        """R7: 用正则边界匹配模型尺寸, 替代子串 in。
+
+        `(?<!\\d)<N>b(?!\\d)` 确保 13b 不命中 130b, 3b 不命中 13b/30b/33b。
+        按数值降序匹配 (70b 先于 7b), 避免短键误吞长键。
+        返回命中的 size_key, 未命中返回 None。
+        """
+        name_lower = (model_name or "").lower()
+        if not name_lower:
+            return None
+        # 按数值降序: "70b"->70, "0.5b"->0.5
+        def _num(key: str) -> float:
+            return float(key[:-1]) if key.endswith("b") else 0.0
+
+        for size_key in sorted(size_keys, key=_num, reverse=True):
+            pattern = rf"(?<!\d){re.escape(size_key)}(?!\d)"
+            if re.search(pattern, name_lower):
                 return size_key
-        return ""
+        return None
+
+    def _extract_model_size(self, model_name: str) -> str:
+        size = self._match_model_size(model_name, self.MODEL_DEGRADATION_CHAIN)
+        return size or ""
 
     async def check_timeouts(self) -> list[str]:
         """检查并处理超时任务，自动入重试队列。"""
         now = time.time()
         timed_out = []
-        async with self._lock:
+        async with self._tasks_lock:
             for tid, task in list(self.tasks.items()):
                 if task.status == TaskStatus.RUNNING and task.started_at > 0:
                     if now - task.started_at > task.timeout_seconds:
@@ -650,39 +699,41 @@ class ClusterMaster:
     _VRAM_FIRST_MODEL_SIZES = {"70b", "32b", "13b"}
 
     def _is_local_force(self, task: ClusterTask, required_mem: float) -> bool:
-        """M4-02 判断是否强制本地执行。"""
+        """M4-02 判断是否强制本地执行 (R7: 正则边界匹配)。"""
         if not task.model_name:
             return required_mem <= self._LOCAL_FORCE_MEMORY_GB
-        name_lower = task.model_name.lower()
-        for size in self._LOCAL_FORCE_MODEL_SIZES:
-            if size in name_lower:
-                return True
+        if self._match_model_size(task.model_name, self._LOCAL_FORCE_MODEL_SIZES):
+            return True
         return required_mem <= self._LOCAL_FORCE_MEMORY_GB
 
     def _is_vram_first(self, task: ClusterTask) -> bool:
-        """M4-03 判断是否使用 VRAM 优先策略。"""
+        """M4-03 判断是否使用 VRAM 优先策略 (R7: 正则边界匹配)。"""
         if not task.model_name:
             return False
-        name_lower = task.model_name.lower()
-        return any(size in name_lower for size in self._VRAM_FIRST_MODEL_SIZES)
+        return self._match_model_size(task.model_name, self._VRAM_FIRST_MODEL_SIZES) is not None
 
     def _estimate_memory(self, task: ClusterTask) -> float:
-        """估算任务所需内存。"""
+        """估算任务所需内存 (R7: 正则边界匹配)。"""
         base = self._BASE_MEMORY_GB
         if task.model_name:
             base += self._DEFAULT_MODEL_MEMORY_GB
-            name_lower = task.model_name.lower()
-            for size_key, mem in self.MODEL_MEMORY_PROFILE.items():
-                if size_key in name_lower:
-                    base += mem - self._DEFAULT_MODEL_MEMORY_GB
-                    break
+            size_key = self._match_model_size(task.model_name, self.MODEL_MEMORY_PROFILE)
+            if size_key:
+                mem = self.MODEL_MEMORY_PROFILE[size_key]
+                base += mem - self._DEFAULT_MODEL_MEMORY_GB
         return base
 
     # ── KV 缓存管理 ──
 
+    async def _is_node_online(self, node_id: str) -> bool:
+        """节点是否在线快照 (nodes 域只读, 供 kv 等跨域读取调用, 避免跨域嵌套持锁)。"""
+        async with self._nodes_lock:
+            node = self.nodes.get(node_id)
+            return bool(node and node.status == NodeStatus.ONLINE)
+
     async def register_kv_cache(self, entry: KVCacheEntry) -> None:
         """注册 KV 缓存。"""
-        async with self._lock:
+        async with self._kv_lock:
             self.kv_cache[entry.cache_id] = entry
             if len(self.kv_cache) > self._max_kv_cache:
                 oldest = min(self.kv_cache.items(), key=lambda x: x[1].created_at)
@@ -692,11 +743,10 @@ class ClusterMaster:
     async def find_kv_cache(self, model_name: str) -> KVCacheEntry | None:
         """查找可复用的 KV 缓存。"""
         now = time.time()
-        async with self._lock:
+        async with self._kv_lock:
             for cid, entry in list(self.kv_cache.items()):
                 if entry.model_name == model_name and now - entry.created_at < entry.ttl_seconds:
-                    node = self.nodes.get(entry.node_id)
-                    if node and node.status == NodeStatus.ONLINE:
+                    if await self._is_node_online(entry.node_id):
                         entry.access_count += 1
                         return entry
                 if now - entry.created_at > entry.ttl_seconds:
@@ -715,17 +765,24 @@ class ClusterMaster:
             protocol="fmp",
         )
         logger.info(
-            f"M9-04 FMP KV 缓存同步: cache_id={cache_id} model={model_name} "
+            f"M9-04 FMP KV 缓存同步(元数据): cache_id={cache_id} model={model_name} "
             f"source={source_node_id} size={size_mb:.1f}MB protocol={sync_msg.protocol}"
         )
 
-        async with self._lock:
+        async with self._kv_lock:
             entry = self.kv_cache.get(cache_id)
             if not entry:
                 logger.warning(f"M9-04 KV 缓存同步: cache_id={cache_id} 未注册，跳过同步")
                 return False
 
-        return True
+        # R3: 仅登记了 KV 缓存元数据消息, 未实现张量级跨节点传输执行层。
+        # 跨节点张量迁移依赖 fusion-mlx /distributed/* 路由 (上游 issue #621 未实现),
+        # 当前无传输通道 → 真实同步未发生。返回 False 以如实反映, 避免向调用方谎报成功。
+        logger.warning(
+            f"M9-04 KV 缓存跨节点传输未实现: cache_id={cache_id} model={model_name} "
+            f"source={source_node_id}。元数据已登记, 张量迁移需上游 /distributed/* 路由 (issue #621)"
+        )
+        return False
 
     # ── M3-03 选举配置 (未接线原型, 非生产 HA) ──
     # 注意: setup_election 不被 ClusterMaster.start() 调用, 现网为单 Master 无 HA。
@@ -928,6 +985,7 @@ class ClusterMaster:
             while self._running:
                 await asyncio.sleep(10)
                 await self.check_timeouts()
+                await self._refresh_node_statuses()
                 await self._cleanup_completed_tasks()
                 await self._cleanup_offline_nodes()
                 online = len(await self.get_online_nodes())
@@ -938,7 +996,7 @@ class ClusterMaster:
 
     async def _cleanup_completed_tasks(self) -> None:
         """清理已完成的旧任务，防止 tasks 无限增长。"""
-        async with self._lock:
+        async with self._tasks_lock:
             terminal = [
                 tid
                 for tid, t in self.tasks.items()
@@ -959,7 +1017,7 @@ class ClusterMaster:
     async def _cleanup_offline_nodes(self) -> None:
         """清理长时间离线节点，防止 nodes 无限增长。"""
         now = time.time()
-        async with self._lock:
+        async with self._nodes_lock:
             stale = [
                 nid for nid, n in self.nodes.items() if n.status == NodeStatus.OFFLINE and now - n.last_heartbeat > 3600
             ]
@@ -970,25 +1028,53 @@ class ClusterMaster:
 
     # ── 统计信息 ──
 
+    async def snapshot_nodes(self) -> list[NodeInfo]:
+        """节点表快照 (nodes 域只读) — 供外部 (master_server) 迭代用, 避免裸读 self.nodes。"""
+        async with self._nodes_lock:
+            return list(self.nodes.values())
+
+    async def snapshot_tasks(self) -> list[ClusterTask]:
+        """任务表快照 (tasks 域只读) — 供外部迭代用, 避免裸读 self.tasks。"""
+        async with self._tasks_lock:
+            return list(self.tasks.values())
+
+    async def get_node(self, node_id: str) -> NodeInfo | None:
+        """取单节点快照引用 (nodes 域只读)。"""
+        async with self._nodes_lock:
+            return self.nodes.get(node_id)
+
+    async def get_task(self, task_id: str) -> ClusterTask | None:
+        """取单任务快照引用 (tasks 域只读)。"""
+        async with self._tasks_lock:
+            return self.tasks.get(task_id)
+
     async def get_stats(self) -> dict[str, Any]:
         """获取集群统计信息。"""
         online_nodes = await self.get_online_nodes()
-        async with self._lock:
-            stats = {
-                "total_nodes": len(self.nodes),
-                "online_nodes": len(online_nodes),
-                "total_tasks": len(self.tasks),
-                "active_tasks": sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING),
-                "completed_tasks": sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED),
-                "failed_tasks": sum(
-                    1 for t in self.tasks.values() if t.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT)
-                ),
-                "kv_cache_entries": len(self.kv_cache),
-                "total_memory_gb": sum(n.total_memory_gb for n in online_nodes),
-                "available_memory_gb": sum(n.available_memory_gb for n in online_nodes),
-            }
-            stats["load_summary"] = self.load_router.get_cluster_load_summary()
-            return stats
+        async with self._nodes_lock:
+            total_nodes = len(self.nodes)
+        async with self._tasks_lock:
+            total_tasks = len(self.tasks)
+            active_tasks = sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING)
+            completed_tasks = sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
+            failed_tasks = sum(
+                1 for t in self.tasks.values() if t.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT)
+            )
+        async with self._kv_lock:
+            kv_cache_entries = len(self.kv_cache)
+        stats = {
+            "total_nodes": total_nodes,
+            "online_nodes": len(online_nodes),
+            "total_tasks": total_tasks,
+            "active_tasks": active_tasks,
+            "completed_tasks": completed_tasks,
+            "failed_tasks": failed_tasks,
+            "kv_cache_entries": kv_cache_entries,
+            "total_memory_gb": sum(n.total_memory_gb for n in online_nodes),
+            "available_memory_gb": sum(n.available_memory_gb for n in online_nodes),
+        }
+        stats["load_summary"] = self.load_router.get_cluster_load_summary()
+        return stats
 
 
 # ── HA Standby (未接线原型, 非生产 HA) ──

@@ -5,6 +5,13 @@
 - 数据并行（Data Parallelism）：多节点完整加载同款模型
 - 通信压缩（Caveman token compression）
 - MoE 模型分布式路由
+
+能力状态（2026-08-24 AR 审计 H1）：
+- 数据并行（DATA）：可用。走 fusion-mlx `/v1/chat/completions`（已存在）。
+- 流水线并行（PIPELINE）：未实现，依赖 fusion-mlx `/distributed/*` 端点，
+  该端点当前不存在（上游 issue: dahai80/fusion-mlx#621）。现网调用必 404。
+  本模块保留分片/步进代码骨架待上游就绪;调用方应先校验端点可用性或捕获
+  RuntimeError。激活张量传输层亦缺失（现仅转发明文 prompt,非真实激活）。
 """
 
 from __future__ import annotations
@@ -205,6 +212,7 @@ class DistributedMLXBridge:
                     f"http://{safe_node}:{fusion_mlx_port}/distributed/pipeline_step",
                     json=payload,
                 )
+                resp.raise_for_status()
                 data = resp.json()
                 current_input = data.get("output", current_input)
                 logger.debug(f"流水线步骤 {i + 1}/{len(node_chain)} 完成 @ {node_id}")
@@ -233,23 +241,29 @@ class DistributedMLXBridge:
         优先分配给活跃任务数最少的节点，而非简单轮询。
         """
         load: dict[str, int] = dict.fromkeys(nodes, 0)
-        tasks = []
+        tasks: list[asyncio.Task] = []
+        assigned: list[str] = []
 
         for prompt in prompts:
             min_node = min(load, key=load.get)
             load[min_node] += 1
-            tasks.append(self._single_inference(min_node, model_name, prompt, fusion_mlx_port))
+            assigned.append(min_node)
+            tasks.append(asyncio.create_task(self._single_inference(min_node, model_name, prompt, fusion_mlx_port)))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         processed = []
-        for r in results:
+        for node_id, r in zip(assigned, results):
             if isinstance(r, Exception):
-                processed.append({"error": "推理执行失败"})
+                logger.error(f"数据并行推理失败 @ 节点 {node_id}: {type(r).__name__}: {r}")
+                processed.append({"node_id": node_id, "error": f"推理执行失败: {r}"})
             else:
                 processed.append(r)
 
-        logger.info(f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点, 分配: {load}")
+        ok_count = sum(1 for r in processed if "error" not in r)
+        logger.info(
+            f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点, 成功={ok_count}, 分配: {load}"
+        )
         return processed
 
     async def _single_inference(
@@ -271,29 +285,37 @@ class DistributedMLXBridge:
             f"http://{safe_node}:{port}/v1/chat/completions",
             json=payload,
         )
+        resp.raise_for_status()
         data = resp.json()
+        try:
+            choices = data["choices"]
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(
+                f"节点 {node_id} 返回非 OpenAI chat 格式 (缺 choices[0].message.content): {str(data)[:200]}"
+            ) from e
         return {
             "node_id": node_id,
-            "content": data["choices"][0]["message"]["content"],
+            "content": content,
             "usage": data.get("usage", {}),
         }
 
     async def _get_model_config(self, model_name: str) -> dict[str, Any]:
-        """获取模型配置（通过 fusion-mlx API）。"""
+        """获取模型配置（通过 fusion-mlx API）。
+
+        失败直接抛错, 不静默回退默认值 — 否则按错误层数切分, 产线静默损坏。
+        """
+        client = await self._get_http_client(10.0)
+        _mlx_base = os.environ.get("FUSION_MLX_URL") or "http://localhost:11432"
         try:
-            client = await self._get_http_client(10.0)
-            _mlx_base = os.environ.get("FUSION_MLX_URL") or "http://localhost:11432"
             resp = await client.get(f"{_mlx_base}/v1/models/{model_name}")
-            if resp.status_code == 200:
-                return resp.json()
-        except Exception:
-            pass
-        # 默认值
-        return {
-            "num_hidden_layers": 32,
-            "memory_mb": 4096,
-            "model_type": "unknown",
-        }
+        except Exception as e:
+            raise RuntimeError(f"获取模型配置失败({model_name}): fusion-mlx 不可达: {e}") from e
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"获取模型配置失败({model_name}): fusion-mlx 返回 {resp.status_code}: {resp.text[:200]}"
+            )
+        return resp.json()
 
     async def sync_weights(
         self,

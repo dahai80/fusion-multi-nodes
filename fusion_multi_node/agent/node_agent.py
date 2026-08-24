@@ -25,6 +25,8 @@ from typing import Any
 
 import httpx
 
+from fusion_multi_node.utils.auth import is_safe_path_segment
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,6 +162,9 @@ class NodeAgent:
         self._heartbeat_task: asyncio.Task | None = None
         self._hardware_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
+        # R1: 准静态硬件信息缓存 (设备型号/GPU核数/MLX版本/IP 等)。启动时采集一次,
+        # 心跳/硬件循环仅用 psutil 刷动态字段 (可用内存/CPU负载), 不再每 3s fork system_profiler。
+        self._static_hardware: dict[str, Any] | None = None
         self._backend = backend or FusionMLXBackend(
             base_url=f"http://localhost:{self.config.fusion_mlx_port}",
         )
@@ -172,41 +177,73 @@ class NodeAgent:
 
     # ── 硬件信息收集 ──
 
-    def collect_hardware_info(self) -> dict[str, Any]:
-        """收集本机硬件信息。"""
-        import psutil
+    def _ensure_static_hardware(self) -> dict[str, Any]:
+        """采集并缓存准静态硬件信息 (设备型号/GPU核数/IP/MLX版本等)。
 
-        mem = psutil.virtual_memory()
+        R1 修复: 这类信息在进程生命周期内基本不变, 启动时采集一次即可。
+        system_profiler/sysctl 子进程 (秒级开销) 只在此处运行一次,
+        后续心跳/硬件循环改用 _collect_dynamic_load (纯 psutil, 微秒级)。
+        """
+        if self._static_hardware is not None:
+            return self._static_hardware
+
         cpu_count = os.cpu_count() or 0
-
-        # macOS 特定信息
         is_apple_silicon = platform.machine() == "arm64"
-
-        # 尝试获取 MLX 信息
         mlx_version = self._get_mlx_version()
         gpu_cores, device_model = self._get_gpu_info()
+        local_ip = self._get_local_ip()
 
-        return {
+        self._static_hardware = {
             "node_id": self.config.node_id,
             "hostname": platform.node(),
-            "ip_address": self._get_local_ip(),
+            "ip_address": local_ip,
             "port": self.config.agent_port,
             "arch": platform.machine(),
             "os": platform.system(),
             "os_version": platform.version(),
-            "total_memory_gb": round(mem.total / (1024**3), 1),
-            "available_memory_gb": round(mem.available / (1024**3), 1),
             "cpu_cores": cpu_count,
-            "cpu_percent": psutil.cpu_percent(interval=0.5),
             "gpu_cores": gpu_cores,
             "device_model": device_model,
-            "uma_size_gb": round(mem.total / (1024**3), 1) if is_apple_silicon else 0.0,
             "mlx_version": mlx_version,
             "is_apple_silicon": is_apple_silicon,
+        }
+        logger.info(
+            f"R1 静态硬件采集完成 (缓存): {self._static_hardware['device_model']} "
+            f"gpu={gpu_cores}cores ip={local_ip} mlx={mlx_version or '未运行'}"
+        )
+        return self._static_hardware
+
+    def _collect_dynamic_load(self) -> dict[str, Any]:
+        """采集动态负载字段 (纯 psutil, 无子进程, 微秒级)。
+
+        R1 修复: 供心跳/硬件循环高频调用, 替代 collect_hardware_info 的全量重采集。
+        R5 修复: active_tasks 取 len(_running_task_handles) 反映并发任务数,
+                 task_queue_len 同源, 供 LoadRouter 队列维度真实感知。
+        """
+        import psutil
+
+        mem = psutil.virtual_memory()
+        active = len(self._running_task_handles) or (1 if self._current_task else 0)
+        total_gb = mem.total / (1024**3)
+        avail_gb = mem.available / (1024**3)
+        return {
+            "total_memory_gb": round(total_gb, 1),
+            "available_memory_gb": round(avail_gb, 1),
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "uma_size_gb": round(total_gb, 1) if platform.machine() == "arm64" else 0.0,
+            "active_tasks": active,
+            "task_queue_len": active,
+            "uma_used_ratio": round(max(0.0, 1.0 - avail_gb / total_gb) if total_gb > 0 else 0.0, 3),
             "fusion_desk_running": self._check_service(self.config.fusion_desk_port),
             "fusion_mlx_running": self._check_service(self.config.fusion_mlx_port),
             "timestamp": time.time(),
         }
+
+    def collect_hardware_info(self) -> dict[str, Any]:
+        """收集本机硬件信息 (静态缓存 + 动态 psutil 合并)。"""
+        static = self._ensure_static_hardware()
+        dynamic = self._collect_dynamic_load()
+        return {**static, **dynamic}
 
     def _get_local_ip(self) -> str:
         """获取本机局域网 IP。"""
@@ -292,19 +329,40 @@ class NodeAgent:
         return self._http_client
 
     async def send_heartbeat(self) -> bool:
-        """向 Master 发送心跳。"""
-        info = self.collect_hardware_info()
+        """向 Master 发送心跳 + 五维负载。
+
+        R1 修复: 仅用 psutil 刷动态字段, 不再每 3s fork system_profiler。
+        R5 修复: 心跳同时 POST /api/nodes/load 上报五维负载 (task_queue_len/cpu/uma),
+                 LoadRouter 队列维度据此真实感知并发负载, 不再恒为 0。
+        静态硬件信息由 report_hardware 启动时一次性上报。
+        """
+        load = self._collect_dynamic_load()
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
                 f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
                 json={
                     "node_id": self.config.node_id,
-                    "available_memory_gb": info["available_memory_gb"],
-                    "active_tasks": 1 if self._current_task else 0,
+                    "available_memory_gb": load["available_memory_gb"],
+                    "active_tasks": load["active_tasks"],
                 },
             )
-            return resp.status_code == 200
+            ok = resp.status_code == 200
+
+            # R5: 同步五维负载到 LoadRouter (心跳路径, 无需单独定时器)
+            try:
+                await client.post(
+                    f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/load",
+                    json={
+                        "node_id": self.config.node_id,
+                        "uma_used_ratio": load["uma_used_ratio"],
+                        "cpu_percent": load["cpu_percent"],
+                        "task_queue_len": load["task_queue_len"],
+                    },
+                )
+            except Exception as le:
+                logger.debug(f"负载上报失败 (不影响心跳): {le}")
+            return ok
         except Exception as e:
             logger.debug(f"心跳发送失败: {e}")
             return False
@@ -426,6 +484,17 @@ class NodeAgent:
         model_path = task.get("params", {}).get("model_path", "") if isinstance(task.get("params"), dict) else ""
         if model_path and not self._sandbox.check_path_access(model_path, write=False):
             return f"模型路径 {model_path} 不在沙箱允许访问路径内"
+        # E5: 插件 plugin/action 段段校验防穿越 (无沙箱配置时也强制, 因属不可信输入)
+        if task_type == "plugin":
+            for seg_key in ("plugin", "action"):
+                seg = task.get(seg_key, "")
+                if seg and not is_safe_path_segment(seg):
+                    return f"插件 {seg_key} 段非法 (穿越/特殊字符): {seg!r}"
+        # E5: 推理/Embedding model_name 段校验
+        if task_type in ("inference", "embedding"):
+            model_name = task.get("model", "")
+            if model_name and not is_safe_path_segment(model_name):
+                return f"模型名段非法 (穿越/特殊字符): {model_name!r}"
         return None
 
     async def cancel_task(self, task_id: str) -> bool:
@@ -441,6 +510,10 @@ class NodeAgent:
     async def _execute_inference(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行推理任务（通过 InferenceBackend）。"""
         model = task.get("model", "")
+        # E5: model_name 为不可信输入, 校验防特殊字符触发下游解析问题
+        if model and not is_safe_path_segment(model):
+            logger.warning(f"推理任务拒绝: 非法 model 段 {model!r}")
+            return {"task_id": task.get("task_id", ""), "error": f"非法 model: {model!r}"}
         prompt = task.get("params", {}).get("prompt", "")
         messages = task.get("params", {}).get("messages", [])
 
@@ -465,6 +538,10 @@ class NodeAgent:
         """执行 Embedding 任务（通过 InferenceBackend）。"""
         text = task.get("params", {}).get("text", "")
         model = task.get("model", "BGE-M3")
+        # E5: model 校验
+        if not is_safe_path_segment(model):
+            logger.warning(f"Embedding 任务拒绝: 非法 model 段 {model!r}")
+            return {"task_id": task.get("task_id", ""), "error": f"非法 model: {model!r}"}
 
         data = await self._backend.embed(model=model, input_text=text)
 
@@ -476,9 +553,19 @@ class NodeAgent:
         }
 
     async def _execute_plugin(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行插件任务（转发给本机 fusion-desk）。"""
+        """执行插件任务（转发给本机 fusion-desk）。
+
+        E5: plugin/action 为不可信外部输入, 段段校验 is_safe_path_segment 防 ../ 穿越,
+        防特殊字符注入下游 URL。转发经 _get_http_client, 已带集群 Bearer token 鉴权。
+        """
         plugin = task.get("plugin", "")
         action = task.get("action", "")
+        if not is_safe_path_segment(plugin):
+            logger.warning(f"插件任务拒绝: 非法 plugin 段 {plugin!r}")
+            return {"task_id": task.get("task_id", ""), "error": f"非法 plugin: {plugin!r}"}
+        if not is_safe_path_segment(action):
+            logger.warning(f"插件任务拒绝: 非法 action 段 {action!r}")
+            return {"task_id": task.get("task_id", ""), "error": f"非法 action: {action!r}"}
 
         client = await self._get_http_client(60.0)
         resp = await client.post(
@@ -491,7 +578,6 @@ class NodeAgent:
         """执行模型同步任务 — 将指定模型同步到本节点。"""
         from fusion_multi_node.utils.auth import (
             build_safe_url,
-            is_safe_path_segment,
             is_safe_peer_host,
         )
 
@@ -602,14 +688,14 @@ class NodeAgent:
             await asyncio.sleep(self.config.heartbeat_interval)
 
     async def _hardware_report_loop(self) -> None:
-        """硬件上报循环。"""
+        """硬件上报循环 (仅日志, R1: 用动态采集避免 system_profiler 风暴)。"""
         while self._running:
             await asyncio.sleep(self.config.report_interval)
-            info = self.collect_hardware_info()
+            load = self._collect_dynamic_load()
             logger.debug(
-                f"硬件状态: {info['available_memory_gb']:.1f}GB 可用, "
-                f"CPU {info['cpu_percent']}%, "
-                f"MLX: {info['fusion_mlx_running']}"
+                f"硬件状态: {load['available_memory_gb']:.1f}GB 可用, "
+                f"CPU {load['cpu_percent']}%, "
+                f"MLX: {load['fusion_mlx_running']}"
             )
 
     async def _discover_master(self) -> bool:

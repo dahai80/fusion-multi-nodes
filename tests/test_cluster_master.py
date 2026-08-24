@@ -483,14 +483,39 @@ class TestClusterMaster:
             mock_zc.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_get_online_nodes_stale_goes_offline(self):
+    async def test_get_online_nodes_stale_excluded_pure_snapshot(self):
+        # R6: get_online_nodes 纯快照, 不改状态。stale 节点被排除但状态保持 ONLINE。
         master = ClusterMaster(heartbeat_timeout=0.01)
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
         await master.register_node(info)
         master.nodes["n1"].last_heartbeat = time.time() - 100
         online = await master.get_online_nodes()
         assert len(online) == 0
+        # 读操作不应有副作用 — 状态仍 ONLINE, 跃迁交给 _refresh_node_statuses
+        assert master.nodes["n1"].status == NodeStatus.ONLINE
+
+    @pytest.mark.asyncio
+    async def test_refresh_node_statuses_stale_goes_offline(self):
+        # R6: 状态跃迁统一在 _refresh_node_statuses (health loop 调用), 非读路径。
+        master = ClusterMaster(heartbeat_timeout=0.01)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
+        await master.register_node(info)
+        master.nodes["n1"].last_heartbeat = time.time() - 100
+        await master._refresh_node_statuses()
         assert master.nodes["n1"].status == NodeStatus.OFFLINE
+
+    @pytest.mark.asyncio
+    async def test_refresh_node_statuses_busy_to_online(self):
+        # R6: BUSY 节点 active_tasks 下降时恢复 ONLINE。
+        master = ClusterMaster()
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11445)
+        info.status = NodeStatus.BUSY
+        info.active_tasks = 0
+        info.max_tasks = 4
+        await master.register_node(info)
+        master.nodes["n1"].last_heartbeat = time.time()
+        await master._refresh_node_statuses()
+        assert master.nodes["n1"].status == NodeStatus.ONLINE
 
     @pytest.mark.asyncio
     async def test_complete_task_decrements_active(self):

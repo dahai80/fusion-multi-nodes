@@ -11,5 +11,5 @@ and storage volumes.
   计划迁移至 fusion-gateway / fusion-cowork (上游 issue 跟踪)。
 """
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 __app_name__ = "Fusion-Multi-Node"

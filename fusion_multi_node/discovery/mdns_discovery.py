@@ -12,6 +12,7 @@ import hashlib
 import logging
 import platform
 import socket
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -63,6 +64,10 @@ class MDNSDiscovery:
         self._browser: Any | None = None
         self._zeroconf: Any | None = None
         self._discovered: dict[str, DiscoveryInfo] = {}
+        # E8: _discovered 被 zeroconf daemon 线程 (add_service/remove_service 回调) 与
+        # async 协程 (browse_async/get_discovered) 跨线程读写, 无锁会触发
+        # RuntimeError: dictionary changed size during iteration。加锁保护所有访问点。
+        self._discovered_lock = threading.Lock()
         self._on_discover: Callable[[DiscoveryInfo], None] | None = None
         self._on_remove: Callable[[str], None] | None = None
         self._registered = False
@@ -136,7 +141,9 @@ class MDNSDiscovery:
     ) -> list[DiscoveryInfo]:
         """浏览局域网内 mDNS 服务，返回发现的节点列表。
 
-        注意: 此方法是同步的，会阻塞调用线程。在 async 环境中请使用 browse_async。
+        注意: 此方法是同步的，会阻塞调用线程 (time.sleep)。仅限 CLI/同步上下文使用;
+        Agent 运行时路径用 browse_async/find_master_async, 不可在事件循环线程调本方法
+        (会冻结心跳/推理协程)。_discovered 跨线程访问经 _discovered_lock 保护。
         """
         try:
             from zeroconf import ServiceBrowser, Zeroconf
@@ -146,7 +153,8 @@ class MDNSDiscovery:
 
         self._on_discover = on_discover
         self._on_remove = on_remove
-        self._discovered.clear()
+        with self._discovered_lock:
+            self._discovered.clear()
 
         class _Listener:
             def __init__(self, outer: MDNSDiscovery):
@@ -156,13 +164,15 @@ class MDNSDiscovery:
                 info = zc.get_service_info(type_, name)
                 if info:
                     di = _service_info_to_discovery(name, info)
-                    self._outer._discovered[name] = di
+                    with self._outer._discovered_lock:
+                        self._outer._discovered[name] = di
                     if self._outer._on_discover:
                         self._outer._on_discover(di)
                     logger.info(f"mDNS 发现节点: {di.name} @ {di.host}:{di.port}")
 
             def remove_service(self, zc: Any, type_: str, name: str) -> None:
-                self._outer._discovered.pop(name, None)
+                with self._outer._discovered_lock:
+                    self._outer._discovered.pop(name, None)
                 if self._outer._on_remove:
                     self._outer._on_remove(name)
                 logger.info(f"mDNS 节点离线: {name}")
@@ -184,7 +194,8 @@ class MDNSDiscovery:
             self._browser = None
             self._zeroconf = None
 
-            results = list(self._discovered.values())
+            with self._discovered_lock:
+                results = list(self._discovered.values())
             logger.info(f"mDNS 发现 {len(results)} 个节点")
             return results
         except Exception as e:
@@ -208,7 +219,8 @@ class MDNSDiscovery:
 
         self._on_discover = on_discover
         self._on_remove = on_remove
-        self._discovered.clear()
+        with self._discovered_lock:
+            self._discovered.clear()
 
         class _AsyncListener:
             def __init__(self, outer: MDNSDiscovery):
@@ -218,13 +230,15 @@ class MDNSDiscovery:
                 info = zc.get_service_info(type_, name)
                 if info:
                     di = _service_info_to_discovery(name, info)
-                    self._outer._discovered[name] = di
+                    with self._outer._discovered_lock:
+                        self._outer._discovered[name] = di
                     if self._outer._on_discover:
                         self._outer._on_discover(di)
                     logger.info(f"mDNS 发现节点: {di.name} @ {di.host}:{di.port}")
 
             def remove_service(self, zc: Any, type_: str, name: str) -> None:
-                self._outer._discovered.pop(name, None)
+                with self._outer._discovered_lock:
+                    self._outer._discovered.pop(name, None)
                 if self._outer._on_remove:
                     self._outer._on_remove(name)
                 logger.info(f"mDNS 节点离线: {name}")
@@ -246,7 +260,8 @@ class MDNSDiscovery:
             self._browser = None
             self._zeroconf = None
 
-            results = list(self._discovered.values())
+            with self._discovered_lock:
+                results = list(self._discovered.values())
             logger.info(f"mDNS 异步发现 {len(results)} 个节点")
             return results
         except Exception as e:
@@ -255,7 +270,8 @@ class MDNSDiscovery:
 
     def get_discovered(self) -> list[DiscoveryInfo]:
         """获取已发现的节点列表。"""
-        return list(self._discovered.values())
+        with self._discovered_lock:
+            return list(self._discovered.values())
 
     def _verify_master_candidate(self, node: DiscoveryInfo) -> bool:
         """校验单个 master 候选: 角色 + node_id + 绑定密钥 + sticky 锁定。"""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -158,6 +159,9 @@ class MasterServer:
             self._approval_manager = NodeApprovalManager()
         except Exception:
             self._approval_manager = None
+        # E1: ClusterSyncManager 一次性构造于 __init__, 接入 start()/stop() 生命周期。
+        # 不再在路由内懒初始化 (避免 GET 读请求产生写副作用 + 并发首请求竞争 + 挂上去不 start 变死实例)。
+        self._sync_manager = ClusterSyncManager(node_id="master")
         self._setup_routes()
 
     def _setup_routes(self):
@@ -175,11 +179,7 @@ class MasterServer:
 
         @app.get("/api/models/{model_name}/manifest")
         async def get_model_manifest(model_name: str):
-            sync_mgr = getattr(self, "_sync_manager", None)
-            if not sync_mgr:
-                sync_mgr = ClusterSyncManager(node_id="master")
-                self._sync_manager = sync_mgr
-            manifest = sync_mgr.get_manifest(model_name)
+            manifest = self._sync_manager.get_manifest(model_name)
             return manifest.to_dict()
 
         @app.post("/api/sync/incremental")
@@ -190,10 +190,6 @@ class MasterServer:
             remote_manifest_data = req.get("remote_manifest", {})
             if not model_name or not source_host:
                 raise HTTPException(status_code=400, detail="model_name and source_host required")
-            sync_mgr = getattr(self, "_sync_manager", None)
-            if not sync_mgr:
-                sync_mgr = ClusterSyncManager(node_id="master")
-                self._sync_manager = sync_mgr
             from fusion_multi_node.master.cluster_sync import ModelManifest
 
             remote_manifest = ModelManifest.from_dict(remote_manifest_data) if remote_manifest_data else None
@@ -216,26 +212,19 @@ class MasterServer:
                     raise
                 except Exception as e:
                     raise HTTPException(status_code=502, detail=f"获取远端 manifest 失败: {e}")
-            result = await sync_mgr.incremental_sync(model_name, remote_manifest, source_host, source_port)
+            result = await self._sync_manager.incremental_sync(model_name, remote_manifest, source_host, source_port)
             return result
 
         @app.get("/api/cluster/status")
         async def cluster_sync_status():
-            sync_mgr = getattr(self, "_sync_manager", None)
-            if not sync_mgr:
-                return {"partition": None, "sync_available": False}
-            return {"partition": sync_mgr.get_cluster_status(), "sync_available": True}
+            return {"partition": self._sync_manager.get_cluster_status(), "sync_available": True}
 
         @app.get("/api/nodes/{node_id}/load")
         async def get_node_load(node_id: str):
-            node = self.master.nodes.get(node_id)
+            node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
-            sync_mgr = getattr(self, "_sync_manager", None)
-            if not sync_mgr:
-                sync_mgr = ClusterSyncManager(node_id="master")
-                self._sync_manager = sync_mgr
-            report = sync_mgr.collect_load_report()
+            report = self._sync_manager.collect_load_report()
             return report.to_dict()
 
         # M1-05 手动 IP 加入 — 走审批门，默认不自动注册
@@ -416,15 +405,16 @@ class MasterServer:
         @app.get("/api/nodes")
         async def list_nodes():
             online = await self.master.get_online_nodes()
+            all_nodes = await self.master.snapshot_nodes()
             return {
-                "total": len(self.master.nodes),
+                "total": len(all_nodes),
                 "online": len(online),
-                "nodes": [_node_to_resp(n) for n in self.master.nodes.values()],
+                "nodes": [_node_to_resp(n) for n in all_nodes],
             }
 
         @app.get("/api/nodes/{node_id}")
         async def get_node(node_id: str):
-            node = self.master.nodes.get(node_id)
+            node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
             return _node_to_resp(node)
@@ -444,7 +434,7 @@ class MasterServer:
                 raise HTTPException(status_code=403, detail="权限不足: task submit")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
             task = ClusterTask(
-                task_id=f"task_{int(time.time() * 1000)}",
+                task_id=f"task_{uuid.uuid4().hex[:12]}",
                 name=req.name,
                 mode=mode,
                 model_name=req.model_name,
@@ -463,14 +453,15 @@ class MasterServer:
 
         @app.get("/api/tasks")
         async def list_tasks():
+            all_tasks = await self.master.snapshot_tasks()
             return {
-                "total": len(self.master.tasks),
-                "tasks": [_task_to_resp(t) for t in self.master.tasks.values()],
+                "total": len(all_tasks),
+                "tasks": [_task_to_resp(t) for t in all_tasks],
             }
 
         @app.get("/api/tasks/{task_id}")
         async def get_task(task_id: str):
-            task = self.master.tasks.get(task_id)
+            task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             return _task_to_resp(task)
@@ -479,41 +470,50 @@ class MasterServer:
         async def cancel_task(task_id: str, req: TaskCancelRequest):
             if not await _check_permission("master", "/api/tasks/cancel", "POST"):
                 raise HTTPException(status_code=403, detail="权限不足: task cancel")
-            if task_id not in self.master.tasks:
+            task = await self.master.get_task(task_id)
+            if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             # 取消前快照受影响节点 (cancel_task 会清空 assigned_nodes), 取消后通知各节点中止运行推理
-            task = self.master.tasks.get(task_id)
             affected_nodes = []
             if task:
                 affected_nodes = list(task.assigned_nodes)
                 for sid in getattr(task, "sub_tasks", []) or []:
-                    sub = self.master.tasks.get(sid)
+                    sub = await self.master.get_task(sid)
                     if sub:
                         affected_nodes.extend(sub.assigned_nodes)
             ok = await self.master.cancel_task(task_id, reason=req.reason, cancel_sub_tasks=True)
             if not ok:
                 raise HTTPException(status_code=400, detail=f"任务 {task_id} 取消失败")
-            # 传播取消到运行中节点 (真中止, 非假动作)
-            notified = []
-            for nid in affected_nodes:
-                node = self.master.nodes.get(nid)
-                if not node:
-                    continue
-                try:
-                    import httpx
+            # R4: 传播取消到运行中节点 (真中止, 非假动作)。
+            # 去重 (子任务 assigned_nodes 可能重叠), 单 AsyncClient 复用 + asyncio.gather 并发通知。
+            unique_nodes = list(dict.fromkeys(affected_nodes))
+            node_snapshots = {nid: await self.master.get_node(nid) for nid in unique_nodes}
+            targets = [(nid, node) for nid, node in node_snapshots.items() if node]
 
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        resp = await client.post(
-                            f"http://{node.ip_address}:{node.port}/api/tasks/cancel",
-                            json={"task_id": task_id},
-                            headers={"Authorization": f"Bearer {self._shared_token}"},
-                        )
-                        if resp.status_code == 200:
-                            notified.append(nid)
-                        else:
-                            logger.warning(f"节点 {nid} 取消通知失败: {resp.status_code}")
+            async def _notify(client, nid, node):
+                try:
+                    resp = await client.post(
+                        f"http://{node.ip_address}:{node.port}/api/tasks/cancel",
+                        json={"task_id": task_id},
+                        headers={"Authorization": f"Bearer {self._shared_token}"},
+                    )
+                    if resp.status_code == 200:
+                        return nid
+                    logger.warning(f"节点 {nid} 取消通知失败: {resp.status_code}")
                 except Exception as e:
                     logger.warning(f"节点 {nid} 取消通知异常: {e}")
+                return None
+
+            import asyncio
+
+            import httpx
+
+
+            notified = []
+            if targets:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    results = await asyncio.gather(*[_notify(client, nid, node) for nid, node in targets])
+                    notified = [r for r in results if r]
             return {"status": "cancelled", "task_id": task_id, "notified_nodes": notified}
 
         # M4-04 任务降级
@@ -596,7 +596,7 @@ class MasterServer:
 
         @app.get("/api/v1/nodes/{node_id}/metrics")
         async def node_metrics(node_id: str):
-            node = self.master.nodes.get(node_id)
+            node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
             load = self.master.load_router._node_loads.get(node_id)
@@ -623,15 +623,15 @@ class MasterServer:
 
         @app.get("/api/v1/tasks/{task_id}/progress")
         async def task_progress(task_id: str):
-            task = self.master.tasks.get(task_id)
+            task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             total_shards = len(task.sub_tasks) if task.sub_tasks else 1
-            completed_shards = sum(
-                1
-                for stid in task.sub_tasks
-                if self.master.tasks.get(stid, None) and self.master.tasks[stid].status == TaskStatus.COMPLETED
-            )
+            completed_shards = 0
+            for stid in task.sub_tasks:
+                st = await self.master.get_task(stid)
+                if st and st.status == TaskStatus.COMPLETED:
+                    completed_shards += 1
             progress = completed_shards / max(total_shards, 1)
             elapsed = time.time() - task.started_at if task.started_at > 0 else 0.0
             remaining = max(task.timeout_seconds - elapsed, 0.0) if task.started_at > 0 else task.timeout_seconds
@@ -650,7 +650,7 @@ class MasterServer:
 
         @app.get("/api/v1/tasks/{task_id}/timeline")
         async def task_timeline(task_id: str):
-            task = self.master.tasks.get(task_id)
+            task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             events = []
@@ -679,7 +679,7 @@ class MasterServer:
                     }
                 )
             for sub_id in task.sub_tasks:
-                sub = self.master.tasks.get(sub_id)
+                sub = await self.master.get_task(sub_id)
                 if sub:
                     if sub.started_at > 0:
                         events.append(
@@ -828,6 +828,7 @@ class MasterServer:
     async def start(self, host: str = "127.0.0.1", port: int = 11452) -> None:
         import uvicorn
 
+        await self._sync_manager.start()
         config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
         self._uvicorn_server = uvicorn.Server(config)
         logger.info(f"Master 服务启动: {host}:{port}")
@@ -836,6 +837,7 @@ class MasterServer:
     async def stop(self) -> None:
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
+        await self._sync_manager.stop()
         await self.master.stop()
         logger.info("Master 服务已停止")
 

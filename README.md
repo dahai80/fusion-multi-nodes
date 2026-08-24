@@ -29,7 +29,7 @@
 
 | Module | Responsibility |
 |--------|---------------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, master election, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync. ⚠️master election / HA standby **未接线** (现网单 Master) |
 | **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server |
@@ -37,8 +37,8 @@
 | **MCP Cluster Gateway** | Unified MCP endpoint, tool routing, Claude Desktop/Code integration |
 | **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, OS-level sandbox-exec, data scrubbing, FMPCrypto (AES-256-GCM + ECDH), Metal AES-GCM acceleration |
 | **Observability** | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions, 7-day retention |
-| **Autoscaler** | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance, hot-reload config |
-| **Storage Volumes** | Volume abstraction, shard replication, checkpoint persistence, capacity monitoring, LRU eviction, shard distribution, distributed KV store, quorum read/write |
+| **Autoscaler** ⚠️未接线 | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance, hot-reload config. **当前未接入 ClusterMaster 生命周期, `/api/v1/autoscaler/*` 返回 404; 代码留作未来启用** |
+| **Storage Volumes** | Volume abstraction, checkpoint persistence, capacity monitoring, LRU eviction. **ShardReplicator / DistributedKVStore / quorum 读写未接线生产路径, 仅库级可用** |
 
 ### Architecture
 
@@ -47,8 +47,9 @@
 │                    Claude Code / API / fusion-desk UI         │
 │                           ↓                                  │
 │              fusion-multi-node Cluster Master                 │
-│  (Discovery, Scheduler, KV Pool, Election, Autoscaler,       │
-│   Cloud Fallback, Degradation, Security, Observability)      │
+│  (Discovery, Scheduler, KV Pool, [Election⚠未接线],          │
+│   [Autoscaler⚠未接线], Cloud Fallback, Degradation,          │
+│   Security, Observability)                                   │
 │                           ↓                                  │
 │     ┌──────────────┬──────────────┬──────────────┐           │
 │     │  Node Agent   │  Node Agent  │  Node Agent  │           │
@@ -361,7 +362,11 @@ results = diagnoser.diagnose(logs)
 freq = diagnoser.analyze_frequency(logs, group_by="source")
 ```
 
-### 7. Autoscaler (`fusion_multi_node.autoscaler`)
+### 7. Autoscaler (`fusion_multi_node.autoscaler`) ⚠️未接线
+
+> **状态**: 代码完整但**未接入 ClusterMaster 生命周期**。`ClusterMaster._autoscaler` 从未赋值,
+> `/api/v1/autoscaler/config` GET/PUT 返回 404「Autoscaler 未启用」。本节为库级 API 参考,
+> 非现网可用功能。启用需在 `ClusterMaster.start()` 中实例化并启动评估循环。
 
 Conservative/Balanced/Aggressive scale policies.
 
@@ -383,6 +388,12 @@ action = await scaler.evaluate()  # SCALE_UP, SCALE_DOWN, REBALANCE, NOOP
 ```
 
 ### 8. Storage Volumes (`fusion_multi_node.storage`)
+
+> **状态**: `StorageVolume`/`CheckpointManager`/`DistributedKVStore` 库级可用。
+> `ShardReplicator` 的 FMP 跨节点传输与 quorum 读写在生产路径**未接线**
+> (`set_fmp_interface` 无人调用)。quorum 读写已加 E9 守卫: 无 `storage_volume` 时
+> 一律拒绝 (`error=no_storage_volume`), 不再退回内存自洽, 避免谎报多数持久化成功。
+> 本节为库级 API 参考。
 
 Volume abstraction, shard replication, checkpoint persistence.
 
@@ -560,6 +571,40 @@ pytest tests/test_new_features.py -v
 - [x] M9/M10/shard_replication 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除); WorkerSandbox 已接 (#24), M9/M10 契约 bug 已修 (#23)
 
 回归: 826 tests passed, 0 ruff errors.
+
+### v0.7.1 ✅ — 二轮架构审计修复 (2026-08-24, 22 项)
+
+> 审计源: `audit/fusion-multi-node-audit-report-0824.md` (363 行, H1-H5 / R1-R8 / E1-E9)。
+> 流程: 涉上游问题先提 issue → 落地 code (PR #18, 分支 `release/v0.7.0-ar-audit-fixes`)。
+
+**P0 (H1/H4/E2/E7) — 伪实现/死代码/诚实性**
+- [x] H1 核实 fusion-mlx 无 `/distributed/*` 端点 → 上游 issue #621; distributed_bridge Pipeline 标未实现 + 诚实报错 (in-repo)
+- [x] H4 四死子系统 (HA/autoscaler/cluster_sync/shard_replication) 标未接线 + 移除对外暴露路由
+- [x] E2 kv_transfer `source_node` 用真实节点地址 (非 `localhost`)
+- [x] E7 kv_warm 目标节点从在线节点表取 (非空集默认值)
+
+**P1 (H2/H5/R1/R2/R8/E3/R6) — 并发/性能/正确性**
+- [x] H2 拆 ClusterMaster 单锁按资源域 (nodes / tasks / kv)
+- [x] H5 LoadRouter/KVSharing threading.Lock → asyncio (去跨线程阻塞)
+- [x] R1 硬件信息启动缓存, 心跳只取动态字段
+- [x] R2 task_id uuid4 替 `int(time.time())`
+- [x] R8+E3 distributed_bridge `raise_for_status` + 响应 schema 校验 + 错误日志
+- [x] R6 `get_online_nodes` 纯快照 (不触发副作用)
+
+**P2 (H3/R3/R4/R5/R7/E1/E4/E5/E6/E8/E9) — 原型门禁/安全/健壮性**
+- [x] H3 HA 死代码 (StandbyMaster/MasterElection) 文档降级标注
+- [x] R3 `sync_kv_cache` 仅登记元数据, 返回 False (张量迁移待上游 #621)
+- [x] R4 `cancel_task` 改 `asyncio.gather` + 复用单 AsyncClient (去顺序通知)
+- [x] R5 agent `_running_tasks` set + 五维负载上报
+- [x] R7 模型大小正则边界匹配 (防 `1b` 误匹配 `10b/100b`)
+- [x] E1 `ClusterSyncManager` 移到 `__init__` + `start()`/`stop()` 生命周期 (4 路由折叠)
+- [x] E4 config 字段级校验表 + `schema_version` + `set_many` 批量单落盘 + 加载自修复脏值
+- [x] E5 plugin/action/model_name `is_safe_path_segment` 净化 + `_sandbox_gate` 覆盖全任务类型
+- [x] E6 `model_config` 失败 raise 不静默吞
+- [x] E8 mDNS `_discovered` 跨线程加 `threading.Lock` (修 dict changed size race)
+- [x] E9 quorum 读写无 `storage_volume` 一律拒绝 (不再内存自洽谎报多数持久化)
+
+回归: 849 tests passed, 0 ruff errors.
 
 ---
 

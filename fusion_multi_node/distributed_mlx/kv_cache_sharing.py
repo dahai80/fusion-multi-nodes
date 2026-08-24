@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -100,7 +99,9 @@ class KVSharingManager:
         # 本地缓存
         self._local_cache: OrderedDict[str, KVCacheEntry] = OrderedDict()
         self._local_size_bytes: int = 0
-        self._cache_lock = threading.Lock()
+        # H5: 无锁设计。KVSharingManager 仅被 agent_server (asyncio 单事件循环) 调用,
+        # 无 to_thread/executor 跨线程入口; 本地缓存读改写均纯同步无 await,
+        # 单线程协作调度不会在 sync 段中段切换 → OrderedDict 读改写天然原子。
         self._lookup_index: dict[tuple[str, str], str] = {}
 
         # 远程节点 KV 缓存索引
@@ -139,12 +140,11 @@ class KVSharingManager:
                 f"KV 缓存条目过大: {entry.total_size_bytes / 1024:.1f}KB > 容量 {max_bytes / 1024:.1f}KB，拒绝存储"
             )
             return False
-        with self._cache_lock:
-            if self._local_size_bytes + entry.total_size_bytes > max_bytes:
-                self._evict(entry.total_size_bytes)
-            self._local_cache[entry.cache_id] = entry
-            self._local_size_bytes += entry.total_size_bytes
-            self._lookup_index[(entry.model_name, entry.prompt_hash)] = entry.cache_id
+        if self._local_size_bytes + entry.total_size_bytes > max_bytes:
+            self._evict(entry.total_size_bytes)
+        self._local_cache[entry.cache_id] = entry
+        self._local_size_bytes += entry.total_size_bytes
+        self._lookup_index[(entry.model_name, entry.prompt_hash)] = entry.cache_id
         logger.debug(
             f"KV 缓存存储: {entry.model_name} ({entry.total_tokens} tokens, {entry.total_size_bytes / 1024:.1f}KB)"
         )
@@ -152,36 +152,34 @@ class KVSharingManager:
 
     def lookup_local(self, model_name: str, prompt_hash: str) -> KVCacheEntry | None:
         """查询本地 KV 缓存。"""
-        with self._cache_lock:
-            cache_id = self._lookup_index.get((model_name, prompt_hash))
-            if not cache_id:
-                return None
-            entry = self._local_cache.get(cache_id)
-            if not entry:
-                self._lookup_index.pop((model_name, prompt_hash), None)
-                return None
-            if entry.is_expired:
-                self._local_cache.pop(entry.cache_id, None)
-                self._local_size_bytes -= entry.total_size_bytes
-                self._lookup_index.pop((model_name, prompt_hash), None)
-                return None
-            entry.access_count += 1
-            if entry.shards:
-                entry.shards[-1].last_access = time.time()
-            self._local_cache.move_to_end(entry.cache_id)
-            return entry
+        cache_id = self._lookup_index.get((model_name, prompt_hash))
+        if not cache_id:
+            return None
+        entry = self._local_cache.get(cache_id)
+        if not entry:
+            self._lookup_index.pop((model_name, prompt_hash), None)
+            return None
+        if entry.is_expired:
+            self._local_cache.pop(entry.cache_id, None)
+            self._local_size_bytes -= entry.total_size_bytes
+            self._lookup_index.pop((model_name, prompt_hash), None)
+            return None
+        entry.access_count += 1
+        if entry.shards:
+            entry.shards[-1].last_access = time.time()
+        self._local_cache.move_to_end(entry.cache_id)
+        return entry
 
     def lookup_prefix(self, model_name: str, prefix: str) -> list[KVCacheEntry]:
         """按前缀匹配查询 KV 缓存（用于缓存复用）。"""
-        with self._cache_lock:
-            matches = []
-            for entry in self._local_cache.values():
-                if entry.model_name == model_name and entry.prompt_prefix.startswith(prefix) and not entry.is_expired:
-                    matches.append(entry)
-            return matches
+        matches = []
+        for entry in self._local_cache.values():
+            if entry.model_name == model_name and entry.prompt_prefix.startswith(prefix) and not entry.is_expired:
+                matches.append(entry)
+        return matches
 
     def _evict(self, needed_bytes: int) -> None:
-        """LRU 淘汰缓存（需在 _cache_lock 内调用）。"""
+        """LRU 淘汰缓存 (单线程, 无需显式锁)。"""
         max_bytes = self.max_local_cache_mb * 1024 * 1024
         if needed_bytes > max_bytes:
             return
@@ -248,13 +246,12 @@ class KVSharingManager:
 
     def sync_to_cluster(self, cache_id: str, model_name: str, source_node_id: str) -> KVCacheSyncMessage:
         """生成 FMP 协议 KV 缓存同步消息。"""
-        with self._cache_lock:
-            entry = self._local_cache.get(cache_id)
-            if not entry:
-                logger.warning(f"KV 缓存同步: cache_id={cache_id} 未找到本地缓存")
-                size_mb = 0.0
-            else:
-                size_mb = entry.total_size_bytes / (1024 * 1024)
+        entry = self._local_cache.get(cache_id)
+        if not entry:
+            logger.warning(f"KV 缓存同步: cache_id={cache_id} 未找到本地缓存")
+            size_mb = 0.0
+        else:
+            size_mb = entry.total_size_bytes / (1024 * 1024)
 
         sync_msg = KVCacheSyncMessage(
             cache_id=cache_id,

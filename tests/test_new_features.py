@@ -284,6 +284,30 @@ class TestClusterTaskNewFields:
         assert master._extract_model_size("qwen-8b") == "8b"
         assert master._extract_model_size("unknown") == ""
 
+    def test_extract_model_size_boundary_r7(self):
+        # R7: 130b 不应命中 13b, 33b 不应命中 3b, 30b 不应命中 3b
+        from fusion_multi_node.master.cluster_master import ClusterMaster
+
+        master = ClusterMaster()
+        assert master._extract_model_size("meta-llama-130b") == ""
+        assert master._extract_model_size("qwen-33b") == ""
+        assert master._extract_model_size("model-30b-chat") == ""
+        assert master._extract_model_size("llama-13b") == "13b"
+        assert master._extract_model_size("qwen-3b") == "3b"
+        # 130b 不被误判为 vram_first, 内存估算走默认 (不按 13b 低估)
+        from fusion_multi_node.master import ClusterTask, ParallelMode
+
+        task_130 = ClusterTask(task_id="t130", name="n", mode=ParallelMode.DATA, model_name="llama-130b")
+        assert master._is_vram_first(task_130) is False
+        task_13 = ClusterTask(task_id="t13", name="n", mode=ParallelMode.DATA, model_name="llama-13b")
+        assert master._is_vram_first(task_13) is True
+        # 130b 估算 == 默认 (未被 13b=12GB 低估)
+        mem_130 = master._estimate_memory(task_130)
+        mem_unknown = master._estimate_memory(
+            ClusterTask(task_id="tu", name="n", mode=ParallelMode.DATA, model_name="unknown-xyz")
+        )
+        assert mem_130 == mem_unknown
+
 
 # ── M6 Security ──
 
@@ -851,6 +875,99 @@ class TestShardReplicator:
         nodes = [{"node_id": "n1"}]
         replicator.assign_replicas("s1", "f", 100, nodes)
         assert "s1" in replicator.get_under_replicated()
+
+
+class TestShardQuorumE9:
+    # AR审计 E9: quorum_read/quorum_write 无 storage_volume 时降级到内存自欺
+    # (所有副本读/写同一 self._shard_data dict → consistent 恒 True / success 恒 True)。
+    # 修后: 无 storage_volume 一律拒绝, success=False, error=no_storage_volume。
+
+    def test_quorum_write_refuses_without_storage_volume(self):
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
+        replicator.assign_replicas("q-w", "f", 10, [{"node_id": "n1"}, {"node_id": "n2"}])
+        result = replicator.quorum_write("q-w", b"payload", storage_volume=None)
+        assert result["success"] is False
+        assert result["error"] == "no_storage_volume"
+
+    def test_quorum_read_refuses_without_storage_volume(self):
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
+        replicator.assign_replicas("q-r", "f", 10, [{"node_id": "n1"}, {"node_id": "n2"}])
+        replicator.register_shard_data("q-r", b"payload")
+        result = replicator.quorum_read("q-r", storage_volume=None)
+        assert result["success"] is False
+        assert result["error"] == "no_storage_volume"
+
+    def test_quorum_write_succeeds_with_mock_storage_volume(self):
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        class _MockVolume:
+            def __init__(self):
+                self.store = {}
+
+            def write_file(self, volume_name, file_path, data):
+                self.store[(volume_name, file_path)] = data
+                return True
+
+            def read_file(self, volume_name, file_path):
+                return self.store.get((volume_name, file_path))
+
+        volume = _MockVolume()
+        replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
+        replicator._local_node_id = "n1"
+        replicator.assign_replicas("q-ok", "f", 10, [{"node_id": "n1"}, {"node_id": "n2"}])
+        result = replicator.quorum_write("q-ok", b"payload", storage_volume=volume)
+        # n1 本地写入成功 (storage_volume 非 None), n2 远端无 FMP → _sync_local 走 n2
+        # 但 n2 != local → 无 fmp_interface → is_remote False → _sync_local 写 n2 副本
+        assert result["success"] is True
+        assert result["quorum"] == 1
+
+    def test_quorum_read_succeeds_with_mock_storage_volume(self):
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        class _MockVolume:
+            def __init__(self, data):
+                self.store = {}
+
+            def read_file(self, volume_name, file_path):
+                return b"payload"
+
+            def write_file(self, volume_name, file_path, data):
+                return True
+
+        volume = _MockVolume(b"payload")
+        replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
+        replicator.assign_replicas("q-rok", "f", 10, [{"node_id": "n1"}, {"node_id": "n2"}])
+        result = replicator.quorum_read("q-rok", storage_volume=volume)
+        assert result["success"] is True
+        assert result["data"] == b"payload"
+
+    def test_quorum_write_no_replicas_still_refused(self):
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        replicator = ShardReplicator(config=ReplicationConfig(replication_factor=2))
+        # 无 storage_volume 优先于 no_replicas 校验
+        result = replicator.quorum_write("q-none", b"x", storage_volume=None)
+        assert result["success"] is False
+        assert result["error"] == "no_storage_volume"
 
 
 class TestDistributedKVStorePartition:
@@ -2281,6 +2398,8 @@ class TestKVCacheSyncMessage:
         assert restored.size_mb == 256.0
 
     def test_sync_kv_cache_in_master(self):
+        # R3: 元数据登记成功但张量传输未实现 (上游 fusion-mlx issue #621),
+        # sync_kv_cache 应如实返回 False, 不谎报同步成功。
         async def _test():
             cm = ClusterMaster()
             from fusion_multi_node.master.cluster_master import KVCacheEntry
@@ -2294,7 +2413,7 @@ class TestKVCacheSyncMessage:
             )
             await cm.register_kv_cache(entry)
             result = await cm.sync_kv_cache("c1", "llama-3b", "n1", 100.0)
-            assert result
+            assert result is False
 
         asyncio.run(_test())
 

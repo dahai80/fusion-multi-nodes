@@ -8,7 +8,6 @@ P0 核心调度模块：
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -142,34 +141,32 @@ class LoadRouter:
         self.queue_capacity = queue_capacity
         self._metrics: dict[str, LoadMetrics] = {}
         self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
-        self._lock = threading.Lock()
+        # H5: 无锁设计。LoadRouter 仅被 ClusterMaster (asyncio 单事件循环) 调用,
+        # 无 to_thread/executor 跨线程入口; 所有读写临界区均纯同步无 await,
+        # 单线程协作调度不会在 sync 段中段切换 → 字典读改写天然原子。
+        # select_best/select_n 已对 _metrics 做 dict() 快照后离线计算 (拷出后离线计算)。
         logger.info(f"LoadRouter 初始化: 策略={strategy.value}, 权重校验={self._weights.validate()}")
 
     def set_strategy(self, strategy: RoutingStrategy) -> None:
-        with self._lock:
-            self.strategy = strategy
-            self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
+        self.strategy = strategy
+        self._weights = STRATEGY_WEIGHTS.get(strategy, RoutingWeights())
         logger.info(f"LoadRouter 策略切换: {strategy.value}")
 
     def update_metrics(self, node_id: str, metrics: LoadMetrics) -> None:
         metrics.node_id = node_id
         metrics.timestamp = time.time()
-        with self._lock:
-            self._metrics[node_id] = metrics
+        self._metrics[node_id] = metrics
         logger.debug(f"负载指标更新: {node_id} uma={metrics.uma_used_ratio:.2f} cpu={metrics.cpu_percent:.1f}%")
 
     def remove_node(self, node_id: str) -> None:
-        with self._lock:
-            self._metrics.pop(node_id, None)
+        self._metrics.pop(node_id, None)
 
     def get_metrics(self, node_id: str) -> LoadMetrics | None:
-        with self._lock:
-            return self._metrics.get(node_id)
+        return self._metrics.get(node_id)
 
     def compute_score(self, metrics: LoadMetrics, weights: RoutingWeights | None = None) -> float:
         """计算节点综合评分 (0~1, 越高越优先)。"""
-        with self._lock:
-            w = weights or self._weights
+        w = weights or self._weights
 
         uma_score = max(0.0, 1.0 - metrics.uma_used_ratio)
         cpu_score = max(0.0, 1.0 - metrics.cpu_percent / 100.0)
@@ -211,10 +208,9 @@ class LoadRouter:
     ) -> RoutingResult | None:
         """从候选节点中选择最优节点。"""
         now = time.time()
-        with self._lock:
-            snapshot = dict(self._metrics)
-            current_weights = self._weights
-            current_strategy = self.strategy
+        snapshot = dict(self._metrics)
+        current_weights = self._weights
+        current_strategy = self.strategy
 
         candidates: list[RoutingResult] = []
 
@@ -268,10 +264,9 @@ class LoadRouter:
     ) -> list[RoutingResult]:
         """选择 top-N 个最优节点。"""
         now = time.time()
-        with self._lock:
-            snapshot = dict(self._metrics)
-            current_weights = self._weights
-            current_strategy = self.strategy
+        snapshot = dict(self._metrics)
+        current_weights = self._weights
+        current_strategy = self.strategy
 
         candidates: list[RoutingResult] = []
 
@@ -306,11 +301,10 @@ class LoadRouter:
 
     def get_cluster_load_summary(self) -> dict[str, Any]:
         """获取集群负载摘要。"""
-        with self._lock:
-            if not self._metrics:
-                return {"node_count": 0, "avg_score": 0.0}
-            metrics_snapshot = list(self._metrics.values())
-            current_strategy = self.strategy
+        if not self._metrics:
+            return {"node_count": 0, "avg_score": 0.0}
+        metrics_snapshot = list(self._metrics.values())
+        current_strategy = self.strategy
 
         scores = [self.compute_score(m) for m in metrics_snapshot]
         avg_uma = sum(m.uma_used_ratio for m in metrics_snapshot) / len(metrics_snapshot)
@@ -319,7 +313,7 @@ class LoadRouter:
         avg_rtt = sum(m.net_rtt_ms for m in metrics_snapshot) / len(metrics_snapshot)
 
         return {
-            "node_count": len(self._metrics),
+            "node_count": len(metrics_snapshot),
             "strategy": current_strategy.value,
             "avg_score": sum(scores) / len(scores),
             "min_score": min(scores),

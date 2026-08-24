@@ -53,7 +53,7 @@ def list_nodes(online: bool):
 
 async def _async_list_nodes(online_only: bool):
     master = _get_master()
-    nodes = await master.get_online_nodes() if online_only else list(master.nodes.values())
+    nodes = await master.get_online_nodes() if online_only else await master.snapshot_nodes()
 
     if not nodes:
         click.echo("暂无节点")
@@ -494,7 +494,7 @@ def task_cancel(task_id: str):
 
 async def _async_task_cancel(task_id: str):
     master = _get_master()
-    task = master.tasks.get(task_id)
+    task = await master.get_task(task_id)
     if not task:
         click.echo(f"任务不存在: {task_id}")
         return
@@ -543,7 +543,11 @@ def config_set(key: str, value: str):
         parsed = json.loads(value)
     except (json.JSONDecodeError, TypeError):
         parsed = value
-    _config.set(key, parsed)
+    try:
+        _config.set(key, parsed)
+    except Exception as e:
+        click.echo(f"配置校验失败: {e}", err=True)
+        raise SystemExit(1)
     click.echo(f"已设置 {key} = {json.dumps(parsed, ensure_ascii=False)}")
 
 

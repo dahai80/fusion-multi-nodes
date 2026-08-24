@@ -348,6 +348,66 @@ class TestNodeAgentSandboxGate:
         assert "error" in result
         assert "不安全对端主机" in result["error"]
 
+    # ── E5: 插件路径穿越 / 恶意 model_name 段段校验 ──
+
+    @pytest.mark.asyncio
+    async def test_plugin_rejects_traversal_plugin(self):
+        # E5: plugin 含 ../ 应被拒, 不转发到 fusion-desk
+        agent = NodeAgent()
+        result = await agent._execute_plugin(
+            {"task_id": "e5a", "plugin": "../../../admin", "action": "shutdown"}
+        )
+        assert "error" in result
+        assert "非法 plugin" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_plugin_rejects_traversal_action(self):
+        agent = NodeAgent()
+        result = await agent._execute_plugin(
+            {"task_id": "e5b", "plugin": "ok", "action": "../../etc/passwd"}
+        )
+        assert "error" in result
+        assert "非法 action" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_plugin_rejects_slash_in_segment(self):
+        # E5: plugin 含分隔符 / 应被拒 (拼接 URL 会越段)
+        agent = NodeAgent()
+        result = await agent._execute_plugin(
+            {"task_id": "e5c", "plugin": "x/y", "action": "z"}
+        )
+        assert "error" in result
+        assert "非法 plugin" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_inference_rejects_unsafe_model_name(self):
+        # E5: inference model 含特殊字符应被拒
+        agent = NodeAgent()
+        result = await agent._execute_inference(
+            {"task_id": "e5d", "model": "model;rm -rf /", "params": {"prompt": "hi"}}
+        )
+        assert "error" in result
+        assert "非法 model" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_sandbox_gate_blocks_plugin_traversal(self):
+        # E5: _sandbox_gate 覆盖 plugin 类型, 无沙箱配置也强制段校验
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
+        sandbox = WorkerSandbox(SandboxConfig(allowed_paths=["/tmp"]))
+        agent = NodeAgent(sandbox=sandbox)
+        result = await agent.execute_task(
+            {
+                "task_id": "e5e",
+                "type": "plugin",
+                "plugin": "../../admin",
+                "action": "run",
+                "params": {},
+            }
+        )
+        assert result.get("sandbox_blocked") is True
+        assert "插件" in result["error"]
+
 
 class TestNodeAgentReportFault:
     @pytest.mark.asyncio

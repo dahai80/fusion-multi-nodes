@@ -323,7 +323,8 @@ class TestDistributedMLXBridge:
             assert result["node_id"] == "n1"
 
     @pytest.mark.asyncio
-    async def test_get_model_config_fallback(self):
+    async def test_get_model_config_unreachable_raises(self):
+        # E6: fusion-mlx 不可达必须抛错, 不静默回退默认层 → 否则按错误层数切分损坏。
         bridge = DistributedMLXBridge()
 
         mock_client = AsyncMock()
@@ -332,9 +333,8 @@ class TestDistributedMLXBridge:
         mock_client.get = AsyncMock(side_effect=Exception("no server"))
 
         with patch.object(httpx, "AsyncClient", return_value=mock_client):
-            config = await bridge._get_model_config("nonexistent")
-            assert config["num_hidden_layers"] == 32
-            assert config["memory_mb"] == 4096
+            with pytest.raises(RuntimeError, match="不可达"):
+                await bridge._get_model_config("nonexistent")
 
     @pytest.mark.asyncio
     async def test_get_model_config_success_mock(self):
@@ -354,11 +354,13 @@ class TestDistributedMLXBridge:
             assert config["num_hidden_layers"] == 48
 
     @pytest.mark.asyncio
-    async def test_get_model_config_server_error_mock(self):
+    async def test_get_model_config_server_error_raises(self):
+        # E6: 404 等非 200 必须抛错, 不回退默认值。
         bridge = DistributedMLXBridge()
 
         mock_resp = MagicMock()
         mock_resp.status_code = 404
+        mock_resp.text = "not found"
 
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -366,8 +368,8 @@ class TestDistributedMLXBridge:
         mock_client.get = AsyncMock(return_value=mock_resp)
 
         with patch.object(httpx, "AsyncClient", return_value=mock_client):
-            config = await bridge._get_model_config("nonexistent")
-            assert config["num_hidden_layers"] == 32
+            with pytest.raises(RuntimeError, match="404"):
+                await bridge._get_model_config("nonexistent")
 
     @pytest.mark.asyncio
     async def test_sync_weights_success_mock(self):

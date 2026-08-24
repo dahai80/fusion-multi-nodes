@@ -61,8 +61,8 @@ def mock_kv_manager():
         "local_size_mb": 0.0,
     }
     mgr.lookup_local.return_value = None
-    mgr.transfer_from_remote.return_value = True
-    mgr.warm_cache.return_value = {"warmed": 0}
+    mgr.transfer_from_remote = AsyncMock(return_value=True)
+    mgr.warm_cache = AsyncMock(return_value={"success": 0, "failed": 0})
     return mgr
 
 
@@ -257,7 +257,7 @@ class TestKVTransferEndpoint:
 class TestKVWarmEndpoint:
     @pytest.mark.asyncio
     async def test_kv_warm(self, client, mock_kv_manager):
-        mock_kv_manager.warm_cache.return_value = {"warmed": 3}
+        mock_kv_manager.warm_cache.return_value = {"success": 3, "failed": 0}
         resp = await client.post(
             "/api/kv/warm",
             json={
@@ -285,6 +285,22 @@ class TestKVWarmEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["warmed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_kv_warm_passes_nodes_through(self, client, mock_kv_manager):
+        # E7: nodes 必须透传给 warm_cache, 不可硬编码 []。
+        mock_kv_manager.warm_cache.return_value = {"success": 2, "failed": 0}
+        await client.post(
+            "/api/kv/warm",
+            json={
+                "model_name": "llama-3b",
+                "prompts": ["hi"],
+                "nodes": ["node_a", "node_b"],
+            },
+            headers=AUTH_HEADERS,
+        )
+        mock_kv_manager.warm_cache.assert_awaited_once()
+        assert mock_kv_manager.warm_cache.call_args.kwargs["nodes"] == ["node_a", "node_b"]
 
 
 class TestKVStatsEndpoint:

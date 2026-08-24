@@ -173,6 +173,11 @@ class TestDistributedMLX:
     @pytest.mark.asyncio
     async def test_shard_model(self):
         bridge = DistributedMLXBridge()
+
+        async def mock_get_config(model_name):
+            return {"num_hidden_layers": 32, "memory_mb": 4096}
+
+        bridge._get_model_config = mock_get_config
         shards = await bridge.shard_model("test-model", num_shards=4)
         assert len(shards) == 4
         assert shards[0].shard_id == 0
