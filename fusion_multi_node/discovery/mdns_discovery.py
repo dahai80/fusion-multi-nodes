@@ -23,8 +23,11 @@ SERVICE_TYPE = "_fusionmlx._tcp.local."
 DEFAULT_DISCOVERY_PORT = 11450
 
 
-def _hash_cluster_secret(secret: str) -> str:
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:32]
+def _hash_cluster_secret(secret: str, node_id: str = "") -> str:
+    # 绑定 node_id: 防止持同一共享密钥的 Worker 用他人 node_id 广播伪造 master。
+    # hash = sha256(secret || ":" || node_id)[:32]
+    material = f"{secret}:{node_id}".encode()
+    return hashlib.sha256(material).hexdigest()[:32]
 
 
 @dataclass
@@ -54,6 +57,8 @@ class MDNSDiscovery:
         self.node_id = node_id or f"fusion-{platform.node().lower()}"
         self.service_type = service_type
         self._cluster_secret = cluster_secret
+        # sticky master: 一旦锁定合法 master_id, 拒绝任何不同 id 的 master 广播 (防 rogue-master 接管)
+        self._locked_master_id: str | None = None
         self._registry: Any | None = None
         self._browser: Any | None = None
         self._zeroconf: Any | None = None
@@ -84,7 +89,7 @@ class MDNSDiscovery:
         props.setdefault("heartbeat_interval", "3")
         props.setdefault("heartbeat_timeout", "15")
         if self._cluster_secret:
-            props["cluster_hash"] = _hash_cluster_secret(self._cluster_secret)
+            props["cluster_hash"] = _hash_cluster_secret(self._cluster_secret, self.node_id)
 
         try:
             local_ip = self._get_local_ip()
@@ -252,22 +257,39 @@ class MDNSDiscovery:
         """获取已发现的节点列表。"""
         return list(self._discovered.values())
 
+    def _verify_master_candidate(self, node: DiscoveryInfo) -> bool:
+        """校验单个 master 候选: 角色 + node_id + 绑定密钥 + sticky 锁定。"""
+        if node.properties.get("role") != "master":
+            return False
+        node_id = node.properties.get("node_id", "")
+        if not node_id:
+            logger.warning(f"mDNS 节点 {node.name} 缺少 node_id，跳过")
+            return False
+        if self._cluster_secret:
+            remote_hash = node.properties.get("cluster_hash", "")
+            expected = _hash_cluster_secret(self._cluster_secret, node_id)
+            if remote_hash != expected:
+                logger.warning(f"mDNS 节点 {node.name} 密钥验证失败 (node_id={node_id})，跳过")
+                return False
+        # sticky master: 已锁定 id 时, 仅接受同一 id (rogue 用不同 id 广播 master 被拒)
+        if self._locked_master_id is not None and node_id != self._locked_master_id:
+            logger.warning(f"mDNS 拒绝 rogue-master: 锁定 {self._locked_master_id!r}, 收到 {node_id!r}")
+            return False
+        return True
+
+    def lock_master_id(self, master_id: str) -> None:
+        """锁定合法 master node_id — 首次确认合法 master 后调用, 后续拒绝其他 id。"""
+        if master_id and self._locked_master_id is None:
+            self._locked_master_id = master_id
+            logger.info(f"mDNS sticky master 已锁定: {master_id}")
+
     def find_master(self, timeout: float = 5.0) -> DiscoveryInfo | None:
         """浏览并找到 Master 节点。"""
         nodes = self.browse(timeout)
         for node in nodes:
-            if node.properties.get("role") != "master":
+            if not self._verify_master_candidate(node):
                 continue
-            node_id = node.properties.get("node_id", "")
-            if not node_id:
-                logger.warning(f"mDNS 节点 {node.name} 缺少 node_id，跳过")
-                continue
-            if self._cluster_secret:
-                remote_hash = node.properties.get("cluster_hash", "")
-                expected = _hash_cluster_secret(self._cluster_secret)
-                if remote_hash != expected:
-                    logger.warning(f"mDNS 节点 {node.name} 密钥验证失败，跳过")
-                    continue
+            self.lock_master_id(node.properties.get("node_id", ""))
             return node
         return None
 
@@ -275,18 +297,9 @@ class MDNSDiscovery:
         """异步查找 Master 节点 — 非阻塞版本。"""
         nodes = await self.browse_async(timeout)
         for node in nodes:
-            if node.properties.get("role") != "master":
+            if not self._verify_master_candidate(node):
                 continue
-            node_id = node.properties.get("node_id", "")
-            if not node_id:
-                logger.warning(f"mDNS 节点 {node.name} 缺少 node_id，跳过")
-                continue
-            if self._cluster_secret:
-                remote_hash = node.properties.get("cluster_hash", "")
-                expected = _hash_cluster_secret(self._cluster_secret)
-                if remote_hash != expected:
-                    logger.warning(f"mDNS 节点 {node.name} 密钥验证失败，跳过")
-                    continue
+            self.lock_master_id(node.properties.get("node_id", ""))
             return node
         return None
 

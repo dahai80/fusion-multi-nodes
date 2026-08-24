@@ -121,7 +121,7 @@ class TLSCertManager:
         key_pem = key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.BestAvailableEncryption(os.urandom(32)),
+            serialization.NoEncryption(),
         )
         cert_pem = cert.public_bytes(serialization.Encoding.PEM)
 
@@ -215,31 +215,30 @@ class TLSCertManager:
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.load_cert_chain(cert_path, key_path)
-        if self._pinned_fingerprints:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_REQUIRED
-            ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        if not self._pinned_fingerprints:
+            # 无 pinned 指纹时 fail-closed: 禁止返回可被 MITM 的"自签信任"上下文。
+            # 调用方须先 pin_fingerprint(对端证书指纹) 再建立连接。
+            raise RuntimeError(
+                "TLS 客户端上下文要求 pinned 指纹: 先调用 pin_fingerprint() 配置对端证书指纹，"
+                "禁止无 pin 的自签名信任回退 (MITM 风险)"
+            )
+        # 有 pinned 指纹: check_hostname=False (自签证书无对端域名匹配),
+        # 但用 CERT_REQUIRED + DER 指纹回调做真实身份校验, 不信任任何 CA。
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        pinned = self._pinned_fingerprints
 
-            def _verify_cb(conn, cert, errno, errdepth, ok):
-                if not ok:
-                    return False
-                fp = hashlib.sha256(cert).hexdigest()
-                if fp in self._pinned_fingerprints:
-                    return True
-                logger.warning(f"TLS 对端证书不在 pinned 列表: {fp[:16]}...")
-                return False
+        def _verify_cb(conn, cert_der, errno, errdepth, ok):
+            # cert_der 为对端证书 DER 二进制, 计算 SHA-256 与 pinned 比对
+            fp = hashlib.sha256(cert_der).hexdigest()
+            if fp in pinned:
+                return True
+            logger.warning(f"TLS 对端证书不在 pinned 列表: {fp[:16]}...")
+            return False
 
-            ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
-            ctx.verify_flags = ssl.VERIFY_X509_PARTIAL_CHAIN
-            ctx.load_verify_locations(cert_path)
-            ctx._ssl_io_loop_verify = True
-        else:
-            ctx.load_verify_locations(cert_path)
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_REQUIRED
-            ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            logger.warning("TLS 客户端: 无 pinned 指纹，使用自签名信任模式（建议配置 pin_fingerprint）")
+        ctx.set_verify(ssl.VERIFY_PEER, _verify_cb)
         self._client_ssl_context = ctx
+        logger.info(f"TLS 客户端上下文就绪: pinned={len(self._pinned_fingerprints)} 指纹")
         return ctx

@@ -48,13 +48,33 @@ class DataIsolationPolicy:
                 logger.debug(f"数据隔离: {path} 匹配 Master 专有模式 {pattern}")
                 return True
 
+        # 路径判定走 realpath + commonpath, 防符号链接绕过隔离 (AR审计 P2)
+        real = self._safe_realpath(norm)
         for master_path in self.master_only_paths:
             norm_master = os.path.normpath(master_path)
             if norm == norm_master or norm.startswith(norm_master + os.sep):
                 logger.debug(f"数据隔离: {path} 位于 Master 专有路径 {master_path}")
                 return True
+            real_master = self._safe_realpath(norm_master)
+            if real and real_master:
+                try:
+                    if os.path.commonpath([real, real_master]) == real_master:
+                        logger.debug(f"数据隔离: {path} (realpath) 位于 Master 专有路径 {master_path}")
+                        return True
+                except ValueError:
+                    # 跨设备/不同卷 → commonpath 抛 ValueError, 回退 normpath 判定已上方处理
+                    pass
 
         return False
+
+    @staticmethod
+    def _safe_realpath(path: str) -> str:
+        """安全 realpath — 路径不存在不抛异常, 返回 normpath 兜底。"""
+        try:
+            return os.path.realpath(path)
+        except (OSError, ValueError) as e:
+            logger.debug(f"realpath 失败, 回退 normpath: {path} - {e}")
+            return os.path.normpath(path)
 
     def is_transfer_allowed(self, source_path: str, target_role: str) -> bool:
         role_value = target_role.value if isinstance(target_role, NodeRole) else str(target_role).lower()

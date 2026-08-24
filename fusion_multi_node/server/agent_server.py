@@ -146,6 +146,10 @@ class KVWarmRequest(BaseModel):
     prompts: list[str]
 
 
+class TaskCancelRequest(BaseModel):
+    task_id: str
+
+
 class HealthResponse(BaseModel):
     status: str
     node_id: str
@@ -205,6 +209,14 @@ class AgentServer:
             except Exception as e:
                 logger.error(f"任务执行失败: {e}")
                 raise HTTPException(status_code=500, detail="内部错误")
+
+        @app.post("/api/tasks/cancel")
+        async def cancel_task(req: TaskCancelRequest):
+            # 真取消: 中止运行中推理协程, 非假动作
+            ok = await self.agent.cancel_task(req.task_id)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"无可取消任务: {req.task_id}")
+            return {"status": "cancelled", "task_id": req.task_id}
 
         # ── KV 缓存 ──
 

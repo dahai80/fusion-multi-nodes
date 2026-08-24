@@ -154,6 +154,8 @@ class NodeAgent:
                 logger.warning(f"加载集群密钥失败，Master 通信可能被 401 拒绝: {e}")
         self._running = False
         self._current_task: dict[str, Any] | None = None
+        # 运行中任务协程注册表 — task_id → asyncio.Task, 供 cancel_task 终止运行推理
+        self._running_task_handles: dict[str, asyncio.Task] = {}
         self._heartbeat_task: asyncio.Task | None = None
         self._hardware_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
@@ -350,32 +352,55 @@ class NodeAgent:
         temp_dir = os.path.join(tempfile.gettempdir(), f"fusion_task_{task_id}")
         logger.info(f"执行任务: {task_id} ({task_type})")
 
+        # 把执行体包成可取消的 asyncio.Task 并登记, 供 cancel_task 中止
+        async def _run():
+            try:
+                os.makedirs(temp_dir, exist_ok=True)
+                if task_type == "inference":
+                    return await self._execute_inference(task)
+                if task_type == "embedding":
+                    return await self._execute_embedding(task)
+                if task_type == "plugin":
+                    return await self._execute_plugin(task)
+                if task_type == "model_sync":
+                    return await self._execute_model_sync(task)
+                return {"error": f"未知任务类型: {task_type}"}
+            except asyncio.CancelledError:
+                logger.warning(f"任务被取消中止: {task_id}")
+                raise
+            finally:
+                self._running_task_handles.pop(task_id, None)
+                self._current_task = None
+                # M6-01 Worker 临时数据自动删除
+                try:
+                    if os.path.isdir(temp_dir):
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        logger.info(f"M6-01 清理任务临时目录: {temp_dir}")
+                except Exception as e:
+                    logger.warning(f"M6-01 清理临时目录失败: {temp_dir} - {e}")
+
+        handle = asyncio.create_task(_run(), name=f"task_{task_id}")
+        self._running_task_handles[task_id] = handle
         try:
-            os.makedirs(temp_dir, exist_ok=True)
-            if task_type == "inference":
-                result = await self._execute_inference(task)
-            elif task_type == "embedding":
-                result = await self._execute_embedding(task)
-            elif task_type == "plugin":
-                result = await self._execute_plugin(task)
-            elif task_type == "model_sync":
-                result = await self._execute_model_sync(task)
-            else:
-                result = {"error": f"未知任务类型: {task_type}"}
+            result = await handle
+        except asyncio.CancelledError:
+            result = {"error": "cancelled", "cancelled": True}
+            logger.info(f"任务已取消: {task_id}")
         except Exception as e:
             result = {"error": str(e)}
             logger.error(f"任务执行失败: {task_id}: {e}")
-        finally:
-            self._current_task = None
-            # M6-01 Worker 临时数据自动删除
-            try:
-                if os.path.isdir(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    logger.info(f"M6-01 清理任务临时目录: {temp_dir}")
-            except Exception as e:
-                logger.warning(f"M6-01 清理临时目录失败: {temp_dir} - {e}")
 
         return result
+
+    async def cancel_task(self, task_id: str) -> bool:
+        """取消正在运行的任务 — 真中止运行推理协程, 非假动作。"""
+        handle = self._running_task_handles.get(task_id)
+        if not handle or handle.done():
+            logger.info(f"任务无可取消运行句柄: {task_id}")
+            return False
+        handle.cancel()
+        logger.info(f"已发送取消信号到任务协程: {task_id}")
+        return True
 
     async def _execute_inference(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行推理任务（通过 InferenceBackend）。"""
@@ -496,7 +521,7 @@ class NodeAgent:
             await server.start(host="127.0.0.1", port=self.config.agent_port)
 
     async def stop(self) -> None:
-        """停止节点代理。"""
+        """停止节点代理 — 优雅关停: drain 在途任务后再下线。"""
         self._running = False
         for task in (self._heartbeat_task, self._hardware_task):
             if task and not task.done():
@@ -505,6 +530,18 @@ class NodeAgent:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # drain: 取消运行中推理协程并等待退出 (避免静默丢工作)
+        if self._running_task_handles:
+            logger.info(f"关停 drain: 取消 {len(self._running_task_handles)} 个在途任务")
+            for handle in list(self._running_task_handles.values()):
+                if not handle.done():
+                    handle.cancel()
+            for handle in list(self._running_task_handles.values()):
+                try:
+                    await handle
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._running_task_handles.clear()
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
             self._http_client = None

@@ -2,7 +2,10 @@
 
 from .auth import (
     BearerAuthMiddleware,
+    build_safe_url,
     generate_cluster_token,
+    is_safe_path_segment,
+    is_safe_peer_host,
     load_or_create_token,
     sanitize_node_url_part,
     save_token,
@@ -17,9 +20,12 @@ __all__ = [
     "LinkType",
     "NetworkPath",
     "NetworkTopologyDetector",
+    "build_safe_url",
     "generate_cluster_token",
     "get_data_dir",
     "get_log_dir",
+    "is_safe_path_segment",
+    "is_safe_peer_host",
     "load_or_create_token",
     "sanitize_node_url_part",
     "save_token",

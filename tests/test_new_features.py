@@ -233,7 +233,7 @@ class TestClusterTaskNewFields:
         master.tasks[task.task_id] = task
         ok = await master.cancel_task("t-cancel", reason="test cancel")
         assert ok is True
-        assert master.tasks["t-cancel"].status == TaskStatus.FAILED
+        assert master.tasks["t-cancel"].status == TaskStatus.CANCELLED
         assert master.tasks["t-cancel"].cancel_reason == "test cancel"
 
     @pytest.mark.asyncio
@@ -265,7 +265,7 @@ class TestClusterTaskNewFields:
         master.tasks["parent-1"] = parent
         ok = await master.cancel_task("parent-1", reason="cancel parent", cancel_sub_tasks=True)
         assert ok is True
-        assert master.tasks["sub-1"].status == TaskStatus.FAILED
+        assert master.tasks["sub-1"].status == TaskStatus.CANCELLED
         assert "父任务取消" in master.tasks["sub-1"].cancel_reason
 
     def test_model_degradation_chain(self):
@@ -487,6 +487,58 @@ class TestDataScrubber:
         assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in text
         assert "api_key" in hits
 
+    def test_scrub_openai_token(self):
+        from fusion_multi_node.security.data_scrubber import DataScrubber
+
+        scrubber = DataScrubber()
+        text, hits = scrubber.scrub_text("bearer sk-abcd1234efgh5678ijkl9012mnop3456")
+        assert "sk-abcd1234efgh5678ijkl9012mnop3456" not in text
+        assert "openai_key" in hits
+
+    def test_scrub_github_pat(self):
+        from fusion_multi_node.security.data_scrubber import DataScrubber
+
+        scrubber = DataScrubber()
+        pat = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"  # ghp_ + 36 chars
+        text, hits = scrubber.scrub_text(f"token={pat}")
+        assert pat not in text
+        assert "github_pat" in hits
+
+    def test_scrub_slack_token(self):
+        from fusion_multi_node.security.data_scrubber import DataScrubber
+
+        scrubber = DataScrubber()
+        text, hits = scrubber.scrub_text("hook xoxb-1234567890-abcdefghij")
+        assert "xoxb-1234567890-abcdefghij" not in text
+        assert "slack_token" in hits
+
+    def test_scrub_jwt(self):
+        from fusion_multi_node.security.data_scrubber import DataScrubber
+
+        scrubber = DataScrubber()
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4f"
+        text, hits = scrubber.scrub_text(f"Authorization: Bearer {jwt}")
+        assert jwt not in text
+        assert "jwt_token" in hits
+
+    def test_scrub_phone_cjk_adjacent(self):
+        # 中文字符紧贴手机号, \b 在 Unicode \w 下失效 → 用数字边界 (?<!\d)(?!\d) 才脱敏
+        from fusion_multi_node.security.data_scrubber import DataScrubber
+
+        scrubber = DataScrubber()
+        text, hits = scrubber.scrub_text("用户手机13800138000，邮箱test@example.com")
+        assert "13800138000" not in text
+        assert "phone_cn" in hits
+
+    def test_scrub_phone_not_in_longer_digits(self):
+        # 13 位数字串不应误匹配 11 位手机号 (数字边界拒绝更长串子串)
+        from fusion_multi_node.security.data_scrubber import DataScrubber
+
+        scrubber = DataScrubber()
+        text, hits = scrubber.scrub_text("订单号 1391234567890")
+        assert "1391234567890" in text
+        assert "phone_cn" not in hits
+
     def test_custom_rule(self):
         from fusion_multi_node.security.data_scrubber import DataScrubber, ScrubRule
 
@@ -508,6 +560,31 @@ class TestDataScrubber:
         scrubber = DataScrubber()
         _text, hits = scrubber.scrub_text("hello world")
         assert hits == []
+
+    def test_data_isolation_symlink_bypass(self):
+        # 符号链接指向 .fusion/master 子文件, realpath+commonpath 应拦截 (AR审计 P2)
+        import os
+        import tempfile
+
+        from fusion_multi_node.security.data_isolation import DataIsolationPolicy
+
+        policy = DataIsolationPolicy()
+        with tempfile.TemporaryDirectory() as tmp:
+            master_dir = os.path.join(tmp, ".fusion", "master")
+            os.makedirs(master_dir)
+            secret = os.path.join(master_dir, "secret.db")
+            open(secret, "w").close()
+            link = os.path.join(tmp, "link_to_secret.db")
+            os.symlink(secret, link)
+            # 直连 + 符号链接都应判为 Master 专有
+            assert policy.is_master_only(secret) is True
+            assert policy.is_master_only(link) is True
+
+    def test_data_isolation_clean_path_allowed(self):
+        from fusion_multi_node.security.data_isolation import DataIsolationPolicy
+
+        policy = DataIsolationPolicy()
+        assert policy.is_master_only("/tmp/normal/model.mlx") is False
 
 
 # ── M8 Log Store & Diagnosis ──

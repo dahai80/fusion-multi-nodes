@@ -21,7 +21,13 @@ from fusion_multi_node.master import (
 )
 from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
 from fusion_multi_node.security.permission import NodeRole, PermissionManager
-from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
+from fusion_multi_node.utils.auth import (
+    BearerAuthMiddleware,
+    build_safe_url,
+    is_safe_path_segment,
+    is_safe_peer_host,
+    load_or_create_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,11 +201,19 @@ class MasterServer:
                 try:
                     import httpx
 
+                    if not is_safe_peer_host(source_host):
+                        raise HTTPException(status_code=400, detail=f"不安全对端主机: {source_host!r}")
+                    if not is_safe_path_segment(model_name):
+                        raise HTTPException(status_code=400, detail=f"非法 model_name: {model_name!r}")
                     client = httpx.AsyncClient(timeout=30.0)
-                    safe_host = source_host.replace("/", "").replace("..", "")
-                    resp = await client.get(f"http://{safe_host}:{source_port}/api/models/{model_name}/manifest")
+                    url = build_safe_url(
+                        "http", source_host, source_port, f"/api/models/{model_name}/manifest"
+                    )
+                    resp = await client.get(url)
                     remote_manifest = ModelManifest.from_dict(resp.json())
                     await client.aclose()
+                except HTTPException:
+                    raise
                 except Exception as e:
                     raise HTTPException(status_code=502, detail=f"获取远端 manifest 失败: {e}")
             result = await sync_mgr.incremental_sync(model_name, remote_manifest, source_host, source_port)
@@ -224,21 +238,24 @@ class MasterServer:
             report = sync_mgr.collect_load_report()
             return report.to_dict()
 
-        # M1-05 手动 IP 加入
+        # M1-05 手动 IP 加入 — 走审批门，默认不自动注册
         @app.post("/api/join")
         async def manual_join(req: dict):
             from fusion_multi_node.discovery.manual_join import ManualJoinManager
 
             if not hasattr(self, "_join_manager"):
                 cluster_secret = getattr(self.master, "_cluster_secret", "")
-                self._join_manager = ManualJoinManager(cluster_secret=cluster_secret)
+                self._join_manager = ManualJoinManager(cluster_secret=cluster_secret, auto_approve=False)
             result = self._join_manager.handle_join_request(req)
             if result.get("status") != "ok":
                 raise HTTPException(status_code=400, detail=result.get("detail", "加入失败"))
-            # 注册节点到集群
-            if result.get("auto_approved", True):
+            node_id = req.get("node_id", "")
+            if not node_id or not is_safe_path_segment(node_id):
+                raise HTTPException(status_code=400, detail="缺少或非法 node_id")
+            # 仅当显式自动审批通过才注册；否则进入待审批，等待 /api/nodes/approve
+            if result.get("auto_approved", False) and self._approval_manager is None:
                 node = NodeInfo(
-                    node_id=req.get("node_id", ""),
+                    node_id=node_id,
                     hostname=req.get("hostname", ""),
                     ip_address=req.get("ip_address", ""),
                     port=req.get("port", 11445),
@@ -246,12 +263,24 @@ class MasterServer:
                     last_heartbeat=time.time(),
                 )
                 await self.master.register_node(node)
+            elif self._approval_manager is not None:
+                self._approval_manager.request_join(
+                    node_id=node_id,
+                    hostname=req.get("hostname", ""),
+                    ip_address=req.get("ip_address", ""),
+                    port=req.get("port", 11445),
+                )
+                result["status"] = "ok"
+                result["auto_approved"] = False
+                result["message"] = "等待管理员审批"
             return result
 
         # ── 节点管理 ──
 
         @app.post("/api/nodes/register")
         async def register_node(req: NodeRegisterRequest):
+            if not is_safe_path_segment(req.node_id):
+                raise HTTPException(status_code=400, detail="非法 node_id")
             role = self._permission_manager.get_role(req.node_id)
             if role is not None and not await _check_permission(req.node_id, "/api/nodes/register", "POST"):
                 raise HTTPException(status_code=403, detail="权限不足: node register")
@@ -268,6 +297,8 @@ class MasterServer:
                         status_code=403,
                         detail=f"节点 {req.node_id} 未通过审批，当前状态: {approval.status.value}",
                     )
+            # 角色由 Master 决定，不信任 req.role 自声明 —— 远程注册节点恒为 WORKER
+            assigned_role = NodeRole.WORKER
             node = NodeInfo(
                 node_id=req.node_id,
                 hostname=req.hostname,
@@ -281,7 +312,7 @@ class MasterServer:
                 device_model=req.device_model,
                 uma_size_gb=req.uma_size_gb,
                 mlx_version=req.mlx_version,
-                role=req.role,
+                role=assigned_role.value,
                 status=NodeStatus.ONLINE,
                 tags=req.tags,
                 active_tasks=req.active_tasks,
@@ -290,9 +321,8 @@ class MasterServer:
                 last_heartbeat=time.time(),
             )
             await self.master.register_node(node)
-            role = NodeRole.MASTER if req.role == "master" else NodeRole.WORKER
-            self._permission_manager.assign_role(req.node_id, role, "register")
-            logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={req.role}")
+            self._permission_manager.assign_role(req.node_id, assigned_role, "register")
+            logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={assigned_role.value}")
             return {"status": "ok", "node_id": req.node_id}
 
         @app.post("/api/nodes/approve")
@@ -341,25 +371,20 @@ class MasterServer:
 
         @app.post("/api/nodes/heartbeat")
         async def heartbeat(req: HeartbeatRequest):
-            node = self.master.nodes.get(req.node_id)
-            if not node:
+            ok = await self.master.update_heartbeat(
+                req.node_id,
+                available_memory_gb=req.available_memory_gb,
+                active_tasks=req.active_tasks,
+            )
+            if not ok:
                 raise HTTPException(status_code=404, detail=f"节点 {req.node_id} 未注册")
-            node.last_heartbeat = time.time()
-            if req.available_memory_gb is not None:
-                node.available_memory_gb = req.available_memory_gb
-            if req.active_tasks is not None:
-                node.active_tasks = req.active_tasks
-            if node.status == NodeStatus.OFFLINE:
-                node.status = NodeStatus.ONLINE
-                logger.info(f"节点恢复上线: {req.node_id}")
             return {"status": "ok"}
 
         @app.post("/api/nodes/fault")
         async def report_fault(req: FaultReportRequest):
-            logger.warning(f"节点故障上报: {req.node_id} [{req.fault_type}] {req.message}")
-            node = self.master.nodes.get(req.node_id)
-            if node:
-                node.status = NodeStatus.FAULT
+            ok = await self.master.report_fault(req.node_id, req.fault_type, req.message)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"节点 {req.node_id} 未注册")
             return {"status": "ok"}
 
         @app.post("/api/nodes/load")
@@ -456,10 +481,40 @@ class MasterServer:
                 raise HTTPException(status_code=403, detail="权限不足: task cancel")
             if task_id not in self.master.tasks:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
+            # 取消前快照受影响节点 (cancel_task 会清空 assigned_nodes), 取消后通知各节点中止运行推理
+            task = self.master.tasks.get(task_id)
+            affected_nodes = []
+            if task:
+                affected_nodes = list(task.assigned_nodes)
+                for sid in getattr(task, "sub_tasks", []) or []:
+                    sub = self.master.tasks.get(sid)
+                    if sub:
+                        affected_nodes.extend(sub.assigned_nodes)
             ok = await self.master.cancel_task(task_id, reason=req.reason, cancel_sub_tasks=True)
             if not ok:
                 raise HTTPException(status_code=400, detail=f"任务 {task_id} 取消失败")
-            return {"status": "ok", "task_id": task_id}
+            # 传播取消到运行中节点 (真中止, 非假动作)
+            notified = []
+            for nid in affected_nodes:
+                node = self.master.nodes.get(nid)
+                if not node:
+                    continue
+                try:
+                    import httpx
+
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        resp = await client.post(
+                            f"http://{node.ip_address}:{node.port}/api/tasks/cancel",
+                            json={"task_id": task_id},
+                            headers={"Authorization": f"Bearer {self._shared_token}"},
+                        )
+                        if resp.status_code == 200:
+                            notified.append(nid)
+                        else:
+                            logger.warning(f"节点 {nid} 取消通知失败: {resp.status_code}")
+                except Exception as e:
+                    logger.warning(f"节点 {nid} 取消通知异常: {e}")
+            return {"status": "cancelled", "task_id": task_id, "notified_nodes": notified}
 
         # M4-04 任务降级
         @app.post("/api/tasks/{task_id}/degrade")

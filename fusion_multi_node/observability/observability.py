@@ -96,7 +96,8 @@ class ClusterObservability:
         self.metrics: collections.deque = collections.deque(maxlen=10000)
         self.alerts: collections.deque = collections.deque(maxlen=10000)
         self.logs: collections.deque = collections.deque(maxlen=50000)
-        self._metric_times: list[float] = []
+        # 与 metrics 同 maxlen 对齐, 避免 metrics 丢弃旧条目后时间索引错位 (AR审计 P2 无界增长)
+        self._metric_times: collections.deque = collections.deque(maxlen=10000)
         self._alert_handlers: list[Callable] = []
         self._running = False
         self._cleanup_task: asyncio.Task | None = None
@@ -438,7 +439,7 @@ class ClusterObservability:
                 while self.metrics and self.metrics[0].timestamp <= cutoff:
                     self.metrics.popleft()
                     if self._metric_times:
-                        self._metric_times.pop(0)
+                        self._metric_times.popleft()
                 while self.logs and self.logs[0].timestamp <= cutoff:
                     self.logs.popleft()
                 while self.alerts and (self.alerts[0].resolved and self.alerts[0].created_at <= cutoff):

@@ -1,15 +1,15 @@
 <div align="center">
   <h1>🔗 Fusion-Multi-Node</h1>
   <p><strong>Cluster scheduling core for distributed Apple Silicon MLX inference</strong></p>
-  <p><em>Pool multiple Macs into a unified AI cluster — pipeline parallelism, data parallelism, MCP gateway.</em></p>
+  <p><em>Pool multiple Macs into a unified AI cluster — pipeline parallelism, data parallelism, 100% local-first.</em></p>
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.6.9-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.7.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-805%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-813%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -164,9 +164,11 @@ master.complete_task("task_1")
 
 **Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, cloud fallback on retry exhaustion.
 
-### Master Election (`fusion_multi_node.master.election`)
+### Master Election (`fusion_multi_node.master.election`) — ⚠️ 未接线, 非生产可用
 
-Raft-simplified leader election with priority-based voting:
+> **当前状态: 未接线死代码。** `ClusterMaster.start()` 不调用 `setup_election`, `StandbyMaster` 零生产实例化。现网为单 Master, 无 HA, Master 挂 = 集群挂。以下 API 仅为单元级原型, 不构成高可用承诺。完整 HA 接线 (LEARNING 状态同步 + 持久化 term/vote) 列为后续路线图。
+
+Raft-simplified leader election with priority-based voting (原型, 未接生产路径):
 
 ```python
 from fusion_multi_node.master.election import MasterElection, ElectionState
@@ -177,9 +179,9 @@ resp = await election.handle_vote_request(req)
 await election.receive_heartbeat("leader-id", term=2)
 ```
 
-### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`)
+### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, 默认禁用
 
-OpenAI/Anthropic fallback with daily cost limits:
+> **违反"100%本地/离线"定位。** 本项目定位为本地优先离线集群, 不提供云 API 出站。`setup_cloud_fallback` 默认不调用, `_cloud_client=None` 时 `fallback_to_cloud` 直接返回 `None`。该模块计划迁移至 fusion-gateway (上游 issue 跟踪)。以下 API 仅为兼容保留, 不应在本地集群启用:
 
 ```python
 from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
@@ -520,6 +522,41 @@ pytest tests/test_new_features.py -v
 
 ---
 
+## 📋 Changelog
+
+### v0.7.0 ✅ (Current) — 对抗性审查修复 (AR 2026-08-24)
+
+**P0 安全地基重构**
+- [x] F1-F2 path traversal 防护: cluster_sync 路径遍历拦截 (NUL/绝对/drive/normpath + is_safe_path_segment)
+- [x] F3-F4 SSRF 守卫: is_safe_peer_host 拒环回/链路本地/元数据/多播, build_safe_url 强制 scheme
+- [x] F5 TLS key 持久化: 私钥 NoEncryption + 文件权限 0600
+- [x] F6 TLS pinning: 无 pin fail-closed (raise), pin 指纹 CERT_REQUIRED+VERIFY_PEER+DER 回调
+- [x] F7 FMP protobuf 二进制 payload base64, 禁 utf-8 replace 损坏
+- [x] F8 fmp_server shard_id/file_path 路径校验
+- [x] F9 mDNS sticky-master + node_id 绑定 cluster_hash, 防 Worker 伪造 master
+- [x] F10 validate_node_id 拆 is_safe_path_segment + is_safe_peer_host, 所有 sink 加固
+
+**P1 现网路径正确性 + 生命周期**
+- [x] #8 assign_task TOCTOU 消除: re-check-inside-lock
+- [x] #9 heartbeat/fault 路由走加锁方法, 未知节点 404 (fail-visible)
+- [x] #10 真任务取消: CANCELLED 状态, Master→Agent /api/tasks/cancel 中止运行推理
+- [x] #11 SIGTERM + 优雅关停 drain: asyncio.Event + 信号处理 + 在途 task 协程 gather
+- [x] #12 config.save() 原子写: temp + os.fsync + os.replace
+- [x] #13 task_id uuid4 替 int(time.time())
+
+**P1 HA 接线或砍 + 合规边界**
+- [x] #14 砍 HA 虚假宣称: StandbyMaster/MasterElection/setup_election 标未接线死代码, 现网单 Master 无 HA
+- [x] #15 合规边界: cloud_fallback/mcp_gateway/ast_diff 默认禁用 + AR 审计 P2 标注, 待迁移 fusion-gateway/fusion-cowork (上游 issue); cluster_sync LAN-only is_safe_peer_host 加固
+
+**P2 未接线原型门禁 + security 接线 + 无界增长**
+- [x] #17 DataScrubber 补 openai_key/github_pat/slack_token/jwt_token + 数字边界修 CJK 邻接; DataIsolation realpath+commonpath 防符号链接绕过; PermissionManager block-by-default (已验证 fail-closed)
+- [x] #18 _metric_times list→deque(maxlen=10000) 对齐 metrics, 修无界增长+索引错位
+- [x] M9/M10/shard_replication/WorkerSandbox 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除)
+
+回归: 813 tests passed, 0 ruff errors.
+
+---
+
 ## 🛣️ Roadmap
 
 ### v0.1.0 ✅
@@ -535,7 +572,7 @@ pytest tests/test_new_features.py -v
 ### v0.3.0 ✅
 - [x] Full audit remediation (P0-P3), 585 tests, 0 ruff errors
 
-### v0.5.0 ✅ (Current)
+### v0.5.0 ✅
 - [x] M1-02 device_model + UMA size in mDNS discovery & NodeInfo
 - [x] M1-03 Heartbeat interval 5s→3s
 - [x] M1-02/03 mDNS heartbeat_interval/timeout in broadcast properties, real device_model + uma_size_gb

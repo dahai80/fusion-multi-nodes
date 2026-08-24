@@ -122,19 +122,23 @@ class ClusterConfig:
         return changed
 
     def save(self) -> None:
-        """保存配置。"""
+        """保存配置 — 原子写: temp + os.replace, 防崩溃中途截断。"""
         path = Path(self.config_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(path.parent, 0o700)
         except OSError:
             pass
-        with open(path, "w") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w") as f:
             json.dump(self._data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
         try:
-            os.chmod(path, 0o600)
+            os.chmod(tmp, 0o600)
         except OSError:
             pass
+        os.replace(tmp, path)
 
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置项。"""

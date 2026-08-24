@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 import click
 
@@ -199,14 +200,38 @@ async def _async_node_start(
         click.echo(f"✅ Agent 已启动: {_agent.config.node_id} (auto_discover={auto_discover}, transport={transport})")
 
     click.echo("按 Ctrl+C 停止...")
+    stop_event = asyncio.Event()
+
+    def _signal_handler():
+        logger.info("收到停止信号, 开始优雅关停 drain...")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    import signal as _signal
+
+    for sig in (_signal.SIGTERM, _signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except (NotImplementedError, RuntimeError):
+            # 某些平台 (Windows) 不支持 add_signal_handler, 退回 KeyboardInterrupt
+            pass
+
     try:
-        while True:
-            await asyncio.sleep(1)
+        await stop_event.wait()
     except KeyboardInterrupt:
-        if _master:
-            await _master.stop()
+        pass
+    finally:
+        # 优雅关停: drain 在途任务 (Master.stop / Agent.stop 内部 await 关停)
         if _agent:
-            await _agent.stop()
+            try:
+                await _agent.stop()
+            except Exception as e:
+                logger.warning(f"Agent 关停异常: {e}")
+        if _master:
+            try:
+                await _master.stop()
+            except Exception as e:
+                logger.warning(f"Master 关停异常: {e}")
         click.echo("⏹️  已停止")
 
 
@@ -408,7 +433,7 @@ async def _async_task_submit(name: str, model: str, mode: str, prompt: str, time
     master = _get_master()
 
     task = ClusterTask(
-        task_id=f"task_{int(time.time())}",
+        task_id=f"task_{uuid.uuid4().hex[:12]}",
         name=name,
         mode=ParallelMode.PIPELINE if mode == "pipeline" else ParallelMode.DATA,
         model_name=model,
@@ -473,8 +498,11 @@ async def _async_task_cancel(task_id: str):
     if not task:
         click.echo(f"任务不存在: {task_id}")
         return
-    await master.complete_task(task_id, "cancelled by user")
-    click.echo(f"已取消任务: {task_id}")
+    ok = await master.cancel_task(task_id, reason="cancelled by user", cancel_sub_tasks=True)
+    if ok:
+        click.echo(f"已取消任务: {task_id}")
+    else:
+        click.echo(f"取消任务失败 (状态不允许): {task_id}")
 
 
 # ── 配置管理 ──

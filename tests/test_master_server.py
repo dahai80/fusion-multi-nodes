@@ -159,7 +159,8 @@ class TestMasterServerNodeManagement:
             },
             headers=AUTH_HEADERS,
         )
-        assert resp.status_code == 200
+        # 未知节点应 fail visibly 返回 404, 不再静默吞错返 200
+        assert resp.status_code == 404
 
 
 class TestMasterServerTaskManagement:

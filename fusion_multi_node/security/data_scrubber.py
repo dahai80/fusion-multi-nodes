@@ -33,13 +33,13 @@ class ScrubRule:
 DEFAULT_RULES: list[ScrubRule] = [
     ScrubRule(
         name="phone_cn",
-        pattern=r"1[3-9]\d{9}",
+        pattern=r"(?<!\d)1[3-9]\d{9}(?!\d)",
         replacement="***PHONE***",
         description="中国大陆手机号",
     ),
     ScrubRule(
         name="id_card_cn",
-        pattern=r"[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]",
+        pattern=r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)",
         replacement="***IDCARD***",
         description="中国身份证号",
     ),
@@ -56,8 +56,32 @@ DEFAULT_RULES: list[ScrubRule] = [
         description="API密钥/Token",
     ),
     ScrubRule(
+        name="openai_key",
+        pattern=r"\bsk-[a-zA-Z0-9]{20,}\b",
+        replacement="***OPENAIKEY***",
+        description="OpenAI API密钥",
+    ),
+    ScrubRule(
+        name="github_pat",
+        pattern=r"\bghp_[a-zA-Z0-9]{36}\b",
+        replacement="***GITHUBPAT***",
+        description="GitHub Personal Access Token",
+    ),
+    ScrubRule(
+        name="slack_token",
+        pattern=r"\bxox[baprs]-[a-zA-Z0-9-]{10,}\b",
+        replacement="***SLACKTOKEN***",
+        description="Slack Token (bot/user/app)",
+    ),
+    ScrubRule(
+        name="jwt_token",
+        pattern=r"\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b",
+        replacement="***JWT***",
+        description="JWT Token (eyJ 三段式)",
+    ),
+    ScrubRule(
         name="aws_key",
-        pattern=r"AKIA[0-9A-Z]{16}",
+        pattern=r"\bAKIA[0-9A-Z]{16}\b",
         replacement="***AWSKEY***",
         description="AWS Access Key",
     ),

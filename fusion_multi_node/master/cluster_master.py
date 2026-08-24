@@ -54,6 +54,7 @@ class TaskStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     MIGRATED = "migrated"
     TIMEOUT = "timeout"
 
@@ -217,6 +218,37 @@ class ClusterMaster:
             self.load_router.remove_node(node_id)
             logger.info(f"节点离线: {node_id}")
 
+    async def update_heartbeat(
+        self,
+        node_id: str,
+        available_memory_gb: float | None = None,
+        active_tasks: int | None = None,
+    ) -> bool:
+        """加锁更新节点心跳 — 禁止路由层裸改 node 字段 (与 _health_check_loop 竞态)。"""
+        async with self._lock:
+            node = self.nodes.get(node_id)
+            if not node:
+                return False
+            node.last_heartbeat = time.time()
+            if available_memory_gb is not None:
+                node.available_memory_gb = available_memory_gb
+            if active_tasks is not None:
+                node.active_tasks = active_tasks
+            if node.status == NodeStatus.OFFLINE:
+                node.status = NodeStatus.ONLINE
+                logger.info(f"节点恢复上线: {node_id}")
+            return True
+
+    async def report_fault(self, node_id: str, fault_type: str = "", message: str = "") -> bool:
+        """加锁标记节点故障 — 禁止路由层裸改 node.status。"""
+        async with self._lock:
+            node = self.nodes.get(node_id)
+            if not node:
+                return False
+            node.status = NodeStatus.FAULT
+            logger.warning(f"节点故障: {node_id} [{fault_type}] {message}")
+            return True
+
     async def get_online_nodes(self) -> list[NodeInfo]:
         now = time.time()
         online = []
@@ -367,13 +399,22 @@ class ClusterMaster:
                 node = self.nodes[preferred]
                 if node.status == NodeStatus.ONLINE and node.available_memory_gb >= required_mem:
                     async with self._lock:
-                        task.assigned_nodes = [preferred]
-                        task.status = TaskStatus.RUNNING
-                        task.started_at = time.time()
-                        self.tasks[task.task_id] = task
-                        node.active_tasks += 1
-                    logger.info(f"M4-02 本地强制: {task.name} → {preferred} (轻量级任务)")
-                    return True
+                        # TOCTOU 再确认: 并发 assign_task 可能已分配本任务或抢空容量
+                        existing = self.tasks.get(task.task_id)
+                        if existing and existing.status == TaskStatus.RUNNING:
+                            logger.debug(f"M4-02 本地强制: 任务已被并发分配: {task.task_id}")
+                            return True
+                        node = self.nodes.get(preferred)
+                        if not node or node.status != NodeStatus.ONLINE or node.active_tasks >= node.max_tasks:
+                            logger.info("M4-02 本地强制: 首选节点并发抢占后不可用，退回普通调度")
+                        else:
+                            task.assigned_nodes = [preferred]
+                            task.status = TaskStatus.RUNNING
+                            task.started_at = time.time()
+                            self.tasks[task.task_id] = task
+                            node.active_tasks += 1
+                            logger.info(f"M4-02 本地强制: {task.name} → {preferred} (轻量级任务)")
+                            return True
             logger.info(f"M4-02 本地强制: {task.name} 首选节点不可用，退回普通调度")
 
         # M4-03 VRAM 优先: 大模型切换路由策略
@@ -401,12 +442,27 @@ class ClusterMaster:
             return False
 
         async with self._lock:
-            task.assigned_nodes = [n.node_id for n in nodes]
+            # TOCTOU 再确认: 并发 assign_task 可能已分配本任务 (双计 active_tasks)
+            existing = self.tasks.get(task.task_id)
+            if existing and existing.status == TaskStatus.RUNNING:
+                logger.debug(f"任务已被并发分配，跳过重复计 active_tasks: {task.task_id}")
+                return True
+            # 重新确认所选节点仍在线且未满载 (select_nodes 在锁外执行)
+            confirmed = []
+            for n in nodes:
+                node = self.nodes.get(n.node_id)
+                if node and node.status == NodeStatus.ONLINE and node.active_tasks < node.max_tasks:
+                    confirmed.append(node)
+            need = len(task.model_shards) or 1
+            if len(confirmed) < need:
+                logger.error(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)}")
+                return False
+            task.assigned_nodes = [n.node_id for n in confirmed]
             task.status = TaskStatus.RUNNING
             task.started_at = time.time()
             self.tasks[task.task_id] = task
 
-            for node in nodes:
+            for node in confirmed:
                 node.active_tasks += 1
 
         logger.info(f"任务分配: {task.name} → {[n.hostname for n in nodes]}")
@@ -486,14 +542,14 @@ class ClusterMaster:
                             if node:
                                 node.active_tasks = max(0, node.active_tasks - 1)
                         sub.assigned_nodes = []
-                        sub.status = TaskStatus.FAILED
+                        sub.status = TaskStatus.CANCELLED
                         sub.cancel_reason = f"父任务取消: {task_id}"
                         sub.error = sub.cancel_reason
                         cancelled_sub.append(sub_id)
                         if sub.sub_tasks:
                             cancel_stack.extend(sub.sub_tasks)
 
-            task.status = TaskStatus.FAILED
+            task.status = TaskStatus.CANCELLED
             task.error = task.cancel_reason
 
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
@@ -671,7 +727,9 @@ class ClusterMaster:
 
         return True
 
-    # ── M3-03 选举配置 ──
+    # ── M3-03 选举配置 (未接线原型, 非生产 HA) ──
+    # 注意: setup_election 不被 ClusterMaster.start() 调用, 现网为单 Master 无 HA。
+    # StandbyMaster/MasterElection 仅为单元级原型, 不构成高可用承诺 (AR审计 P1)。
 
     def setup_election(
         self,
@@ -679,6 +737,7 @@ class ClusterMaster:
         priority: int = 0,
         known_nodes: list[dict[str, Any]] | None = None,
     ) -> None:
+        logger.warning("M3-03 Master 选举为未接线原型, 现网单 Master 无 HA, 仅供测试调用")
         self._election = MasterElection(
             node_id=node_id,
             priority=priority,
@@ -712,7 +771,10 @@ class ClusterMaster:
         self._is_leader = False
         logger.warning("本节点从 Leader 降级")
 
-    # ── M4-05 云端回退 ──
+    # ── M4-05 云端回退 (合规边界外, 默认禁用) ──
+    # 注意: 本项目定位"100%本地/离线", setup_cloud_fallback 不被 start() 调用。
+    # _cloud_client=None 时 fallback_to_cloud 直接返回 None。该能力计划迁移至
+    # fusion-gateway (上游 issue 跟踪)。AR审计 P1 合规边界。
 
     def setup_cloud_fallback(
         self,
@@ -722,6 +784,9 @@ class ClusterMaster:
         max_cost_per_day: float = 10.0,
         model: str = "",
     ) -> None:
+        logger.warning(
+            "M4-05 云端回退违反'100%%本地/离线'定位, 默认禁用; 计划迁移至 fusion-gateway (AR审计 P1)"
+        )
         try:
             cloud_provider = CloudProvider(provider)
         except ValueError:
@@ -926,11 +991,15 @@ class ClusterMaster:
             return stats
 
 
-# ── HA Standby ──
+# ── HA Standby (未接线原型, 非生产 HA) ──
+# 注意: StandbyMaster 零生产实例化, LEARNING 状态同步 + term/vote 持久化未实现。
+# 现网为单 Master 无 HA。AR审计 P1: 接线或砍。
 
 
 class StandbyMaster:
     """HA 备用主节点 — 监听主节点心跳，故障时接管。
+
+    ⚠️ 未接线原型: 零生产实例化, 不构成高可用承诺。
 
     状态机: STANDBY → LEARNING → TAKING_OVER → ACTIVE
     - STANDBY: 等待主节点心跳

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import struct
 import time
@@ -180,7 +181,7 @@ class FMPPayload:
     def to_dict(self) -> dict[str, Any]:
         return {
             "payload_type": self.payload_type.value,
-            "data": self.data.decode("utf-8", errors="replace"),
+            "data": base64.b64encode(self.data).decode("ascii"),
             "round_id": self.round_id,
             "round_number": self.round_number,
             "max_rounds": self.max_rounds,
@@ -191,7 +192,7 @@ class FMPPayload:
     def from_dict(cls, d: dict[str, Any]) -> FMPPayload:
         raw = d["data"]
         if isinstance(raw, str):
-            raw = raw.encode("utf-8")
+            raw = base64.b64decode(raw)
         return cls(
             payload_type=PayloadType(d["payload_type"]),
             data=raw,
@@ -411,7 +412,7 @@ def _try_protobuf_decode(data: bytes) -> dict[str, Any] | None:
             },
             "payload": {
                 "payload_type": pay.payload_type,
-                "data": pay.data.decode("utf-8", errors="replace"),
+                "data": base64.b64encode(pay.data).decode("ascii"),
                 "round_id": pay.round_id,
                 "round_number": pay.round_number,
                 "max_rounds": pay.max_rounds,

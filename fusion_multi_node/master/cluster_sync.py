@@ -1,5 +1,9 @@
 """集群同步与韧性 — 共享模型缓存、增量同步、网络分区降级、节点负载报告。
 
+⚠️ AR审计 P1 合规: 仅限局域网对端同步 (is_safe_peer_host 拒环回/链路本地/元数据,
+放行私网), 不出站云。路径安全 (is_safe_path_segment + normpath 遍历拦截)。
+注意: ClusterSyncManager.start() 未接入生命周期, 仅按请求触发 (master_server 路由)。
+
 - ModelManifest: 模型文件清单 + SHA256 哈希
 - IncrementalSync: 仅同步差异文件
 - PartitionDetector: 心跳超时检测，降级单机运行，恢复后自动同步
@@ -19,7 +23,28 @@ from typing import Any
 
 import httpx
 
+from fusion_multi_node.utils.auth import build_safe_url, is_safe_path_segment, is_safe_peer_host
+
 logger = logging.getLogger(__name__)
+
+
+def _safe_rel_path(rel: str) -> str:
+    """校验来自远端 manifest 的相对路径，防路径穿越。
+
+    规范化后必须仍在 model_dir 内，且每个段合法。
+    """
+    if not rel or "\x00" in rel:
+        raise ValueError(f"非法同步路径: {rel!r}")
+    # 拒绝对绝对路径与盘符
+    if rel.startswith("/") or ":" in rel.split("/")[0]:
+        raise ValueError(f"非法同步路径: {rel!r}")
+    norm = os.path.normpath(rel)
+    if norm.startswith("..") or "/.." in norm or norm == "..":
+        raise ValueError(f"路径穿越被拒: {rel!r}")
+    for seg in norm.split("/"):
+        if not is_safe_path_segment(seg):
+            raise ValueError(f"路径段非法: {seg!r} (in {rel!r})")
+    return norm
 
 
 class NodeHealth(StrEnum):
@@ -314,14 +339,21 @@ class ClusterSyncManager:
             if fentry.sha256 == "__deleted__":
                 continue
             try:
+                if not is_safe_peer_host(source_host):
+                    raise ValueError(f"不安全对端主机: {source_host!r}")
+                safe_rel = _safe_rel_path(fentry.path)
+                if not is_safe_path_segment(model_name):
+                    raise ValueError(f"非法 model_name: {model_name!r}")
                 client = httpx.AsyncClient(timeout=300.0)
-                safe_host = source_host.replace("/", "").replace("..", "")
-                resp = await client.get(
-                    f"http://{safe_host}:{source_port}/api/models/{model_name}/files",
-                    params={"path": fentry.path},
+                url = build_safe_url(
+                    "http", source_host, source_port, f"/api/models/{model_name}/files"
                 )
+                resp = await client.get(url, params={"path": safe_rel})
                 model_dir = os.path.join(self.model_cache_dir, model_name)
-                dest = os.path.join(model_dir, fentry.path)
+                dest = os.path.normpath(os.path.join(model_dir, safe_rel))
+                # 二次确认 dest 仍在 model_dir 内
+                if not dest.startswith(os.path.normpath(model_dir) + os.sep) and dest != os.path.normpath(model_dir):
+                    raise ValueError(f"逃逸目标目录: {dest!r}")
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 with open(dest, "wb") as f:
                     f.write(resp.content)
@@ -344,11 +376,15 @@ class ClusterSyncManager:
             except TimeoutError:
                 continue
             try:
+                if not is_safe_peer_host(source_host):
+                    raise ValueError(f"不安全对端主机: {source_host!r}")
+                if not is_safe_path_segment(model_name):
+                    raise ValueError(f"非法 model_name: {model_name!r}")
                 client = httpx.AsyncClient(timeout=30.0)
-                safe_host = source_host.replace("/", "").replace("..", "")
-                resp = await client.get(
-                    f"http://{safe_host}:{source_port}/api/models/{model_name}/manifest",
+                url = build_safe_url(
+                    "http", source_host, source_port, f"/api/models/{model_name}/manifest"
                 )
+                resp = await client.get(url)
                 remote_manifest = ModelManifest.from_dict(resp.json())
                 await client.aclose()
                 await self.incremental_sync(model_name, remote_manifest, source_host, source_port)

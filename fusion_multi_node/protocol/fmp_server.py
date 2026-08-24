@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from ..utils.auth import is_safe_path_segment
 from .fmp_message import FMPCrypto, FMPMessage, PayloadType
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ class FMPServer:
             try:
                 import base64
                 import hashlib
+                import os
 
                 payload = msg.business.payload_as_json()
                 shard_id = payload["shard_id"]
@@ -171,6 +173,29 @@ class FMPServer:
                 file_path = payload["file_path"]
                 data = base64.b64decode(payload["data_b64"])
                 checksum = payload.get("checksum", "")
+
+                if not is_safe_path_segment(shard_id):
+                    logger.error(f"SHARD_SYNC 非法 shard_id: {shard_id!r}")
+                    return
+                if not is_safe_path_segment(volume_name):
+                    logger.error(f"SHARD_SYNC 非法 volume_name: {volume_name!r}")
+                    return
+                # file_path 允许多段相对路径, 但禁绝对路径/穿越/盘符/空字节
+                if not file_path or "\x00" in file_path:
+                    logger.error(f"SHARD_SYNC 非法 file_path: {file_path!r}")
+                    return
+                if file_path.startswith("/") or (":" in file_path.split("/")[0] and "\\" not in file_path):
+                    logger.error(f"SHARD_SYNC 拒绝对/盘符路径: {file_path!r}")
+                    return
+                norm = os.path.normpath(file_path)
+                if norm.startswith("..") or "/.." in norm or norm == "..":
+                    logger.error(f"SHARD_SYNC 路径穿越被拒: {file_path!r}")
+                    return
+                for seg in norm.split("/"):
+                    if not is_safe_path_segment(seg):
+                        logger.error(f"SHARD_SYNC 路径段非法: {seg!r} (in {file_path!r})")
+                        return
+                file_path = norm
 
                 if checksum and hashlib.sha256(data).hexdigest() != checksum:
                     logger.error(f"SHARD_SYNC 校验失败: {shard_id}")
