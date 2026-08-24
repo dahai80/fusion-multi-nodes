@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-819%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-826%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -552,9 +552,14 @@ pytest tests/test_new_features.py -v
 - [x] #17 DataScrubber 补 openai_key/github_pat/slack_token/jwt_token + 数字边界修 CJK 邻接; DataIsolation realpath+commonpath 防符号链接绕过; PermissionManager block-by-default (已验证 fail-closed)
 - [x] #18 _metric_times list→deque(maxlen=10000) 对齐 metrics, 修无界增长+索引错位
 - [x] #24 WorkerSandbox 接 NodeAgent 执行路径: `execute_task` 入口 `_sandbox_gate` 校验任务携带路径/网络 (`check_path_access`/`check_network_access`), 拒则不派发 (硬伤5: security/ 原死代码零过滤 → 进程内 gate 实防御); `_execute_model_sync` 走 `is_safe_peer_host`+`build_safe_url`+`is_safe_path_segment` (与 master_server 一致, 修弱 `.replace()`); 不接 `apply_limits`/`setrlimit` (进程级资源限制误杀单长跑 agent), `SandboxExecutor` 仅子进程插件适用
-- [x] M9/M10/shard_replication 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除); WorkerSandbox 已接 (#24)
+- [x] #23 M9/M10 集成测试门禁 — 硬伤4 四处契约 bug 修复+回归门禁 (audit 允许: 接线 OR pragma/移除; 选修复, 真 correctness, 可单测):
+  - caveman 字典压缩静默损坏: 变长 2/4 字节码无定界 → 解压只读 2 字节永不匹配。改定长 2 字节码 (`>H`, `dictionary_size` 截断 65536) + 长度前缀记录 (控制字节 0x01=字典命中/0x02=原始透传)
+  - autoscaler 冷却门绕过: `update_config` 清零 `_last_action_time` → 热重载即绕冷却, 连续扩缩容风暴。改为保留上次动作时间, 冷却跨热更新连续生效
+  - kv_store/fmp_server 签名不匹配: `_on_kv_get` 调 `get_entry(key, partition)`, 原签名 1 参 → inbound KV_GET 必 TypeError。`get_entry` 增可选 `partition`, 给定校验分区匹配; `ttl` None→`or 0.0` 防 `is_expired` TypeError
+  - shard_replication quorum 虚假宣称: `_sync_via_fmp` fire-and-forget (`ensure_future` 不 await) 却返 `success=True`/`checksum_verified=True` → quorum 写保证虚构。诚实化: 仅同步 `await` 的 send 称 `success`, fire-and-forget 标 `success=False`+"未确认"日志, `checksum_verified` 恒 False (无应用层 ACK)
+- [x] M9/M10/shard_replication 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除); WorkerSandbox 已接 (#24), M9/M10 契约 bug 已修 (#23)
 
-回归: 819 tests passed, 0 ruff errors.
+回归: 826 tests passed, 0 ruff errors.
 
 ---
 

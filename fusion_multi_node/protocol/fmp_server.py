@@ -281,7 +281,7 @@ class FMPServer:
                 key = payload["key"]
                 value = payload["value"]
                 partition = payload.get("partition", "default")
-                ttl = payload.get("ttl")
+                ttl = payload.get("ttl") or 0.0
                 kv_store.put(key, value, partition=partition, ttl_seconds=ttl)
                 ack_msg = FMPMessage.create(
                     source_id=self.node_id,

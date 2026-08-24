@@ -39,7 +39,9 @@ class CavemanCompressor:
     SHORT_CODE_SIZE = 256
 
     def __init__(self, dictionary_size: int = 1024):
-        self.dictionary_size = dictionary_size
+        # AR审计硬伤4: 字典编码统一 2 字节 (>H), 上限 65536。原变长码 (2/4 字节无分隔)
+        # + 反查表只读 2 字节 → 4 字节码永不匹配、原始透传字节误命中反查表 → 张量静默损坏。
+        self.dictionary_size = min(dictionary_size, 65536)
         self._dictionary: dict[int, bytes] = {}
         self._reverse_dict: dict[bytes, int] = {}
         self._stats = CompressStats()
@@ -49,10 +51,10 @@ class CavemanCompressor:
         self._dictionary.clear()
         self._reverse_dict.clear()
         freq = Counter(tokens)
-        # 高频 token 分配短编码
+        # 高频 token 分配固定 2 字节编码 (>H), 无变长 → 解压无歧义
         common = freq.most_common(self.dictionary_size)
         for i, (token, _) in enumerate(common):
-            code = struct.pack(">H", i) if i < 65536 else struct.pack(">I", i)
+            code = struct.pack(">H", i)
             self._dictionary[token] = code
             self._reverse_dict[code] = token
 
@@ -116,8 +118,12 @@ class CavemanCompressor:
         return data
 
     def _dict_compress(self, data: bytes) -> bytes:
-        """字典压缩：高频序列用索引替换。"""
-        # 简单实现：对重复的 4 字节序列做字典压缩
+        """字典压缩：4 字节 token 命中字典用 2 字节码替换, 透传字节带控制前缀。
+
+        记录格式 (无变长歧义, AR审计硬伤4 修):
+        - 0x01 + 2字节码: 字典命中, 解压时反查得 4 字节 token
+        - 0x02 + 1字节: 原始透传字节 (含非 4 字节对齐尾部 + 非命中 token 的字节)
+        """
         if not self._dictionary:
             return data
 
@@ -128,30 +134,49 @@ class CavemanCompressor:
             if len(chunk) == 4:
                 token = struct.unpack(">I", chunk)[0]
                 if token in self._dictionary:
+                    result.append(0x01)
                     result.extend(self._dictionary[token])
                     i += 4
                     continue
-            result.extend(chunk)
+            # 非命中或不足 4 字节: 逐字节透传 (带控制前缀避免与字典码混淆)
+            result.append(0x02)
+            result.append(data[i])
             i += 1
 
         return bytes(result)
 
     def _dict_decompress(self, data: bytes) -> bytes:
-        """字典解压。"""
+        """字典解压 — 按控制字节读取记录, 无误命中。"""
         if not self._reverse_dict:
             return data
 
         result = bytearray()
         i = 0
         while i < len(data):
-            chunk = data[i : i + 2]
-            if len(chunk) == 2 and chunk in self._reverse_dict:
-                token = self._reverse_dict[chunk]
-                result.extend(struct.pack(">I", token))
+            ctrl = data[i]
+            i += 1
+            if ctrl == 0x01:
+                # 字典命中: 后 2 字节为码 → 反查 4 字节 token
+                if i + 2 > len(data):
+                    # 截断记录, 丢弃残尾 (压缩侧保证不产生)
+                    break
+                code = bytes(data[i : i + 2])
+                token = self._reverse_dict.get(code)
+                if token is None:
+                    # 未知码: 安全降级, 原样输出 2 字节 (不应发生)
+                    result.extend(code)
+                else:
+                    result.extend(struct.pack(">I", token))
                 i += 2
-            else:
-                result.extend(data[i : i + 1])
+            elif ctrl == 0x02:
+                # 原始透传: 后 1 字节
+                if i >= len(data):
+                    break
+                result.append(data[i])
                 i += 1
+            else:
+                # 未知控制字节: 安全降级原样输出
+                result.append(ctrl)
 
         return bytes(result)
 

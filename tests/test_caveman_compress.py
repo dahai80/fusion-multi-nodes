@@ -37,12 +37,15 @@ class TestCavemanCompressorBuildDictionary:
             assert token in c._dictionary
 
     def test_build_dictionary_large_index(self):
+        # AR审计硬伤4: dictionary_size 上限 65536 (2 字节码 >H), 超 65536 截断。
+        # 原 4 字节变长码 (i>=65536) 导致解压只读 2 字节永不匹配 → 静默损坏。
         c = CavemanCompressor(dictionary_size=70000)
+        assert c.dictionary_size == 65536  # 截断到上限
         tokens = list(range(70000))
         c.build_dictionary(tokens)
-        assert len(c._dictionary) == 70000
-        for i in range(65536, 70000):
-            expected_code = struct.pack(">I", i)
+        assert len(c._dictionary) == 65536
+        for i in range(65536):
+            expected_code = struct.pack(">H", i)
             assert c._dictionary[i] == expected_code
             assert c._reverse_dict[expected_code] == i
 
@@ -145,12 +148,15 @@ class TestCavemanCompressorDictDecompress:
         assert decompressed == original
 
     def test_dict_decompress_single_byte_passthrough(self):
+        # AR审计硬伤4: 单字节非命中 token 经 compress→decompress 须无损还原。
+        # 新格式原始透传字节带 0x02 控制前缀, 避免与字典码误命中。
         c = CavemanCompressor()
         tokens = [100]
         c.build_dictionary(tokens)
         data = b"\x01"
-        result = c._dict_decompress(data)
-        assert result == b"\x01"
+        compressed = c._dict_compress(data)
+        result = c._dict_decompress(compressed)
+        assert result == data
 
 
 class TestCavemanCompressorDiffCompress:

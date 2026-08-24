@@ -186,10 +186,19 @@ class ShardReplicator:
             except RuntimeError:
                 loop = None
 
+            # AR审计硬伤4: 原实现 fire-and-forget (ensure_future 不 await) 却返回
+            # success=True/checksum_verified=True → quorum 写保证虚构 (远端可能从未收到,
+            # 也无 ACK 校验)。诚实化: 仅同步 await 的 send 可声称 success, checksum_verified
+            # 始终 False (无应用层 ACK 确认远端校验)。
+            delivered = False
             if loop and loop.is_running():
+                # 事件循环内: 不阻塞, 标记为未确认
                 asyncio.ensure_future(self._fmp_interface._conn_mgr.send_to(target_node_id, msg))
+                logger.warning(f"分片 FMP 同步 fire-and-forget: {shard_id} → {target_node_id} 未确认")
             else:
+                # 无事件循环: 同步 await 发送, 确认投递到 socket (仍非应用层 ACK)
                 asyncio.run(self._fmp_interface._conn_mgr.send_to(target_node_id, msg))
+                delivered = True
 
             checksum = hashlib.sha256(data).hexdigest()
             replica.last_synced = time.time()
@@ -202,9 +211,9 @@ class ShardReplicator:
             return SyncResult(
                 shard_id=shard_id,
                 target_node_id=target_node_id,
-                success=True,
-                bytes_transferred=len(data),
-                checksum_verified=True,
+                success=delivered,
+                bytes_transferred=len(data) if delivered else 0,
+                checksum_verified=False,
                 duration_ms=duration,
             )
         except Exception as e:

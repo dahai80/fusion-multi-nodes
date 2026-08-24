@@ -109,10 +109,17 @@ class DistributedKVStore:
             return default
         return entry.value
 
-    def get_entry(self, key: str) -> KVEntry | None:
+    def get_entry(self, key: str, partition: str | None = None) -> KVEntry | None:
+        # AR审计硬伤4: fmp_server._on_kv_get 调 get_entry(key, partition), 原签名只收 1 参
+        # → inbound KV_GET 必 TypeError。增可选 partition, 给定时校验分区匹配。
         entry = self._store.get(key)
-        if entry and entry.is_expired:
+        if not entry:
+            return None
+        if entry.is_expired:
             self.delete(key)
+            return None
+        if partition is not None and entry.partition != partition:
+            logger.debug(f"KV GET 分区不匹配: {key} want={partition} got={entry.partition}")
             return None
         return entry
 

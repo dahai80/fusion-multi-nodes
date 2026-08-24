@@ -853,6 +853,104 @@ class TestShardReplicator:
         assert "s1" in replicator.get_under_replicated()
 
 
+class TestDistributedKVStorePartition:
+    # AR审计硬伤4: fmp_server._on_kv_get 调 get_entry(key, partition), 原签名只 1 参
+    # → inbound KV_GET 必 TypeError。增可选 partition 后须校验分区匹配。
+
+    def test_get_entry_no_partition_returns_any(self):
+        from fusion_multi_node.storage.kv_store import DistributedKVStore
+
+        kv = DistributedKVStore(data_dir="")
+        kv.put("k1", "v1", partition="alpha")
+        entry = kv.get_entry("k1")
+        assert entry is not None
+        assert entry.value == "v1"
+
+    def test_get_entry_partition_match(self):
+        from fusion_multi_node.storage.kv_store import DistributedKVStore
+
+        kv = DistributedKVStore(data_dir="")
+        kv.put("k2", "v2", partition="alpha")
+        entry = kv.get_entry("k2", partition="alpha")
+        assert entry is not None
+        assert entry.value == "v2"
+
+    def test_get_entry_partition_mismatch_returns_none(self):
+        from fusion_multi_node.storage.kv_store import DistributedKVStore
+
+        kv = DistributedKVStore(data_dir="")
+        kv.put("k3", "v3", partition="alpha")
+        entry = kv.get_entry("k3", partition="beta")
+        assert entry is None
+
+    def test_get_entry_missing_key_returns_none(self):
+        from fusion_multi_node.storage.kv_store import DistributedKVStore
+
+        kv = DistributedKVStore(data_dir="")
+        assert kv.get_entry("nope", partition="alpha") is None
+
+
+class TestShardFmpSyncHonesty:
+    # AR审计硬伤4: _sync_via_fmp 原 fire-and-forget (ensure_future 不 await) 却返
+    # success=True/checksum_verified=True → quorum 写保证虚构。修后: 仅同步 await
+    # 的 send 可称 success, fire-and-forget 路径返 success=False + "未确认" 日志。
+
+    def test_fire_and_forget_marks_unconfirmed(self):
+        # 事件循环内调用 → 走 ensure_future 分支 → success=False, bytes=0
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        replicator = ShardReplicator(
+            config=ReplicationConfig(replication_factor=1),
+            fmp_interface=_FakeFmpInterface(),
+        )
+        replicator._local_node_id = "self"
+        replicator.register_shard_data("shard-x", b"payload")
+        replicator.assign_replicas("shard-x", "f", 7, [{"node_id": "remote"}])
+
+        async def _run():
+            # 事件循环内: ensure_future 分支
+            return replicator.sync_to_node("shard-x", "remote")
+
+        import asyncio
+
+        result = asyncio.run(_run())
+        assert result.success is False
+        assert result.bytes_transferred == 0
+        assert result.checksum_verified is False
+
+    def test_sync_no_loop_marks_delivered(self):
+        # sync_to_node 同步顶层调用 (无 running loop) → asyncio.run 分支 → success=True
+        from fusion_multi_node.storage.shard_replication import (
+            ReplicationConfig,
+            ShardReplicator,
+        )
+
+        replicator = ShardReplicator(
+            config=ReplicationConfig(replication_factor=1),
+            fmp_interface=_FakeFmpInterface(),
+        )
+        replicator._local_node_id = "self"
+        replicator.register_shard_data("shard-y", b"payload")
+        replicator.assign_replicas("shard-y", "f", 7, [{"node_id": "remote"}])
+
+        result = replicator.sync_to_node("shard-y", "remote")
+        assert result.success is True
+        assert result.bytes_transferred == 7
+        assert result.checksum_verified is False  # 无应用层 ACK, 永不声称校验通过
+
+
+class _FakeFmpInterface:
+    # _sync_via_fmp 访问 _fmp_interface._conn_mgr.send_to
+    class _ConnMgr:
+        async def send_to(self, node_id, msg):
+            return True
+
+    _conn_mgr = _ConnMgr()
+
+
 class TestCheckpointManager:
     def test_save_and_load(self):
         from fusion_multi_node.storage.checkpoint import (
@@ -1001,6 +1099,50 @@ class TestAutoscaler:
         stats = scaler.get_stats()
         assert "policy" in stats
         assert "config" in stats
+
+    @pytest.mark.asyncio
+    async def test_update_config_preserves_cooldown(self):
+        # AR审计硬伤4: update_config 原清零 _last_action_time → 热重载即绕过冷却门。
+        # 修后: 首次扩容设冷却, update_config 后立即再 evaluate 须被冷却拦截 (NOOP)。
+        from fusion_multi_node.autoscaler.autoscaler import (
+            Autoscaler,
+            AutoscalerConfig,
+            ScaleAction,
+        )
+
+        scale_count = 0
+
+        def on_scale_up(count):
+            nonlocal scale_count
+            scale_count += 1
+
+        nodes = [
+            {
+                "status": "online",
+                "active_tasks": 4,
+                "max_tasks": 4,
+                "last_heartbeat": time.time(),
+                "node_id": "n1",
+            }
+        ]
+        tasks = [{"status": "pending"}, {"status": "pending"}]
+        state = lambda: {"nodes": nodes, "tasks": tasks}  # noqa: E731
+
+        scaler = Autoscaler(
+            config=AutoscalerConfig(cooldown_seconds=120.0),
+            on_scale_up=on_scale_up,
+            get_cluster_state=state,
+        )
+        scaler._last_action_time = 0  # 首次 bypass 冷却以触发扩容
+        first = await scaler.evaluate()
+        assert first == ScaleAction.SCALE_UP
+        assert scale_count == 1
+        # 热更新配置 — 修前会清零冷却, 修后保留
+        scaler.update_config(AutoscalerConfig(cooldown_seconds=120.0))
+        second = await scaler.evaluate()
+        # 冷却期内须 NOOP, 不再次扩容
+        assert second == ScaleAction.NOOP
+        assert scale_count == 1
 
 
 # ── M1-05 Manual Join ──

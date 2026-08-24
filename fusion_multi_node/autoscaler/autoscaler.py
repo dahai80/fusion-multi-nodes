@@ -380,10 +380,14 @@ class Autoscaler:
             self._on_scale_down(node_id)
 
     def update_config(self, config: AutoscalerConfig) -> None:
-        """M10-04 热更新 Autoscaler 配置。"""
+        """M10-04 热更新 Autoscaler 配置。
+
+        AR审计硬伤4: 原 `_last_action_time = 0.0` 清零冷却 → 热重载即绕过冷却门,
+        允许连续扩缩容风暴。保留上次动作时间, 冷却期跨配置热更新连续生效。
+        """
         old = self.config
         self.config = config
-        self._last_action_time = 0.0
+        # 不清零 _last_action_time: 冷却门跨热更新保持
         logger.info(
             f"M10-04 配置热更新: "
             f"min={old.min_nodes}→{config.min_nodes} "
