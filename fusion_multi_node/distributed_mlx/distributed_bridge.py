@@ -130,7 +130,7 @@ class DistributedMLXBridge:
         model_name: str,
         shard_id: int,
         node_id: str,
-        fusion_mlx_port: int = 8000,
+        fusion_mlx_port: int = 11432,
     ) -> bool:
         """在指定节点加载模型分片。"""
         shards = self._shards.get(model_name, [])
@@ -173,7 +173,7 @@ class DistributedMLXBridge:
         model_name: str,
         prompt: str,
         node_chain: list[str],
-        fusion_mlx_port: int = 8000,
+        fusion_mlx_port: int = 11432,
     ) -> dict[str, Any]:
         """流水线并行推理。"""
         pipeline_id = f"pipe_{model_name}_{len(self._active_pipelines)}"
@@ -226,7 +226,7 @@ class DistributedMLXBridge:
         model_name: str,
         prompts: list[str],
         nodes: list[str],
-        fusion_mlx_port: int = 8000,
+        fusion_mlx_port: int = 11432,
     ) -> list[dict[str, Any]]:
         """数据并行推理 — 负载感知分配。
 
@@ -300,7 +300,7 @@ class DistributedMLXBridge:
         model_name: str,
         source_node: str,
         target_nodes: list[str],
-        port: int = 8000,
+        port: int = 11432,
     ) -> bool:
         """跨节点同步模型权重。"""
         success = True
