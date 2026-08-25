@@ -174,6 +174,11 @@ class TestKVLookupEndpoint:
     async def test_kv_lookup_found(self, client, mock_kv_manager):
         entry = _make_kv_entry()
         mock_kv_manager.lookup_local.return_value = entry
+        # mock_kv_manager 为 MagicMock — _serialize_entry 缺返回值。
+        # 用真 manager 序列化同款 entry, 验 route 回传 {"found":True,"entry":{...}} 形状。
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
+        mock_kv_manager._serialize_entry.return_value = KVSharingManager()._serialize_entry(entry)
         resp = await client.post(
             "/api/kv/lookup",
             json={
@@ -184,13 +189,16 @@ class TestKVLookupEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["cache_id"] == "kv1"
-        assert data["model_name"] == "llama-3b"
-        assert data["prompt_hash"] == "abc123"
-        assert data["total_tokens"] == 100
-        assert data["total_size_bytes"] == 4096
-        assert len(data["shards"]) == 1
-        shard = data["shards"][0]
+        # 契约对齐 lookup_remote: {"found": True, "entry": {...}} (非旧扁平 dict)。
+        assert data["found"] is True
+        entry = data["entry"]
+        assert entry["cache_id"] == "kv1"
+        assert entry["model_name"] == "llama-3b"
+        assert entry["prompt_hash"] == "abc123"
+        assert entry["total_tokens"] == 100
+        assert entry["total_size_bytes"] == 4096
+        assert len(entry["shards"]) == 1
+        shard = entry["shards"][0]
         assert shard["shard_id"] == "shard_0"
         assert shard["layer_index"] == 0
         assert shard["node_id"] == "node_1"

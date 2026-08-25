@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -133,7 +135,30 @@ class NodeApprovalManager:
         return True
 
     def _check_auto_approve(self, hostname: str, ip_address: str) -> bool:
-        return any(pattern in hostname or pattern in ip_address for pattern in self._auto_patterns)
+        # 精确匹配优先: CIDR/IP → ipaddress 网段包含判定 (避免 "172." 子串过匹配公网)。
+        # 非 CIDR (如 "192.168." 前缀 / "192.168.*" 通配 / 主机名) → 回退子串/通配。
+        try:
+            ip = ipaddress.ip_address(ip_address)
+        except ValueError:
+            ip = None
+        for pattern in self._auto_patterns:
+            if ip is not None:
+                try:
+                    net = ipaddress.ip_network(pattern, strict=False)
+                    if ip in net:
+                        return True
+                    continue
+                except ValueError:
+                    pass
+            # 非 CIDR: 主机名走子串; IP 走通配 ("*" → ".*" 正则) 兼容旧配置。
+            if pattern in hostname:
+                return True
+            if "*" in pattern and ip is not None:
+                if re.fullmatch(pattern.replace("*", ".*"), ip_address):
+                    return True
+            elif pattern in ip_address:
+                return True
+        return False
 
     def _cleanup_expired_pending(self) -> None:
         now = time.time()

@@ -714,14 +714,22 @@ pytest tests/test_kv_stress.py -v
 `docker-compose` master 默认配 `FUSION_AUTO_APPROVE_PATTERNS` (可信网段子串匹配) — 容器/LAN 节点免手动 `cluster approve` 自动加入。
 
 ```bash
-# compose 默认: 192.168. / 10. / 172. 网段自动审批
+# compose 默认: 192.168. / 10. / 172.16.0.0/12 网段自动审批
 docker compose up -d --scale agent=2
 
-# 裸机自定义可信网段 (逗号分隔, 匹配 hostname/ip 子串)
+# 裸机自定义可信网段 (逗号分隔; CIDR 优先精确匹配, 非 CIDR 回退子串/通配)
 FUSION_AUTO_APPROVE_PATTERNS="10.0.1." ./start.sh start
 ```
 
 > 生产仅对可信网段开放自动审批; 未配 env 则走手动审批门 (`fusion-multi-node cluster approve <node_id>`)。
+
+### KV 跨节点 lookup 契约修复 + 审批 CIDR 精确匹配 (v0.8.5)
+
+两处严格审视暴露的缺陷修复:
+
+1. **`lookup_remote` 永远返回 None** — `/api/kv/lookup` 路由返扁平 dict (无 `found`/`entry` 键), `lookup_remote` 解码 `data.get("found")` 恒 falsy → 跨节点 KV 复用查找静默失效。单元 mock 捏造 `{"found":True,"entry":{...}}` 形状掩盖此 bug (假信心测试)。修复: route 对齐契约返 `{"found":True,"entry":_serialize_entry}`, 补真链路 E2E 锁契约 (`test_kv_lookup_remote_cross_node_contract` — store node-a, node-b 经 HTTP 查回, 非 mock)。
+
+2. **自动审批 `"172."` 子串过匹配公网** — compose 默认 `172.` 子串匹配公网 `172.0–15`/`172.32–255` (私网仅 `172.16.0.0/12`)。修复: CIDR 优先精确匹配 (`ipaddress.ip_network` 包含判定), 非 CIDR 回退子串/通配兼容旧配置; compose 默认改 `172.16.0.0/12`。补回归测试 (`test_auto_approve_cidr_precision` — `172.16.1.5` 放行 / `172.1.2.3` 拒绝)。
 
 ---
 
@@ -935,7 +943,8 @@ FUSION_AUTO_APPROVE_PATTERNS="10.0.1." ./start.sh start
 - **Multi-tenant quota + priority queue** — Per-tenant concurrent cap, over-quota enqueue, priority-ordered dispatch (#81)
 - **Real-network E2E** — True port bind + real HTTP cross-process; node drop/reconnect; docker-compose cross-container (#76)
 - **KV cache stress** — N-node cross-HTTP KV warm/transfer at scale, 0-loss migration, p99 latency baseline (#79)
-- **Auto node approval** — Trusted-subnet auto-join via `FUSION_AUTO_APPROVE_PATTERNS` env (container/LAN免审批) (v0.8.4)
+- **Cross-node KV lookup** — `lookup_remote` contract-aligned (route→found/entry→decode); real-chain E2E lock (v0.8.5)
+- **Auto node approval** — Trusted-subnet auto-join via `FUSION_AUTO_APPROVE_PATTERNS` env; CIDR-precise (`172.16.0.0/12`), substring/wildcard fallback (v0.8.4→v0.8.5)
 - **Worker sandbox** — CPU/memory/disk limits, path & network whitelisting
 - **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards)
 - **AES-GCM encryption** — FMP protocol encrypted communication

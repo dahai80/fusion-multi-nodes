@@ -417,6 +417,21 @@ class TestNodeApproval:
         mgr.request_join("node-1", "mac-1", "192.168.1.10", 11458)
         assert mgr.is_approved("node-1") is True
 
+    def test_auto_approve_cidr_precision(self):
+        # CIDR "172.16.0.0/12" 精确匹配私网 172.16-31, 不应放过公网 172.1.2.3。
+        # 旧 "172." 子串会同时匹配二者 (过匹配公网)。
+        from fusion_multi_node.security.node_approval import NodeApprovalManager
+
+        mgr = NodeApprovalManager(auto_approve_patterns=["172.16.0.0/12"])
+        mgr.request_join("priv", "mac-priv", "172.16.1.5", 11458)
+        assert mgr.is_approved("priv") is True
+        mgr.request_join("pub", "mac-pub", "172.1.2.3", 11458)
+        assert mgr.is_approved("pub") is False
+        # 通配兼容 (旧 "192.168.*" 配置仍生效)。
+        mgr2 = NodeApprovalManager(auto_approve_patterns=["192.168.*"])
+        mgr2.request_join("wcard", "mac-w", "192.168.1.10", 11458)
+        assert mgr2.is_approved("wcard") is True
+
     def test_revoke(self):
         from fusion_multi_node.security.node_approval import NodeApprovalManager
 

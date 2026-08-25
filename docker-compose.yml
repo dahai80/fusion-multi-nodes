@@ -15,7 +15,7 @@ services:
       # 多容器共享密钥 — 所有 master/agent 必须一致 (auth.py 读此 env)。
       FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me}"
       # 可信容器网段自动审批 (免手动 cluster approve; 生产仅对可信网段开放)。
-      FUSION_AUTO_APPROVE_PATTERNS: "${FUSION_AUTO_APPROVE_PATTERNS:-192.168.,10.,172.}"
+      FUSION_AUTO_APPROVE_PATTERNS: "${FUSION_AUTO_APPROVE_PATTERNS:-192.168.,10.,172.16.0.0/12}"
     ports:
       - "11452:11452"
     networks:
