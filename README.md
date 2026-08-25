@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-882%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-885%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -786,10 +786,10 @@ pytest tests/test_new_features.py -v
 - [x] H1 PIPELINE 无 token 输出 — 上游 fusion-mlx #630 (decode/lm_head 端点, 本仓不可修)
 - [x] S1 任务级熔断器 — 派发失败报故障 + select_nodes 跳过 ban 节点
 - [x] S2 生产监控指标端点 /api/v1/metrics (Prometheus exposition)
-- [x] 882 tests, 0 ruff errors
+- [x] S3 负载/压测基线测试 (调度层吞吐 / 尾延迟 / 无丢失)
+- [x] 885 tests, 0 ruff errors
 
 ### Future
-- [ ] S3 负载/压测基线测试 (派发吞吐 / 尾延迟 / 无丢失)
 - [ ] S4 真实模型集成测试覆盖 (DATA 并行 E2E + KV 共享 E2E)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)

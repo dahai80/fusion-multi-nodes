@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 集群级聚合: 节点总数/在线, 任务总数/运行/待派发/完成/失败, 重试总次数, KV 缓存条目, 内存总量/可用, 派发延迟分位 (p50/p90/p99 + sum/count)
   - 复用 `get_stats` + 派发延迟 (completed_at - started_at) + `_retry_count`; Bearer 鉴权不豁免 (内部抓取携带 token)
   - `tests/test_master_server.py::TestPrometheusMetrics` (4 用例): 鉴权 / text-plain / exposition shape / 空集群
+- **S3 负载/压测基线测试** (#72) — 调度层压测吞吐 / 尾延迟 / 无丢失
+  - `tests/test_load_stress.py` (3 用例): 四节点集群 + FastBackend (零延迟, 免真模型), 真派发走 PortRoutingTransport ASGI 路由
+  - 并发 40 任务无丢失 (lost=0/failed=0/backend_calls=40), 派发吞吐 > 20 task/s
+  - 派发延迟尾部分布 (p95 < 1.0s, p99 < 2.0s); DATA 并行两节点 20 任务吞吐 > 10 task/s
+  - 压测放开 agent 限流 (默认 30 req/min → 100000) + 节点 max_tasks=200 (测调度吞吐非容量上限)
 
 ### Changed
 
