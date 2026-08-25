@@ -1,0 +1,65 @@
+# Fusion-Multi-Node 容器编排 — 1 Master + N Agent, 共享集群密钥。
+# 推理引擎 fusion-mlx 跑在裸机 (host:11434), 容器经 host.docker.internal 回连。
+# 扩容: docker compose --env-file .env.stress up -d --scale agent=N
+#   agent 无 host 端口映射 — master 经容器 bridge IP 回连 (192.168.x.x), 不占主机端口。
+#   仅 master:11452 暴露给宿主机 (CLI / 压测客户端经此提交任务)。
+services:
+  master:
+    build: .
+    image: fusion-multi-node:latest
+    container_name: fusion-multinode-master
+    environment:
+      FUSION_MULTINODE_ROLE: master
+      FUSION_MULTINODE_HOST: "0.0.0.0"
+      FUSION_MULTINODE_PORT: "11452"
+      # 多容器共享密钥 — 所有 master/agent 必须一致 (auth.py 读此 env)。
+      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me}"
+    ports:
+      - "11452:11452"
+    networks:
+      - fusion-cluster
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11452/api/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  agent:
+    build: .
+    image: fusion-multi-node:latest
+    environment:
+      FUSION_MULTINODE_ROLE: agent
+      FUSION_AGENT_HOST: "0.0.0.0"
+      FUSION_AGENT_PORT: "11458"
+      # 经服务名回连 master (bridge 网络内 DNS 解析)。
+      FUSION_MASTER_HOST: "master"
+      FUSION_MASTER_PORT: "11452"
+      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me}"
+      # 推理引擎在裸机: 经 host.docker.internal 回连 (Docker Desktop 内置)。
+      FUSION_MLX_URL: "http://host.docker.internal:11434"
+      FUSION_MLX_API_KEY: "${FUSION_MLX_API_KEY:-dahai168}"
+      # 单 agent 并发任务上限 — 压测时调高以充分利用 MLX 后端并发。
+      FUSION_AGENT_MAX_TASKS: "${FUSION_AGENT_MAX_TASKS:-4}"
+    # 不映射 host 端口 — master 经容器 bridge IP 回连, 支持无上限 --scale。
+    # 宿主机无需直连 agent (压测客户端只经 master:11452 提交任务)。
+    networks:
+      - fusion-cluster
+    extra_hosts:
+      # Linux 上 host.docker.internal 默认不存在, 显式映射到 host-gateway。
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11458/api/health',timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+networks:
+  fusion-cluster:
+    driver: bridge

@@ -1,0 +1,61 @@
+# 虚拟环境与缓存 — 容器内重装依赖, 不污染镜像
+.venv/
+venv/
+env/
+
+# Git 与 IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.json
+
+# 测试 — 镜像只跑服务, 不跑测试
+tests/
+
+# 运行时数据与日志
+logs/
+.fusion/
+.fusion-multi-node.pid
+.fusion-multi-node.*.pid
+*.log
+
+# 项目内非运行时文档 (减少镜像体积)
+deploy/
+docs/
+README.md
+README_CN.md
+LICENSE
+CLAUDE.md
+ARCHITECTURE.md
+Fusion-Multi-Node.md
+audit_multi_node.md
+audit_multi_node_report.md
+node-audit.md
+
+# Claude/Remember 工具产物
+.claude/
+.remember/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker 自身文件 (避免递归拷入) — 注意: docker-entrypoint.sh 需被 COPY, 不在此列
+Dockerfile
+docker-compose.yml
+.dockerignore

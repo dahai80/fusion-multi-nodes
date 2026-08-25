@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -150,6 +151,29 @@ class FusionMLXBackend(InferenceBackend):
         resp.raise_for_status()
         return resp.json()
 
+    async def decode(
+        self,
+        shard_id: str,
+        hidden_states: str,
+        max_tokens: int = 1,
+    ) -> dict[str, Any]:
+        # H1 PIPELINE 出 token — forward 链末段 hidden_states 经 lm_head 解码出 token。
+        # 上游 fusion-mlx /distributed/decode 端点 issue #630 未落地时返 404,
+        # 调用方 (pipeline_inference) 须 catch 后 fallback 返隐藏状态 + 标记。
+        body = {
+            "shard_id": shard_id,
+            "hidden_states": hidden_states,
+            "max_tokens": max_tokens,
+        }
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self._base_url}/distributed/decode",
+            json=body,
+            headers=self._dist_headers(),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def chat(
         self,
         model: str,
@@ -220,6 +244,17 @@ class AgentConfig:
     heartbeat_interval: float = 3.0
     report_interval: float = 15.0
     cluster_token: str = ""
+    # 单节点并发任务上限 — Master 据此 gate 派发 (active_tasks >= max_tasks 不派)。
+    # 默认 4; 容器/裸机多并发压测经 FUSION_AGENT_MAX_TASKS env 调高。
+    max_tasks: int = 4
+
+    def __post_init__(self) -> None:
+        env_mt = os.environ.get("FUSION_AGENT_MAX_TASKS")
+        if env_mt:
+            try:
+                self.max_tasks = max(1, int(env_mt))
+            except ValueError:
+                pass
 
 
 class NodeAgent:
@@ -336,20 +371,23 @@ class NodeAgent:
         return {**static, **dynamic}
 
     def _get_local_ip(self) -> str:
-        """获取本机局域网 IP。"""
-        try:
-            import netifaces
-
-            for iface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(iface)
-                if netifaces.AF_INET in addrs:
-                    for addr in addrs[netifaces.AF_INET]:
-                        ip = addr["addr"]
-                        if ip and not ip.startswith("127.") and not ip.startswith("169."):
-                            return ip
-        except ImportError:
-            pass
-        # 兜底
+        # 跨平台取本机可达 IP — 优先 socket UDP connect (零依赖, 取 master 回连的源 IP)。
+        # UDP connect 不发包, 仅内核选路由出口, 对端不必存活 (但需可解析)。
+        for probe_host in (self.config.master_host, "8.8.8.8"):
+            try:
+                if probe_host in ("0.0.0.0", "localhost", "127.0.0.1"):
+                    probe_host = "8.8.8.8"
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(2)
+                s.connect((probe_host, int(self.config.master_port)))
+                ip = s.getsockname()[0]
+                s.close()
+                if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                    return ip
+            except Exception as e:
+                logger.debug(f"socket 探测本机 IP 失败 ({probe_host}): {e}")
+                continue
+        # macOS 裸机兜底
         try:
             result = subprocess.run(
                 ["ipconfig", "getifaddr", "en0"],
@@ -433,6 +471,7 @@ class NodeAgent:
                 f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
                 json={
                     "node_id": self.config.node_id,
+                    "total_memory_gb": load["total_memory_gb"],
                     "available_memory_gb": load["available_memory_gb"],
                     "active_tasks": load["active_tasks"],
                 },
@@ -480,7 +519,7 @@ class NodeAgent:
                     "role": "worker",
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
                     "active_tasks": 0,
-                    "max_tasks": 4,
+                    "max_tasks": self.config.max_tasks,
                 },
             )
             return resp.status_code == 200

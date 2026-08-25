@@ -65,6 +65,7 @@ class NodeRegisterRequest(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     node_id: str
+    total_memory_gb: float | None = None
     available_memory_gb: float | None = None
     active_tasks: int | None = None
 
@@ -287,6 +288,18 @@ class MasterServer:
                     hostname=req.hostname,
                     ip_address=req.ip_address,
                     port=req.port,
+                    metadata={
+                        "total_memory_gb": req.total_memory_gb,
+                        "available_memory_gb": req.available_memory_gb,
+                        "max_tasks": req.max_tasks,
+                        "cpu_cores": req.cpu_cores,
+                        "gpu_cores": req.gpu_cores,
+                        "arch": req.arch,
+                        "device_model": req.device_model,
+                        "uma_size_gb": req.uma_size_gb,
+                        "mlx_version": req.mlx_version,
+                        "tags": req.tags,
+                    },
                 )
                 if approval.status.value != "approved":
                     logger.warning(f"节点注册被拒绝: {req.node_id} (未审批)")
@@ -336,6 +349,36 @@ class MasterServer:
             if not ok:
                 raise HTTPException(status_code=404, detail=f"无待审批请求: {node_id}")
             logger.info(f"节点审批通过: {node_id} (by {approved_by})")
+            # 审批通过即注册入集群 — 否则 agent 只发心跳找不到节点, 永不上线。
+            # approval_manager._approved 缓存了 join 时上报的 hostname/ip/port + metadata
+            # (memory/max_tasks/cpu/...); 注册 NodeInfo 从 metadata 还原, 否则 0 内存 → 派发失败。
+            approved_req = self._approval_manager._approved.get(node_id)
+            if approved_req is not None and node_id not in self.master.nodes:
+                md = approved_req.metadata or {}
+                node = NodeInfo(
+                    node_id=node_id,
+                    hostname=approved_req.hostname,
+                    ip_address=approved_req.ip_address,
+                    port=approved_req.port,
+                    arch=md.get("arch", ""),
+                    total_memory_gb=md.get("total_memory_gb", 0.0),
+                    available_memory_gb=md.get("available_memory_gb", 0.0),
+                    cpu_cores=md.get("cpu_cores", 0),
+                    gpu_cores=md.get("gpu_cores", 0),
+                    device_model=md.get("device_model", ""),
+                    uma_size_gb=md.get("uma_size_gb", 0.0),
+                    mlx_version=md.get("mlx_version", ""),
+                    role=NodeRole.WORKER.value,
+                    status=NodeStatus.ONLINE,
+                    tags=md.get("tags", []),
+                    active_tasks=0,
+                    max_tasks=md.get("max_tasks", 4),
+                    last_heartbeat=time.time(),
+                )
+                allowed = await self.master.register_node(node)
+                if not allowed:
+                    raise HTTPException(status_code=403, detail=f"节点 {node_id} 处于 ban 期, 拒绝加入")
+                logger.info(f"审批节点已注册入集群: {node_id} @ {approved_req.ip_address}:{approved_req.port}")
             return {"status": "ok", "node_id": node_id, "approved_by": approved_by}
 
         @app.post("/api/nodes/reject")
@@ -372,6 +415,7 @@ class MasterServer:
         async def heartbeat(req: HeartbeatRequest):
             ok = await self.master.update_heartbeat(
                 req.node_id,
+                total_memory_gb=req.total_memory_gb,
                 available_memory_gb=req.available_memory_gb,
                 active_tasks=req.active_tasks,
             )
@@ -442,6 +486,9 @@ class MasterServer:
         async def submit_task(req: TaskSubmitRequest):
             if not await _check_permission("master", "/api/tasks/submit", "POST"):
                 raise HTTPException(status_code=403, detail="权限不足: task submit")
+            # HA standby 守卫: 选举已配置且非 leader → 拒绝提交
+            if self.master._election is not None and not self.master._is_leader:
+                raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝任务提交")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
             task = ClusterTask(
                 task_id=f"task_{uuid.uuid4().hex[:12]}",
@@ -852,6 +899,42 @@ class MasterServer:
                 return {"alerts": alerts, "count": len(alerts)}
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
+
+        # ── HA 双 Master 选举 + 任务同步 ──
+        # POST /api/ha/vote — 对端 master 拉票, 透传 ClusterMaster.handle_vote_request。
+        # POST /api/ha/sync-tasks — leader 推送任务快照, standby 合并落盘。
+        # 单 Master 模式 (无选举配置) 投票拒绝, 同步忽略。
+
+        @app.post("/api/ha/vote")
+        async def ha_vote(req: dict):
+            from fusion_multi_node.master.election import VoteRequest, VoteResponse
+
+            try:
+                vote_req = VoteRequest(
+                    term=int(req.get("term", 0)),
+                    candidate_id=str(req.get("candidate_id", "")),
+                    candidate_priority=int(req.get("candidate_priority", 0)),
+                    last_log_index=int(req.get("last_log_index", 0)),
+                    last_log_term=int(req.get("last_log_term", 0)),
+                )
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"非法 VoteRequest: {e}")
+            resp = await self.master.handle_vote_request(vote_req)
+            if not isinstance(resp, VoteResponse):
+                resp = VoteResponse(term=0, vote_granted=False, voter_id="")
+            return {
+                "term": resp.term,
+                "vote_granted": resp.vote_granted,
+                "voter_id": resp.voter_id,
+            }
+
+        @app.post("/api/ha/sync-tasks")
+        async def ha_sync_tasks(req: dict):
+            tasks = req.get("tasks", [])
+            if not isinstance(tasks, list):
+                raise HTTPException(status_code=400, detail="tasks 必须为列表")
+            merged = await self.master.receive_synced_tasks(tasks)
+            return {"status": "ok", "merged": merged}
 
     async def start(self, host: str = "127.0.0.1", port: int = 11452) -> None:
         import uvicorn

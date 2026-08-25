@@ -73,6 +73,9 @@ class MasterElection:
         self.node_id = node_id
         self.priority = priority
         self._known_nodes: set[str] = set(known_nodes or [])
+        # node_id → ElectionCandidate (带 ip/port, 供 send_vote_request 回调解析对端地址)。
+        # add_known_node 同步填充; get_candidate 公开查询。
+        self.candidates: dict[str, ElectionCandidate] = {}
         self._election_timeout_range = election_timeout_range
         self._heartbeat_interval = heartbeat_interval
         self._on_elected = on_elected
@@ -94,11 +97,26 @@ class MasterElection:
         lo, hi = self._election_timeout_range
         return lo + random.random() * (hi - lo)
 
-    def add_known_node(self, node_id: str) -> None:
-        self._known_nodes.add(node_id)
+    def add_known_node(self, node_or_candidate: str | ElectionCandidate) -> None:
+        """登记已知候选节点。接受 str (仅 node_id, 向后兼容) 或 ElectionCandidate (带 ip/port)。
+
+        传 str 时仅入 _known_nodes 集 (无地址, 不可达, 用于多数计数);
+        传 ElectionCandidate 时同时入 candidates 字典 (供 get_candidate 解析对端 HTTP 地址)。
+        """
+        if isinstance(node_or_candidate, ElectionCandidate):
+            cand = node_or_candidate
+            self._known_nodes.add(cand.node_id)
+            self.candidates[cand.node_id] = cand
+        else:
+            self._known_nodes.add(node_or_candidate)
+
+    def get_candidate(self, node_id: str) -> ElectionCandidate | None:
+        """查询候选节点 (含 ip/port)。无地址返回 None。"""
+        return self.candidates.get(node_id)
 
     def remove_known_node(self, node_id: str) -> None:
         self._known_nodes.discard(node_id)
+        self.candidates.pop(node_id, None)
 
     async def start(self) -> None:
         self._running = True

@@ -1,0 +1,63 @@
+# Prometheus 告警规则 — fusion-multi-node
+# 指标名取自 ClusterMaster.get_prometheus_metrics (fusion_multi_node/master/cluster_master.py)
+#   fusion_cluster_nodes_total / fusion_cluster_nodes_online  : gauge
+#   fusion_cluster_tasks_total / running / pending / completed / failed : gauge
+#   fusion_cluster_task_retries_total                          : counter
+#   fusion_cluster_kv_cache_entries                            : gauge
+#   fusion_cluster_memory_total_gb / available_gb              : gauge
+#   fusion_cluster_dispatch_latency_seconds{quantile=...}      : summary
+#
+# 注: fusion_cluster_tasks_failed 是 gauge (累计失败/超时任务数, 随重试/清理非严格单调)
+#     用 increase() 在 5m 窗口提取增量, 避免直接 rate() gauge 的语义错误
+
+groups:
+    - name: fusion-multinode.rules
+      rules:
+          - alert: MultinodeNodeOffline
+            expr: fusion_cluster_nodes_online / fusion_cluster_nodes_total < 1
+            for: 1m
+            labels:
+                severity: warning
+                service: fusion-multi-node
+            annotations:
+                summary: "节点离线"
+                description: "集群在线节点 {{ $value | humanizePercentage }} ({{ $labels.instance }}), 有节点掉线"
+
+          - alert: MultinodeTaskBacklog
+            expr: fusion_cluster_tasks_pending > 50
+            for: 2m
+            labels:
+                severity: warning
+                service: fusion-multi-node
+            annotations:
+                summary: "任务积压"
+                description: "待派发任务 {{ $value }} 超过 50, 调度器可能过载"
+
+          - alert: MultinodeHighFailureRate
+            expr: increase(fusion_cluster_tasks_failed[5m]) > 5
+            labels:
+                severity: warning
+                service: fusion-multi-node
+            annotations:
+                summary: "任务失败率飙升"
+                description: "5 分钟内失败/超时任务增加 {{ $value }} 次, 检查节点与模型健康"
+
+          - alert: MultinodeHighLatencyP99
+            expr: fusion_cluster_dispatch_latency_seconds{quantile="0.99"} > 2
+            for: 5m
+            labels:
+                severity: warning
+                service: fusion-multi-node
+            annotations:
+                summary: "派发延迟飙升"
+                description: "P99 派发延迟 {{ $value }}s 超过 2s 持续 5m, 节点负载或网络异常"
+
+          - alert: MultinodeMasterDown
+            expr: up{job="fusion-multinode"} == 0
+            for: 1m
+            labels:
+                severity: critical
+                service: fusion-multi-node
+            annotations:
+                summary: "Master 不可达"
+                description: "Prometheus 抓取失败持续 1m, Master 进程可能已崩溃, 立即介入"

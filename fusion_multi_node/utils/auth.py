@@ -35,6 +35,12 @@ def generate_cluster_token() -> str:
 
 
 def load_or_create_token(token_path: str = DEFAULT_TOKEN_PATH) -> str:
+    # 容器/多节点共享密钥: 优先读 FUSION_CLUSTER_TOKEN 环境变量。
+    # 多容器部署 (docker compose) 经 env 注入同一 token, 避免各容器自生成不一致。
+    env_token = os.environ.get("FUSION_CLUSTER_TOKEN", "").strip()
+    if env_token:
+        logger.info("集群共享密钥已从 FUSION_CLUSTER_TOKEN 环境变量加载")
+        return env_token
     path = Path(token_path)
     if path.exists():
         try:
