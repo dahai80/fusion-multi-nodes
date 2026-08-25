@@ -85,6 +85,12 @@ class TaskSubmitRequest(BaseModel):
     required_capability: str = ""
     preferred_node_id: str = ""
     priority: int = 0
+    # P1 派发载荷 — 透传到 agent /api/execute (task_type + params)
+    task_type: str = "inference"
+    prompt: str = ""
+    messages: list[dict[str, Any]] = []
+    max_tokens: int = 2048
+    temperature: float = 0.7
 
 
 class TaskCancelRequest(BaseModel):
@@ -445,6 +451,13 @@ class MasterServer:
                 required_capability=req.required_capability,
                 preferred_node_id=req.preferred_node_id,
                 priority=req.priority,
+                task_type=req.task_type,
+                params={
+                    "prompt": req.prompt,
+                    "messages": req.messages,
+                    "max_tokens": req.max_tokens,
+                    "temperature": req.temperature,
+                },
             )
             ok = await self.master.assign_task(task)
             if not ok:
@@ -881,4 +894,5 @@ def _task_to_resp(t: ClusterTask) -> dict[str, Any]:
         "degradation_count": t.degradation_count,
         "cancel_reason": t.cancel_reason,
         "sub_tasks": t.sub_tasks,
+        "result": t.result,
     }

@@ -23,8 +23,18 @@ try:
 except Exception:
     _VERSION = "0.2.0"
 
-ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin", "model_sync"}
+ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin", "model_sync", "pipeline_step"}
 ALLOWED_EXTRA_KEYS = {"temperature", "top_p", "top_k", "repeat_penalty", "seed"}
+# P3 pipeline_step 经 extra 透传的字段 (model_id/layer_range/hidden_states/input_ids/...)。
+# hidden_states 为 b64.npy 字符串 (上游 /distributed/* 激活格式)。
+PIPELINE_EXTRA_KEYS = {
+    "model_id",
+    "shard_index",
+    "layer_range",
+    "hidden_states",
+    "input_ids",
+    "position_ids",
+}
 
 
 class InMemoryRateLimiter:
@@ -199,14 +209,26 @@ class AgentServer:
             if req.task_type not in ALLOWED_TASK_TYPES:
                 raise HTTPException(status_code=400, detail=f"不合法的任务类型: {req.task_type}")
             filtered_extra = {k: v for k, v in req.extra.items() if k in ALLOWED_EXTRA_KEYS}
-            task = {
-                "type": req.task_type,
-                "model_name": req.model_name,
+            # P3: pipeline_step 字段经 extra 透传到 params (隐藏状态 b64.npy/层段)。
+            pipeline_extra = {k: v for k, v in req.extra.items() if k in PIPELINE_EXTRA_KEYS}
+            # 消费契约 (见 NodeAgent.execute_task docstring): {task_id, type, model, params}。
+            # 旧实现下扁平键 (model_name/prompt/...) 与 _execute_inference 读取的
+            # task["task_id"]/task.get("model")/task.get("params",{}) 错位 → KeyError + 空模型/空提示,
+            # 因既有测试 mock execute_task 未触达真实消费端, 该契约 bug 长期潜伏。此处对齐。
+            params = {
                 "prompt": req.prompt,
                 "messages": req.messages,
                 "max_tokens": req.max_tokens,
                 "temperature": req.temperature,
                 **filtered_extra,
+                **pipeline_extra,
+            }
+            task = {
+                "task_id": "",
+                "type": req.task_type,
+                "model": req.model_name,
+                "model_name": req.model_name,
+                "params": params,
             }
             try:
                 result = await self.agent.execute_task(task)

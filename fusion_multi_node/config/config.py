@@ -100,6 +100,15 @@ class ClusterConfig:
             "heartbeat_interval": 3.0,
             "report_interval": 15.0,
         },
+        # P4 HA 选举 — 默认关闭 (单 Master, 向后兼容); 多 Master 部署开启。
+        # peers = 候选 Master node_id 列表; node_id = 本 Master 在选举集群中的标识。
+        # 注意: 选举投票传输层 (集群内 /api/vote 端点) 尚未实现, 现网单 Master 无 HA。
+        "ha": {
+            "enabled": False,
+            "node_id": "",
+            "priority": 0,
+            "peers": [],
+        },
         "parallel": {
             "default_mode": "pipeline",
             "pipeline_timeout": 300.0,
@@ -109,6 +118,7 @@ class ClusterConfig:
         },
         "mlx": {
             "fusion_mlx_port": 11432,
+            "fusion_mlx_api_key": "",
             "fusion_kb_port": 11434,
             "fusion_desk_port": 9000,
             "model_hub_port": 11435,
@@ -316,6 +326,16 @@ class ClusterConfig:
             agent_port=self.get("cluster.agent_port"),
             fusion_desk_port=self.get("mlx.fusion_desk_port"),
             fusion_mlx_port=self.get("mlx.fusion_mlx_port"),
+            fusion_mlx_api_key=self.get("mlx.fusion_mlx_api_key", ""),
             heartbeat_interval=float(self.get("cluster.heartbeat_interval", 3.0)),
             report_interval=float(self.get("cluster.report_interval", 15.0)),
         )
+
+    def get_ha_config(self) -> dict[str, Any]:
+        """P4 HA 选举配置 — 供 ClusterMaster.start(ha_config=...) 消费。"""
+        return {
+            "enabled": bool(self.get("ha.enabled", False)),
+            "node_id": self.get("ha.node_id", ""),
+            "priority": int(self.get("ha.priority", 0)),
+            "peers": self.get("ha.peers", []) or [],
+        }

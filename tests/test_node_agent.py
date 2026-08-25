@@ -476,7 +476,9 @@ class TestNodeAgentLifecycle:
         agent.config.report_interval = 0.05
         call_count = 0
 
-        original_collect = agent.collect_hardware_info
+        # R1: _hardware_report_loop 调 _collect_dynamic_load (纯 psutil),
+        # 非 collect_hardware_info。mock 后者 loop 不触发 → 永不置 _running=False → hang。
+        original_collect = agent._collect_dynamic_load
 
         def mock_collect():
             nonlocal call_count
@@ -485,7 +487,7 @@ class TestNodeAgentLifecycle:
                 agent._running = False
             return original_collect()
 
-        agent.collect_hardware_info = mock_collect
+        agent._collect_dynamic_load = mock_collect
 
         await agent._hardware_report_loop()
         assert call_count >= 2

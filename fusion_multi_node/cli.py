@@ -164,7 +164,14 @@ async def _async_node_start(
         actual_port = port or 11452
         _master = ClusterMaster(host=host, port=actual_port)
         with_mdns = not no_mdns
-        await _master.start(with_server=True, with_mdns=with_mdns)
+        # P4: 读 HA 配置接入 start() (默认关闭 → 单 Master)
+        try:
+            from .config import ClusterConfig
+
+            ha_config = ClusterConfig().get_ha_config()
+        except Exception:
+            ha_config = None
+        await _master.start(with_server=True, with_mdns=with_mdns, ha_config=ha_config)
 
         if transport == "fmp":
             from .protocol import FMPServer
@@ -184,6 +191,7 @@ async def _async_node_start(
         config = AgentConfig(
             master_host=master_host,
             master_port=master_port,
+            agent_host=host,
             agent_port=actual_port,
         )
         _agent = NodeAgent(config)
