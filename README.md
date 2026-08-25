@@ -419,6 +419,28 @@ transfer = pipeline.prepare_transfer(old_ast, new_ast)  # diff + scrub
 restored = pipeline.apply_transfer(base_ast, transfer)  # rebuild
 ```
 
+#### mTLS 节点互信 (#80)
+
+集群内节点互连可选双向 TLS (mTLS), 私有 CA + 每节点叶证书。env 开关 `FUSION_MTLS_ENABLED=1` 启用, 关闭则全 http no-op (不破坏现有测试/CLI)。
+
+```python
+from fusion_multi_node.security import mtls
+
+# 生成集群 CA (3650 天) + 每节点叶证书 (CN=node_id, O=role, 365 天)
+ca_cert, ca_key = mtls.provision_cluster("/path/to/ca")
+node_cert, node_key = mtls.provision_node("worker-1", "worker", ca_cert, ca_key, "/path/to/worker-1")
+
+# 服务端: uvicorn.Config(**server_ssl_kwargs()) — 要求对端客户端证书 (CERT_REQUIRED)
+# 客户端: httpx.AsyncClient(**client_kwargs()) — verify=ctx 同时验服务端证书 + 呈递客户端证书
+# URL scheme: mtls.scheme() → "https" / "http"
+```
+
+细粒度权限 (mTLS 开启时强制): AgentServer 从 `X-Node-Id`/`X-Node-Role` header 取调用方身份 → `PermissionManager` 校验路径权限。
+- MASTER: 全部 API (含 execute + cancel)
+- WORKER: execute / heartbeat / KV lookup-transfer / hardware; **无** cancel
+- 强制模式缺 `X-Node-Id` → 403; 角色无权 → 403
+- 兼容模式 (mTLS 关) 无 header → 放行 (现有 http 测试/CLI 不带头)
+
 ### 6. Observability (`fusion_multi_node.observability`)
 
 Metrics, logs, alerts, log store with export, intelligent fault diagnosis.
@@ -839,6 +861,7 @@ pytest tests/test_pipeline_e2e.py -v
 - **100% local offline** — Zero external network dependencies
 - **Node approval** — New nodes require approval or pattern-based auto-approval
 - **Master/Worker isolation** — Role-based permission, API path access control
+- **mTLS node auth** — Private CA + per-node leaf cert, env-gated mutual TLS (#80)
 - **Worker sandbox** — CPU/memory/disk limits, path & network whitelisting
 - **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards)
 - **AES-GCM encryption** — FMP protocol encrypted communication

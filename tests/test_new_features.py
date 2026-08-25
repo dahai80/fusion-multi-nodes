@@ -331,7 +331,8 @@ class TestPermissionManager:
         pm.assign_role("master-1", NodeRole.MASTER)
         assert pm.has_permission("master-1", Permission.TASK_SUBMIT) is True
         assert pm.has_permission("master-1", Permission.NODE_REGISTER) is True
-        assert pm.has_permission("master-1", Permission.TASK_EXECUTE) is False
+        # master 派发 execute 到 agent → 须有 TASK_EXECUTE (#80 mTLS 细粒度权限)
+        assert pm.has_permission("master-1", Permission.TASK_EXECUTE) is True
 
     def test_worker_permissions(self):
         from fusion_multi_node.security.permission import (

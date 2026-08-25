@@ -36,6 +36,8 @@ from fusion_multi_node.master.load_metrics import (
     RoutingStrategy,
 )
 from fusion_multi_node.master.task_spec import TaskSpec
+from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
+from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.utils.auth import (
     build_safe_url,
     is_safe_peer_host,
@@ -785,7 +787,7 @@ class ClusterMaster:
 
     async def _get_dispatch_http(self) -> httpx.AsyncClient:
         if self._dispatch_http is None or self._dispatch_http.is_closed:
-            self._dispatch_http = httpx.AsyncClient(timeout=300.0)
+            self._dispatch_http = httpx.AsyncClient(timeout=300.0, **mtls_client_kwargs())
         return self._dispatch_http
 
     async def _dispatch_task(self, task: ClusterTask) -> None:
@@ -939,8 +941,8 @@ class ClusterMaster:
                     "temperature": params.get("temperature", 0.7),
                     "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
                 }
-            url = build_safe_url("http", node.ip_address, node.port, "/api/execute")
-            headers = {"Authorization": f"Bearer {token}"}
+            url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/execute")
+            headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master", "X-Node-Role": "master"}
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
                 raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
@@ -1305,7 +1307,7 @@ class ClusterMaster:
         if not is_safe_peer_host(cand.ip_address):
             logger.warning(f"拉票拒绝不安全对端主机: {peer_node_id} ({cand.ip_address!r})")
             return VoteResponse(term=0, vote_granted=False, voter_id=peer_node_id)
-        url = build_safe_url("http", cand.ip_address, cand.port, "/api/ha/vote")
+        url = build_safe_url(mtls_scheme(), cand.ip_address, cand.port, "/api/ha/vote")
         token = self._get_dispatch_token()
         payload = {
             "term": vote_req.term,
@@ -1396,7 +1398,7 @@ class ClusterMaster:
             return
         for peer_id, ip, port, payload in targets:
             try:
-                url = build_safe_url("http", ip, port, "/api/ha/sync-tasks")
+                url = build_safe_url(mtls_scheme(), ip, port, "/api/ha/sync-tasks")
                 resp = await client.post(
                     url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0
                 )

@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 
+from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
+from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.utils.auth import is_safe_path_segment
 
 logger = logging.getLogger(__name__)
@@ -453,7 +455,7 @@ class NodeAgent:
             headers = {}
             if self.config.cluster_token:
                 headers["Authorization"] = f"Bearer {self.config.cluster_token}"
-            self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers)
+            self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers, **mtls_client_kwargs())
         return self._http_client
 
     async def send_heartbeat(self) -> bool:
@@ -468,7 +470,7 @@ class NodeAgent:
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
-                f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
+                f"{mtls_scheme()}://{self.config.master_host}:{self.config.master_port}/api/nodes/heartbeat",
                 json={
                     "node_id": self.config.node_id,
                     "total_memory_gb": load["total_memory_gb"],
@@ -481,7 +483,7 @@ class NodeAgent:
             # R5: 同步五维负载到 LoadRouter (心跳路径, 无需单独定时器)
             try:
                 await client.post(
-                    f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/load",
+                    f"{mtls_scheme()}://{self.config.master_host}:{self.config.master_port}/api/nodes/load",
                     json={
                         "node_id": self.config.node_id,
                         "uma_used_ratio": load["uma_used_ratio"],
@@ -502,7 +504,7 @@ class NodeAgent:
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
-                f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/register",
+                f"{mtls_scheme()}://{self.config.master_host}:{self.config.master_port}/api/nodes/register",
                 json={
                     "node_id": info["node_id"],
                     "hostname": info["hostname"],
@@ -724,7 +726,7 @@ class NodeAgent:
             client = await self._get_http_client(300.0)
             source_port = task.get("source_port", 11452)
             url = build_safe_url(
-                "http", source_node, source_port, f"/api/models/{model_name}/manifest"
+                mtls_scheme(), source_node, source_port, f"/api/models/{model_name}/manifest"
             )
             resp = await client.get(url)
             manifest = resp.json()
@@ -797,7 +799,7 @@ class NodeAgent:
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
-                f"http://{self.config.master_host}:{self.config.master_port}/api/nodes/fault",
+                f"{mtls_scheme()}://{self.config.master_host}:{self.config.master_port}/api/nodes/fault",
                 json={
                     "node_id": self.config.node_id,
                     "fault_type": fault_type,

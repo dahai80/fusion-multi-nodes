@@ -21,6 +21,8 @@ from fusion_multi_node.master import (
     TaskStatus,
 )
 from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
+from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
+from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.security.permission import NodeRole, PermissionManager
 from fusion_multi_node.utils.auth import (
     BearerAuthMiddleware,
@@ -208,9 +210,9 @@ class MasterServer:
                         raise HTTPException(status_code=400, detail=f"不安全对端主机: {source_host!r}")
                     if not is_safe_path_segment(model_name):
                         raise HTTPException(status_code=400, detail=f"非法 model_name: {model_name!r}")
-                    client = httpx.AsyncClient(timeout=30.0)
+                    client = httpx.AsyncClient(timeout=30.0, **mtls_client_kwargs())
                     url = build_safe_url(
-                        "http", source_host, source_port, f"/api/models/{model_name}/manifest"
+                        mtls_scheme(), source_host, source_port, f"/api/models/{model_name}/manifest"
                     )
                     resp = await client.get(url)
                     remote_manifest = ModelManifest.from_dict(resp.json())
@@ -557,9 +559,13 @@ class MasterServer:
             async def _notify(client, nid, node):
                 try:
                     resp = await client.post(
-                        f"http://{node.ip_address}:{node.port}/api/tasks/cancel",
+                        f"{mtls_scheme()}://{node.ip_address}:{node.port}/api/tasks/cancel",
                         json={"task_id": task_id},
-                        headers={"Authorization": f"Bearer {self._shared_token}"},
+                        headers={
+                            "Authorization": f"Bearer {self._shared_token}",
+                            "X-Node-Id": "master",
+                            "X-Node-Role": "master",
+                        },
                     )
                     if resp.status_code == 200:
                         return nid
@@ -575,7 +581,7 @@ class MasterServer:
 
             notified = []
             if targets:
-                async with httpx.AsyncClient(timeout=5.0) as client:
+                async with httpx.AsyncClient(timeout=5.0, **mtls_client_kwargs()) as client:
                     results = await asyncio.gather(*[_notify(client, nid, node) for nid, node in targets])
                     notified = [r for r in results if r]
             return {"status": "cancelled", "task_id": task_id, "notified_nodes": notified}
@@ -936,13 +942,21 @@ class MasterServer:
             merged = await self.master.receive_synced_tasks(tasks)
             return {"status": "ok", "merged": merged}
 
-    async def start(self, host: str = "127.0.0.1", port: int = 11452) -> None:
+    async def start(self, host: str = "127.0.0.1", port: int = 11452, ssl_context=None) -> None:
         import uvicorn
 
         await self._sync_manager.start()
-        config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
+        ssl_kwargs = {}
+        if ssl_context is None:
+            from fusion_multi_node.security.mtls import server_ssl_kwargs
+
+            ssl_kwargs = server_ssl_kwargs()
+        elif isinstance(ssl_context, dict):
+            ssl_kwargs = ssl_context
+        config = uvicorn.Config(self.app, host=host, port=port, log_level="warning", **ssl_kwargs)
         self._uvicorn_server = uvicorn.Server(config)
-        logger.info(f"Master 服务启动: {host}:{port}")
+        scheme = "https" if ssl_kwargs else "http"
+        logger.info(f"Master 服务启动: {scheme}://{host}:{port}")
         await self._uvicorn_server.serve()
 
     async def stop(self) -> None:
