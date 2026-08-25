@@ -59,9 +59,19 @@ def _model_present() -> bool:
     )
 
 
+def _mlx_lib_present() -> bool:
+    # E2E 末段用本地 mlx.core 做 b64.npy 张量 round-trip 断言; 本地无 mlx 包则 skip。
+    try:
+        import mlx.core  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 skip_no_backend = pytest.mark.skipif(
-    not (_mlx_alive() and _model_present()),
-    reason="真 fusion-mlx 未运行或小模型未下载 (需 Llama-3.2-1B-Instruct-4bit)",
+    not (_mlx_alive() and _model_present() and _mlx_lib_present()),
+    reason="真 fusion-mlx 未运行 / 小模型未下载 / 本地无 mlx 包 (需 Llama-3.2-1B-Instruct-4bit)",
 )
 
 
@@ -122,7 +132,10 @@ def _register_node(client: AsyncClient, node_id: str, port: int) -> Any:
     return client.post("/api/nodes/register", json=payload, headers=AUTH_HEADERS)
 
 
-@pytest.mark.skipif(not (_mlx_alive() and _model_present()), reason="真 fusion-mlx 未运行或小模型未下载")
+@pytest.mark.skipif(
+    not (_mlx_alive() and _model_present() and _mlx_lib_present()),
+    reason="真 fusion-mlx 未运行 / 小模型未下载 / 本地无 mlx 包",
+)
 class TestPipelineE2E:
     """真实张量 PIPELINE 端到端 — 真 fusion-mlx + 真模型层切分。"""
 

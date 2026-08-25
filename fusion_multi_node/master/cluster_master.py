@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -225,25 +226,79 @@ class ClusterMaster:
         self._dispatch_token: str | None = None
         self._dispatch_http: httpx.AsyncClient | None = None
         self._dispatch_tasks: dict[str, asyncio.Task] = {}
+        # F-A13 故障隔离: node_id → 解封时刻 (time.time()+_BAN_DURATION_S)。
+        # report_fault 窗口内达阈值自动 ban; register_node 拒绝 ban 内节点。
+        self._banned_nodes: dict[str, float] = {}
+        self._fault_counts: dict[str, list[float]] = defaultdict(list)
 
     # ── 节点管理 ──
 
-    async def register_node(self, info: NodeInfo) -> None:
-        """注册或更新节点。"""
+    async def register_node(self, info: NodeInfo) -> bool:
+        """注册或更新节点 (F-A12 幂等: 再注册 = PATCH, 保留 Master 权威运行态字段)。
+
+        ban 内节点拒绝注册。返回 True=放行, False=被 ban 拒绝。
+        """
         async with self._nodes_lock:
-            info.status = NodeStatus.ONLINE
-            info.last_heartbeat = time.time()
+            if self._is_node_banned_locked(info.node_id):
+                logger.warning(
+                    f"拒绝注册 banned 节点: {info.node_id} "
+                    f"(解封剩余 {self._banned_nodes[info.node_id] - time.time():.0f}s)"
+                )
+                return False
+            now = time.time()
+            existing = self.nodes.get(info.node_id)
+            if existing is not None:
+                # 再注册 = PATCH: Master 权威运行态字段不动, 只更新硬件声明字段。
+                info.status = existing.status if existing.status != NodeStatus.OFFLINE else NodeStatus.ONLINE
+                info.last_heartbeat = now
+                info.active_tasks = existing.active_tasks
+                info.max_tasks = existing.max_tasks
+                info.network_rtt_ms = existing.network_rtt_ms
+                logger.info(f"节点再注册 (PATCH): {info.hostname} ({info.ip_address}:{info.port})")
+            else:
+                info.status = NodeStatus.ONLINE
+                info.last_heartbeat = now
+                logger.info(f"节点注册: {info.hostname} ({info.ip_address}:{info.port})")
             self.nodes[info.node_id] = info
             # M4-01 同步负载指标到 LoadRouter
             self._sync_node_metrics(info)
-            logger.info(f"节点注册: {info.hostname} ({info.ip_address}:{info.port})")
+            return True
 
-    async def unregister_node(self, node_id: str) -> None:
-        """注销节点。"""
+    async def unregister_node(self, node_id: str, reason: str = "") -> None:
+        """注销节点 (F-A13: reason="banned" 写入黑名单 _BAN_DURATION_S)。"""
         async with self._nodes_lock:
             self.nodes.pop(node_id, None)
             self.load_router.remove_node(node_id)
-            logger.info(f"节点离线: {node_id}")
+            if reason == "banned":
+                self._banned_nodes[node_id] = time.time() + self._BAN_DURATION_S
+                logger.warning(f"节点拉黑: {node_id} ({self._BAN_DURATION_S:.0f}s)")
+            else:
+                logger.info(f"节点离线: {node_id} ({reason})" if reason else f"节点离线: {node_id}")
+
+    def _is_node_banned_locked(self, node_id: str) -> bool:
+        """已持 _nodes_lock 下查 ban (过期条目惰性清理)。"""
+        unban_at = self._banned_nodes.get(node_id)
+        if unban_at is None:
+            return False
+        if time.time() >= unban_at:
+            self._banned_nodes.pop(node_id, None)
+            self._fault_counts.pop(node_id, None)
+            logger.info(f"节点 ban 到期自动解封: {node_id}")
+            return False
+        return True
+
+    def is_node_banned(self, node_id: str) -> bool:
+        """外部查询是否在 ban 期 (无锁读快照, 过期惰性清理交由 register 路径)。"""
+        unban_at = self._banned_nodes.get(node_id)
+        return unban_at is not None and time.time() < unban_at
+
+    def unban_node(self, node_id: str) -> bool:
+        """手动解封节点, 返回是否确实解封了一条 ban。"""
+        removed = self._banned_nodes.pop(node_id, None) is not None
+        self._fault_counts.pop(node_id, None)
+        if removed:
+            logger.info(f"节点手动解封: {node_id}")
+        return removed
 
     async def update_heartbeat(
         self,
@@ -267,13 +322,28 @@ class ClusterMaster:
             return True
 
     async def report_fault(self, node_id: str, fault_type: str = "", message: str = "") -> bool:
-        """加锁标记节点故障 — 禁止路由层裸改 node.status。"""
+        """加锁标记节点故障 + 累计故障计数 (F-A13: 窗口内达阈值自动 ban)。"""
         async with self._nodes_lock:
             node = self.nodes.get(node_id)
             if not node:
                 return False
             node.status = NodeStatus.FAULT
-            logger.warning(f"节点故障: {node_id} [{fault_type}] {message}")
+            now = time.time()
+            counts = self._fault_counts[node_id]
+            counts.append(now)
+            # 惰性清理窗口外旧故障
+            self._fault_counts[node_id] = [t for t in counts if now - t <= self._FAULT_WINDOW_S]
+            windowed = self._fault_counts[node_id]
+            logger.warning(
+                f"节点故障: {node_id} [{fault_type}] {message} "
+                f"(窗口内 {len(windowed)}/{self._FAULT_THRESHOLD})"
+            )
+            if len(windowed) >= self._FAULT_THRESHOLD:
+                self._banned_nodes[node_id] = now + self._BAN_DURATION_S
+                logger.warning(
+                    f"节点故障达阈值自动 ban: {node_id} "
+                    f"({self._BAN_DURATION_S:.0f}s) [{fault_type}]"
+                )
             return True
 
     async def get_online_nodes(self) -> list[NodeInfo]:
@@ -938,6 +1008,11 @@ class ClusterMaster:
 
     # M4-03 大模型阈值 (≥13B 使用 VRAM 优先策略)
     _VRAM_FIRST_MODEL_SIZES = {"70b", "32b", "13b"}
+
+    # F-A13 故障隔离 — report_fault 在窗口内达阈值进黑名单, ban 期内拒绝注册。
+    _FAULT_WINDOW_S = 60.0
+    _FAULT_THRESHOLD = 3
+    _BAN_DURATION_S = 300.0
 
     def _is_local_force(self, task: ClusterTask, required_mem: float) -> bool:
         """M4-02 判断是否强制本地执行 (R7: 正则边界匹配)。"""

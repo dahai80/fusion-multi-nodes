@@ -175,11 +175,11 @@ node = NodeInfo(
     node_id="node_1",
     hostname="mac-studio-1",
     ip_address="10.0.0.1",
-    port=11445,
+    port=11458,
     total_memory_gb=64.0,
     available_memory_gb=48.0,
 )
-master.register_node(node)
+await master.register_node(node)  # 再注册 = PATCH (保留运行态), 返回 bool (ban 期内 False)
 
 task = ClusterTask(
     task_id="task_1",
@@ -196,6 +196,26 @@ master.complete_task("task_1")
 ```
 
 **Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, cloud fallback on retry exhaustion.
+
+#### 节点注册幂等 + 故障黑名单 (F-A12 / F-A13, #20)
+
+- **F-A12 幂等注册**: 同一 `node_id` 再注册 = PATCH 语义 — 保留 Master 权威运行态字段
+  (`active_tasks`/`max_tasks`/`network_rtt_ms`/`status`), 只更新硬件声明字段
+  (内存/CPU/GPU/hostname/port)。节点重启不丢运行态, 不会冲掉派发中的任务计数。
+- **F-A13 故障黑名单**: `report_fault` 在 `_FAULT_WINDOW_S` (60s) 窗口内累积达
+  `_FAULT_THRESHOLD` (3) → 自动 ban `_BAN_DURATION_S` (300s)。ban 期内 `register_node`
+  返回 `False` (HTTP 403 拒绝)。`unregister_node(reason="banned")` 主动拉黑。
+  到期惰性自动解封; `is_node_banned()` / `unban_node()` 手动查询/解封。
+
+```python
+# 故障熔断: 连报 3 次 → ban 5 分钟, ban 期内拒绝再注册
+await master.report_fault("node_1", "oom", "out of memory")
+assert not master.is_node_banned("node_1")
+await master.report_fault("node_1", "oom", "again")  # 第 3 次触发 ban
+assert master.is_node_banned("node_1")
+assert await master.register_node(node) is False       # ban 期拒绝
+master.unban_node("node_1")                            # 手动解封
+```
 
 ### Master Election (`fusion_multi_node.master.election`) — P4 已接 start(), 默认关闭
 

@@ -257,7 +257,9 @@ class MasterServer:
                     status=NodeStatus.ONLINE,
                     last_heartbeat=time.time(),
                 )
-                await self.master.register_node(node)
+                allowed = await self.master.register_node(node)
+                if not allowed:
+                    raise HTTPException(status_code=403, detail=f"节点 {node_id} 处于 ban 期, 拒绝加入")
             elif self._approval_manager is not None:
                 self._approval_manager.request_join(
                     node_id=node_id,
@@ -315,7 +317,9 @@ class MasterServer:
                 network_rtt_ms=req.network_rtt_ms,
                 last_heartbeat=time.time(),
             )
-            await self.master.register_node(node)
+            allowed = await self.master.register_node(node)
+            if not allowed:
+                raise HTTPException(status_code=403, detail=f"节点 {req.node_id} 处于 ban 期, 拒绝注册")
             self._permission_manager.assign_role(req.node_id, assigned_role, "register")
             logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={assigned_role.value}")
             return {"status": "ok", "node_id": req.node_id}
