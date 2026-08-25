@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `select_nodes` 候选过滤跳过 ban 期内节点 (gap: 原 ban 仅在 `register_node` 拦截, 调度路径漏拦)
   - 窗口内达 `_FAULT_THRESHOLD` (3) 自动 ban, ban 期内不被选中, 到期/手动解封后恢复可选
   - `tests/test_task_circuit_breaker.py` (6 用例): 派发失败报故障 / 重复失败 ban / 成功不报故障 / ban 节点跳过 / 全 ban 返回空 / 解封重选
+- **S2 生产监控指标端点** (#71) — Prometheus exposition `/api/v1/metrics`
+  - `ClusterMaster.get_prometheus_metrics`: 纯文本 0.0.4 exposition, 无外部依赖
+  - 集群级聚合: 节点总数/在线, 任务总数/运行/待派发/完成/失败, 重试总次数, KV 缓存条目, 内存总量/可用, 派发延迟分位 (p50/p90/p99 + sum/count)
+  - 复用 `get_stats` + 派发延迟 (completed_at - started_at) + `_retry_count`; Bearer 鉴权不豁免 (内部抓取携带 token)
+  - `tests/test_master_server.py::TestPrometheusMetrics` (4 用例): 鉴权 / text-plain / exposition shape / 空集群
 
 ### Changed
 

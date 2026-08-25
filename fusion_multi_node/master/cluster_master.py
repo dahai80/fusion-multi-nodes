@@ -1483,6 +1483,80 @@ class ClusterMaster:
         stats["load_summary"] = self.load_router.get_cluster_load_summary()
         return stats
 
+    async def get_prometheus_metrics(self) -> str:
+        """S2 Prometheus exposition format — 集群级聚合指标供 /api/v1/metrics 抓取。
+
+        复用 get_stats (节点/任务/KV/内存) + 派发延迟 (completed_at - started_at)
+        + 重试计数 (_retry_count)。纯文本 0.0.4 exposition, 无外部依赖。
+        """
+        stats = await self.get_stats()
+        latencies: list[float] = []
+        retries = 0
+        pending = 0
+        running = 0
+        async with self._tasks_lock:
+            for t in self.tasks.values():
+                retries += getattr(t, "_retry_count", 0)
+                if t.status == TaskStatus.PENDING:
+                    pending += 1
+                elif t.status == TaskStatus.RUNNING:
+                    running += 1
+                if t.status == TaskStatus.COMPLETED and t.started_at > 0 and t.completed_at > t.started_at:
+                    latencies.append(t.completed_at - t.started_at)
+        lat_sorted = sorted(latencies)
+        n = len(lat_sorted)
+
+        def _pctl(q: float) -> float:
+            if n == 0:
+                return 0.0
+            idx = min(n - 1, max(0, int(q * n)))
+            return lat_sorted[idx]
+
+        lines = [
+            "# HELP fusion_cluster_nodes_total 集群注册节点总数",
+            "# TYPE fusion_cluster_nodes_total gauge",
+            f"fusion_cluster_nodes_total {stats['total_nodes']}",
+            "# HELP fusion_cluster_nodes_online 在线节点数",
+            "# TYPE fusion_cluster_nodes_online gauge",
+            f"fusion_cluster_nodes_online {stats['online_nodes']}",
+            "# HELP fusion_cluster_tasks_total 任务总数",
+            "# TYPE fusion_cluster_tasks_total gauge",
+            f"fusion_cluster_tasks_total {stats['total_tasks']}",
+            "# HELP fusion_cluster_tasks_running 运行中任务数",
+            "# TYPE fusion_cluster_tasks_running gauge",
+            f"fusion_cluster_tasks_running {running}",
+            "# HELP fusion_cluster_tasks_pending 待派发任务数",
+            "# TYPE fusion_cluster_tasks_pending gauge",
+            f"fusion_cluster_tasks_pending {pending}",
+            "# HELP fusion_cluster_tasks_completed 已完成任务数",
+            "# TYPE fusion_cluster_tasks_completed gauge",
+            f"fusion_cluster_tasks_completed {stats['completed_tasks']}",
+            "# HELP fusion_cluster_tasks_failed 失败/超时任务数",
+            "# TYPE fusion_cluster_tasks_failed gauge",
+            f"fusion_cluster_tasks_failed {stats['failed_tasks']}",
+            "# HELP fusion_cluster_task_retries_total 任务重试总次数",
+            "# TYPE fusion_cluster_task_retries_total counter",
+            f"fusion_cluster_task_retries_total {retries}",
+            "# HELP fusion_cluster_kv_cache_entries KV 缓存条目数",
+            "# TYPE fusion_cluster_kv_cache_entries gauge",
+            f"fusion_cluster_kv_cache_entries {stats['kv_cache_entries']}",
+            "# HELP fusion_cluster_memory_total_gb 集群总内存 GB",
+            "# TYPE fusion_cluster_memory_total_gb gauge",
+            f"fusion_cluster_memory_total_gb {stats['total_memory_gb']:.2f}",
+            "# HELP fusion_cluster_memory_available_gb 集群可用内存 GB",
+            "# TYPE fusion_cluster_memory_available_gb gauge",
+            f"fusion_cluster_memory_available_gb {stats['available_memory_gb']:.2f}",
+            "# HELP fusion_cluster_dispatch_latency_seconds 派发延迟秒 (已完成任务)",
+            "# TYPE fusion_cluster_dispatch_latency_seconds summary",
+            f'fusion_cluster_dispatch_latency_seconds{{quantile="0.5"}} {_pctl(0.5):.4f}',
+            f'fusion_cluster_dispatch_latency_seconds{{quantile="0.9"}} {_pctl(0.9):.4f}',
+            f'fusion_cluster_dispatch_latency_seconds{{quantile="0.99"}} {_pctl(0.99):.4f}',
+            f"fusion_cluster_dispatch_latency_seconds_sum {sum(latencies):.4f}",
+            f"fusion_cluster_dispatch_latency_seconds_count {n}",
+            "",
+        ]
+        return "\n".join(lines)
+
 
 # ── HA Standby (未接线原型, 非生产 HA) ──
 # 注意: StandbyMaster 零生产实例化, LEARNING 状态同步 + term/vote 持久化未实现。

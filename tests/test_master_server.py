@@ -3,7 +3,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from fusion_multi_node.master import ClusterMaster, NodeStatus
+from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeStatus, ParallelMode, TaskStatus
 from fusion_multi_node.server.master_server import MasterServer
 
 TEST_TOKEN = "test-cluster-token"
@@ -484,3 +484,65 @@ class TestNodeApprovalAPI:
     async def test_pending_requires_auth(self, client2):
         resp = await client2.get("/api/nodes/pending")
         assert resp.status_code == 401
+
+
+class TestPrometheusMetrics:
+    """S2 /api/v1/metrics — Prometheus exposition 集群聚合指标。"""
+
+    @pytest.mark.asyncio
+    async def test_metrics_requires_auth(self, client):
+        resp = await client.get("/api/v1/metrics")
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_metrics_text_plain(self, client):
+        resp = await client.get("/api/v1/metrics", headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        assert "text/plain" in resp.headers["content-type"]
+
+    @pytest.mark.asyncio
+    async def test_metrics_exposition_shape(self, master_server, client):
+        await _register_node(client, node_id="n1")
+        # 植入一个已完成任务带派发延迟 + 一个重试计数
+        master = master_server.master
+        t = ClusterTask(
+            task_id="m1",
+            name="probe",
+            mode=ParallelMode.DATA,
+            model_name="m",
+            assigned_nodes=["n1"],
+            started_at=100.0,
+            completed_at=100.5,
+        )
+        t.status = TaskStatus.COMPLETED
+        t._retry_count = 2
+        master.tasks["m1"] = t
+
+        body = (await client.get("/api/v1/metrics", headers=AUTH_HEADERS)).text
+
+        # 关键 metric 必须出现
+        for metric in (
+            "fusion_cluster_nodes_total",
+            "fusion_cluster_nodes_online",
+            "fusion_cluster_tasks_total",
+            "fusion_cluster_tasks_completed",
+            "fusion_cluster_tasks_failed",
+            "fusion_cluster_task_retries_total",
+            "fusion_cluster_kv_cache_entries",
+            "fusion_cluster_dispatch_latency_seconds",
+            'fusion_cluster_dispatch_latency_seconds{quantile="0.9"}',
+        ):
+            assert metric in body, f"metric 缺失: {metric}"
+        # 重试计数 = 2
+        assert "fusion_cluster_task_retries_total 2" in body
+        # HELP/TYPE 注释对齐 exposition 0.0.4
+        assert "# HELP fusion_cluster_nodes_total" in body
+        assert "# TYPE fusion_cluster_nodes_total gauge" in body
+
+    @pytest.mark.asyncio
+    async def test_metrics_empty_cluster(self, client):
+        body = (await client.get("/api/v1/metrics", headers=AUTH_HEADERS)).text
+        # 空集群: 计数全 0, 延迟分位 0, count 0
+        assert "fusion_cluster_nodes_total 0" in body
+        assert "fusion_cluster_dispatch_latency_seconds_count 0" in body
+        assert 'fusion_cluster_dispatch_latency_seconds{quantile="0.5"} 0.0000' in body

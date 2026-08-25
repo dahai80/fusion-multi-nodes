@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-878%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-882%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -231,6 +231,22 @@ for i in range(master._FAULT_THRESHOLD):
     await master._dispatch_task(task_failing_on_node_1)
 assert master.is_node_banned("node_1")
 assert await master.select_nodes(ParallelMode.DATA, count=1) == []  # 全 ban 返回空
+```
+
+#### 生产监控指标端点 (S2, #71) — Prometheus exposition
+
+- **`GET /api/v1/metrics`**: 纯文本 Prometheus 0.0.4 exposition, 无外部依赖, 可被 Prometheus / Grafana agent 直接抓取。
+- 集群级聚合指标:
+  - 节点: `fusion_cluster_nodes_total` / `fusion_cluster_nodes_online`
+  - 任务: `fusion_cluster_tasks_total` / `_running` / `_pending` / `_completed` / `_failed`
+  - 重试: `fusion_cluster_task_retries_total` (counter)
+  - KV: `fusion_cluster_kv_cache_entries`
+  - 内存: `fusion_cluster_memory_total_gb` / `_available_gb`
+  - 派发延迟: `fusion_cluster_dispatch_latency_seconds` (summary, p50/p90/p99 + sum/count)
+- 复用 `get_stats` + 派发延迟 (`completed_at - started_at`) + `_retry_count`。Bearer 鉴权不豁免 — 内部抓取携带集群 token。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:11452/api/v1/metrics
 ```
 
 ### Master Election (`fusion_multi_node.master.election`) — P4 已接 start(), 默认关闭
@@ -769,10 +785,10 @@ pytest tests/test_new_features.py -v
 - [x] H4 cloud_fallback 调度路径切断 (100% 本地合规); 功能归属债待迁移 fusion-gateway/fusion-cowork
 - [x] H1 PIPELINE 无 token 输出 — 上游 fusion-mlx #630 (decode/lm_head 端点, 本仓不可修)
 - [x] S1 任务级熔断器 — 派发失败报故障 + select_nodes 跳过 ban 节点
-- [x] 878 tests, 0 ruff errors
+- [x] S2 生产监控指标端点 /api/v1/metrics (Prometheus exposition)
+- [x] 882 tests, 0 ruff errors
 
 ### Future
-- [ ] S2 生产监控指标端点 /api/v1/metrics (Prometheus)
 - [ ] S3 负载/压测基线测试 (派发吞吐 / 尾延迟 / 无丢失)
 - [ ] S4 真实模型集成测试覆盖 (DATA 并行 E2E + KV 共享 E2E)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
