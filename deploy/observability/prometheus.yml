@@ -1,0 +1,37 @@
+# Prometheus 抓取配置 — fusion-multi-node Master
+# Master 的 /api/v1/metrics 端点返回 Prometheus 文本 0.0.4 格式
+# 端点未豁免 Bearer 鉴权, 必须携带集群共享 token
+#
+# 部署步骤:
+#   1. 将 <cluster-token> 替换为 ~/.fusion/multi-node/.cluster_token 文件内容
+#      (该 token 由 Master / Agent 共享, mode 0600 自动生成)
+#   2. 将本文件挂载到 prometheus 容器 /etc/prometheus/prometheus.yml
+#   3. alerts.yml 挂载到 /etc/prometheus/alerts.yml 并在下方 rule_files 引用
+#   4. master:11452 需可被 prometheus 容器解析
+#      (compose 网络里用服务名, 物理机部署写 127.0.0.1 或实际 IP)
+
+global:
+    scrape_interval: 5s
+    evaluation_interval: 5s
+    external_labels:
+        cluster: fusion-multi-node
+
+rule_files:
+    - alerts.yml
+
+alerting:
+    alertmanagers:
+        - static_configs:
+              - targets:
+                    - alertmanager:9093
+
+scrape_configs:
+    - job_name: fusion-multinode
+      metrics_path: /api/v1/metrics
+      scheme: http
+      bearer_token: <cluster-token>
+      static_configs:
+          - targets:
+                - master:11452
+            labels:
+                service: fusion-multi-node-master

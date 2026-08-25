@@ -1,0 +1,44 @@
+# Alertmanager 基础配置 — fusion-multi-node 告警接收
+# 下方 receivers 为占位, 部署前必须填写真实接收端
+#   - webhook: 填 url (企业微信/飞书/自定义网关)
+#   - slack: 填 api_url (Slack incoming webhook)
+#   - email: 填 smarthost + from/to (需配置 smtp_smarthost)
+#
+# 告警分级:
+#   critical → 立即响应 (Master 不可达等)
+#   warning  → 工作时间响应 (节点离线/任务积压/失败率/延迟)
+
+global:
+    resolve_timeout: 5m
+
+route:
+    receiver: webhook-placeholder
+    group_by:
+        - alertname
+        - service
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+        - matchers:
+              - severity="critical"
+          receiver: webhook-placeholder
+          group_wait: 10s
+          repeat_interval: 1h
+        - matchers:
+              - severity="warning"
+          receiver: webhook-placeholder
+
+receivers:
+    - name: webhook-placeholder
+      webhook_configs:
+          - url: http://placeholder:5000/alert
+            send_resolved: true
+
+inhibit_rules:
+    - source_matchers:
+          - alertname="MultinodeMasterDown"
+      target_matchers:
+          - severity="warning"
+      equal:
+          - service

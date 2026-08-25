@@ -810,6 +810,20 @@ pytest tests/test_pipeline_e2e.py -v
 - [x] S4 真实模型集成测试覆盖 (DATA 并行 E2E 真推理 + KV 共享 E2E 真 ASGI 路由链; 附修 3 生产 bug: FusionMLXBackend `/v1/*` 漏鉴权 / KVSharingManager 跨节点 HTTP 漏鉴权 / KVWarmRequest 契约错配)
 - [x] 888 tests, 0 ruff errors
 
+### v0.8.3 ✅ — 容器规模化压测 + 调度 TOCTOU 修复 (2026-08-25)
+- [x] P0-A HA 双 Master 选举接 `start(ha_config=)` 默认开 (election HTTP vote 层复用, 无外部依赖)
+- [x] P0-B 容器化 — `Dockerfile` + `docker-compose.yml` (1 Master + N Agent, `--scale agent=N` 无上限扩容); agent 经容器 bridge IP 回连, 不占主机端口; 推理引擎裸机 `host.docker.internal:11434` 回连
+- [x] BUG#3 Agent 容器内本机 IP 探测 — 跨平台 socket UDP connect (零依赖, 取 master 回连源 IP), 替代 macOS-only `ipconfig`
+- [x] BUG#4 NodeApprovalManager 审批路径丢硬件元数据 — register 透传 metadata, approve 从 metadata 重建 NodeInfo (mem/max_tasks/cpu 不再回退默认 0/4)
+- [x] **调度 TOCTOU 竞态修复** — `select_nodes` 锁外执行 → 并发抢占首选节点满载 → 锁内补选空闲节点 (`_select_free_nodes_locked`), 不再直接 503。c8 并发 40 任务 0× 503 验证
+- [x] `FUSION_AGENT_MAX_TASKS` env — 单 agent 并发上限可调 (压测时 16)
+- [x] 容器压测客户端 `scripts/stress_live.py` — 经 master:11452 并发提交, 测吞吐/尾延迟/成功率; `--rps` 客户端速率门对齐上游限流桶
+- [x] 集群运维工具 `scripts/cluster_ops.py` — approve-all / status / unban-all
+- [x] P1-E 观测栈模板 — Grafana dashboard / Prometheus / Alertmanager (deploy/observability/)
+- [x] 阶段3 调度压测通过 — 4 节点 50 任务 success 1.0, c8 contention 40 任务 success 1.0, 0× 503
+- [x] 上游阻塞 fusion-mlx #635 — `--rate-limit 0` 不禁用模块级 60rpm 限流器, 多 agent 共享 api_key 撞 1 桶, 已提 issue (本仓不可修)
+- [x] 911 tests, 0 ruff errors
+
 ### Future
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)

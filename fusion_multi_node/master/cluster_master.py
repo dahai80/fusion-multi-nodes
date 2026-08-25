@@ -24,7 +24,12 @@ from typing import Any
 
 import httpx
 
-from fusion_multi_node.master.election import ElectionCandidate, MasterElection
+from fusion_multi_node.master.election import (
+    ElectionCandidate,
+    MasterElection,
+    VoteRequest,
+    VoteResponse,
+)
 from fusion_multi_node.master.load_metrics import (
     LoadMetrics,
     LoadRouter,
@@ -362,9 +367,14 @@ class ClusterMaster:
             logger.error(f"H3 任务持久化失败: {e}")
 
     async def _persist_tasks(self) -> None:
-        """加锁落盘 (状态写点调用)。"""
+        """加锁落盘 (状态写点调用)。HA leader 额外推送任务快照到 standby。"""
+        targets: list[tuple[str, str, int, dict[str, Any]]] = []
         async with self._tasks_lock:
             self._persist_tasks_locked()
+            # HA: leader 构建推送目标 (锁内构建 payload, 锁外异步发送)
+            targets = self._sync_tasks_to_standbys_locked()
+        if targets:
+            await self._push_sync_to_standbys(targets)
 
     async def _restore_tasks(self) -> int:
         """启动恢复: 读盘 → 重建非终态任务 (RUNNING/MIGRATED → PENDING 重派)。返回恢复数。"""
@@ -392,6 +402,7 @@ class ClusterMaster:
     async def update_heartbeat(
         self,
         node_id: str,
+        total_memory_gb: float | None = None,
         available_memory_gb: float | None = None,
         active_tasks: int | None = None,
     ) -> bool:
@@ -401,6 +412,8 @@ class ClusterMaster:
             if not node:
                 return False
             node.last_heartbeat = time.time()
+            if total_memory_gb is not None:
+                node.total_memory_gb = total_memory_gb
             if available_memory_gb is not None:
                 node.available_memory_gb = available_memory_gb
             if active_tasks is not None:
@@ -562,6 +575,38 @@ class ClusterMaster:
 
         return candidates[:count]
 
+    def _select_free_nodes_locked(
+        self,
+        mode: ParallelMode,
+        required_memory_gb: float,
+        required_capability: str,
+        exclude_ids: set[str],
+        count: int,
+    ) -> list[NodeInfo]:
+        """锁内补选空闲节点 — select_nodes 锁外执行后, 并发抢占致首选满载时调用。
+        复用 select_nodes 的过滤/排序逻辑, 但直接读 self.nodes (已持 _nodes_lock)。
+        仅返回 active_tasks < max_tasks 的在线未 ban 节点。
+        """
+        if count <= 0:
+            return []
+        candidates = [
+            n
+            for n in self.nodes.values()
+            if n.status == NodeStatus.ONLINE
+            and n.node_id not in exclude_ids
+            and n.active_tasks < n.max_tasks
+            and not self._is_node_banned_locked(n.node_id)
+        ]
+        if required_capability:
+            candidates = [n for n in candidates if required_capability in n.tags]
+        if required_memory_gb > 0:
+            candidates = [n for n in candidates if n.available_memory_gb >= required_memory_gb]
+        if mode == ParallelMode.PIPELINE:
+            candidates.sort(key=lambda n: n.score, reverse=True)
+        else:
+            candidates.sort(key=lambda n: (n.active_tasks, -n.score))
+        return candidates[:count]
+
     async def complete_task(self, task_id: str, error: str = "") -> None:
         """完成任务。"""
         async with self._nodes_lock:
@@ -583,7 +628,12 @@ class ClusterMaster:
 
         M4-02: 轻量级任务/≤0.5B 模型强制本地执行。
         M4-03: 大模型(≥13B) 使用 VRAM 优先策略。
+        HA: standby (选举配置且非 leader) 拒绝派发, 仅 leader 调度。
         """
+        # HA standby 守卫: 选举已配置且本节点非 leader → 拒绝派发
+        if self._election is not None and not self._is_leader:
+            logger.warning(f"standby 模式拒绝派发任务: {task.task_id} (非 leader)")
+            return False
         async with self._tasks_lock:
             existing = self.tasks.get(task.task_id)
             if existing and existing.status == TaskStatus.RUNNING:
@@ -662,8 +712,25 @@ class ClusterMaster:
                     if node and node.status == NodeStatus.ONLINE and node.active_tasks < node.max_tasks:
                         confirmed.append(node)
                 need = len(task.model_shards) or 1
+                # TOCTOU 补选: 首选节点被并发抢占满载 → 锁内补选其它空闲节点, 不直接 503。
                 if len(confirmed) < need:
-                    logger.error(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)}")
+                    shortfall = need - len(confirmed)
+                    excluded = {n.node_id for n in confirmed}
+                    extra = self._select_free_nodes_locked(
+                        mode=task.mode,
+                        required_memory_gb=required_mem,
+                        required_capability=task.required_capability,
+                        exclude_ids=excluded,
+                        count=shortfall,
+                    )
+                    if extra:
+                        logger.info(
+                            f"并发抢占补选: 原选 {len(confirmed)}/{need}, "
+                            f"补选 {len(extra)} 节点 {[x.hostname for x in extra]}"
+                        )
+                        confirmed.extend(extra)
+                if len(confirmed) < need:
+                    logger.warning(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)}")
                     return False
                 task.assigned_nodes = [n.node_id for n in confirmed]
                 task.status = TaskStatus.RUNNING
@@ -1194,8 +1261,8 @@ class ClusterMaster:
 
     # ── M3-03 选举配置 ──
     # P4: setup_election 已接 start(ha_config=...) — enabled=True 时启动选举循环。
-    # 默认 enabled=False (单 Master 向后兼容)。StandbyMaster/LEARNING 同步仍为原型,
-    # 不构成完整 HA 承诺; 多 Master 部署需自行确保持久化 term/vote + 状态同步。
+    # HA = leader + standby, 投票走 HTTP POST /api/ha/vote, 任务状态走 /api/ha/sync-tasks。
+    # 默认 enabled=False (单 Master 向后兼容)。
 
     def setup_election(
         self,
@@ -1203,13 +1270,11 @@ class ClusterMaster:
         priority: int = 0,
         known_nodes: list[dict[str, Any]] | None = None,
     ) -> None:
-        logger.warning("M3-03 Master 选举为未接线原型, 现网单 Master 无 HA, 仅供测试调用")
+        logger.info(f"M3-03 Master 选举配置: node_id={node_id} priority={priority}")
         self._election = MasterElection(
             node_id=node_id,
             priority=priority,
-            hostname="",
-            ip_address=self.host,
-            port=self.port,
+            send_vote_request=self._send_vote_request_cb,
         )
         if known_nodes:
             for node in known_nodes:
@@ -1229,6 +1294,119 @@ class ClusterMaster:
         self._election.on_demoted = self._on_demoted_from_leader
         logger.info(f"M3-03 Master 选举已配置: node_id={node_id} priority={priority}")
 
+    async def _send_vote_request_cb(self, vote_req: VoteRequest, peer_node_id: str) -> VoteResponse:
+        """HTTP 拉票回调 — POST /api/ha/vote 到对端 master。best-effort, 失败抛异常由调用方吞。"""
+        if not self._election:
+            return VoteResponse(term=0, vote_granted=False, voter_id=peer_node_id)
+        cand = self._election.get_candidate(peer_node_id)
+        if not cand or not cand.ip_address or not cand.port:
+            logger.debug(f"拉票跳过无地址对端: {peer_node_id}")
+            return VoteResponse(term=0, vote_granted=False, voter_id=peer_node_id)
+        if not is_safe_peer_host(cand.ip_address):
+            logger.warning(f"拉票拒绝不安全对端主机: {peer_node_id} ({cand.ip_address!r})")
+            return VoteResponse(term=0, vote_granted=False, voter_id=peer_node_id)
+        url = build_safe_url("http", cand.ip_address, cand.port, "/api/ha/vote")
+        token = self._get_dispatch_token()
+        payload = {
+            "term": vote_req.term,
+            "candidate_id": vote_req.candidate_id,
+            "candidate_priority": vote_req.candidate_priority,
+            "last_log_index": vote_req.last_log_index,
+            "last_log_term": vote_req.last_log_term,
+        }
+        try:
+            client = await self._get_dispatch_http()
+            resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0)
+            if resp.status_code != 200:
+                logger.debug(f"拉票 HTTP {resp.status_code} from {peer_node_id}")
+                return VoteResponse(term=0, vote_granted=False, voter_id=peer_node_id)
+            data = resp.json()
+            return VoteResponse(
+                term=data.get("term", 0),
+                vote_granted=bool(data.get("vote_granted", False)),
+                voter_id=data.get("voter_id", peer_node_id),
+            )
+        except Exception as e:
+            logger.debug(f"拉票异常 {peer_node_id}: {e}")
+            return VoteResponse(term=0, vote_granted=False, voter_id=peer_node_id)
+
+    async def handle_vote_request(self, req: VoteRequest) -> VoteResponse:
+        """接收对端 master 拉票 — 透传到选举管理器。无选举配置时拒绝 (单 Master 模式)。"""
+        if not self._election:
+            return VoteResponse(term=0, vote_granted=False, voter_id="")
+        return await self._election.handle_vote_request(req)
+
+    async def receive_synced_tasks(self, tasks: list[dict[str, Any]]) -> int:
+        """Standby 接收 leader 推送的任务状态, 合并到 self.tasks 并持久化。幂等。"""
+        merged = 0
+        async with self._tasks_lock:
+            for d in tasks:
+                try:
+                    task = self._task_from_dict(d)
+                    existing = self.tasks.get(task.task_id)
+                    # 已有终态任务不覆盖 (leader 旧快照可能落后)
+                    if existing and existing.status in (
+                        TaskStatus.COMPLETED,
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
+                        TaskStatus.TIMEOUT,
+                    ):
+                        continue
+                    self.tasks[task.task_id] = task
+                    merged += 1
+                except Exception as e:
+                    logger.warning(f"HA 同步任务跳过 {d.get('task_id', '?')}: {e}")
+            if merged:
+                self._persist_tasks_locked()
+        if merged:
+            logger.info(f"HA 同步接收 {merged} 任务 (standby 合并落盘)")
+        return merged
+
+    def _sync_tasks_to_standbys_locked(self) -> list[tuple[str, str, int, dict[str, Any]]]:
+        """已持 _tasks_lock 下构建待推送 payload + 对端列表。返回 [(node_id, ip, port, payload), ...]。
+
+        仅 leader 调用。终态任务不推送 (与 _persist_tasks_locked 一致)。
+        """
+        if not self._election or not self._is_leader:
+            return []
+        _TERMINAL = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMEOUT}
+        pending = [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
+        payload = {"tasks": pending, "saved_at": time.time()}
+        targets: list[tuple[str, str, int, dict[str, Any]]] = []
+        for peer_id in self._election._known_nodes:
+            if peer_id == self._election.node_id:
+                continue
+            cand = self._election.get_candidate(peer_id)
+            if not cand or not cand.ip_address or not cand.port:
+                continue
+            if not is_safe_peer_host(cand.ip_address):
+                continue
+            targets.append((peer_id, cand.ip_address, cand.port, payload))
+        return targets
+
+    async def _push_sync_to_standbys(self, targets: list[tuple[str, str, int, dict[str, Any]]]) -> None:
+        """锁外异步推送任务快照到各 standby (best-effort, 不阻塞派发)。"""
+        if not targets:
+            return
+        token = self._get_dispatch_token()
+        try:
+            client = await self._get_dispatch_http()
+        except Exception as e:
+            logger.warning(f"HA 同步获取 HTTP 客户端失败: {e}")
+            return
+        for peer_id, ip, port, payload in targets:
+            try:
+                url = build_safe_url("http", ip, port, "/api/ha/sync-tasks")
+                resp = await client.post(
+                    url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0
+                )
+                if resp.status_code != 200:
+                    logger.debug(f"HA 同步推送 {peer_id} HTTP {resp.status_code}")
+                else:
+                    logger.debug(f"HA 同步推送 {peer_id} ok ({len(payload['tasks'])} 任务)")
+            except Exception as e:
+                logger.debug(f"HA 同步推送 {peer_id} 异常: {e}")
+
     def _on_elected_leader(self) -> None:
         self._is_leader = True
         logger.info("本节点被选举为 Leader")
@@ -1247,9 +1425,10 @@ class ClusterMaster:
     ) -> None:
         """启动集群主节点服务。
 
-        ha_config (P4 HA): {"enabled": bool, "node_id": str, "priority": int, "peers": [str]}
-        enabled=True 时接 setup_election 启动选举循环; 否则单 Master 无 HA (默认)。
-        选举投票传输层 (集群内拉票 HTTP) 尚未实现, 现网 HA 为就绪骨架。
+        ha_config (P4 HA): {"enabled": bool, "node_id": str, "priority": int,
+                            "peers": [str | {"node_id","ip","port","priority"}]}
+        enabled=True 时接 setup_election 启动选举循环 + HTTP 拉票 + 任务同步;
+        否则单 Master 无 HA (默认)。peers 裸字符串向后兼容 (仅 node_id, 不可达)。
         """
         self._running = True
         logger.info(f"Cluster Master 启动: {self.host}:{self.port}")
@@ -1264,16 +1443,31 @@ class ClusterMaster:
 
         # P4 HA 选举接线 — config 门控, 单 Master 默认不启用
         if ha_config and ha_config.get("enabled") and ha_config.get("node_id") and ha_config.get("peers"):
+            peer_specs: list[dict[str, Any]] = []
+            for peer in ha_config["peers"]:
+                if peer == ha_config["node_id"]:
+                    continue
+                if isinstance(peer, dict):
+                    peer_specs.append(
+                        {
+                            "node_id": peer.get("node_id", ""),
+                            "priority": peer.get("priority", 0),
+                            "hostname": peer.get("hostname", ""),
+                            "ip_address": peer.get("ip_address", ""),
+                            "port": peer.get("port", 0),
+                        }
+                    )
+                else:
+                    # 裸字符串 peer: 仅 node_id, 无地址 (向后兼容, 不可达)
+                    peer_specs.append({"node_id": str(peer), "priority": 0})
             self.setup_election(
                 node_id=ha_config["node_id"],
                 priority=ha_config.get("priority", 0),
-                known_nodes=[
-                    {"node_id": pid, "priority": 0} for pid in ha_config["peers"] if pid != ha_config["node_id"]
-                ],
+                known_nodes=peer_specs,
             )
             if self._election:
                 await self._election.start()
-                logger.warning("P4 HA 选举已启动 — 注意: 投票传输层未实现, 现网为单 Master")
+                logger.info("P4 HA 选举已启动 (HTTP 拉票 + 任务同步已接线)")
         else:
             logger.info("P4 HA 未启用 — 单 Master 模式 (默认)")
 

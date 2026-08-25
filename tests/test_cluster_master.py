@@ -191,6 +191,38 @@ class TestClusterMaster:
         assert ok is False
 
     @pytest.mark.asyncio
+    async def test_assign_task_toctou_backfill(self):
+        """select_nodes 锁外执行 → 并发抢占首选节点满载 → 锁内补选其它空闲节点。
+        模拟: 首选 n1 被并发抢满 (active_tasks=max_tasks), n2/n3 仍空闲,
+        assign_task 不应 503, 而补选到空闲节点。
+        """
+        master = ClusterMaster()
+        # n1 满载 (模拟并发抢占后), n2/n3 空闲且评分相近
+        for nid, active in (("n1", 4), ("n2", 0), ("n3", 0)):
+            info = NodeInfo(
+                node_id=nid,
+                hostname=f"mac{nid}",
+                ip_address=f"10.0.0.{nid[-1]}",
+                port=11458,
+                status=NodeStatus.ONLINE,
+                available_memory_gb=50.0,
+                total_memory_gb=64.0,
+                active_tasks=active,
+                max_tasks=4,
+                last_heartbeat=time.time(),
+            )
+            await master.register_node(info)
+        # PIPELINE 单分片 → select_nodes 按 score 排序选 n1 (score 最高, 因 active 不参与 PIPELINE 排序)
+        # 锁内 reconfirm 发现 n1 满 → 补选 n2 或 n3
+        task = ClusterTask(task_id="t-toctou", name="infer", mode=ParallelMode.PIPELINE, model_name="test")
+        ok = await master.assign_task(task)
+        assert ok is True
+        # 派发到的不应是满载的 n1
+        assert "n1" not in task.assigned_nodes
+        assert len(task.assigned_nodes) == 1
+        assert task.assigned_nodes[0] in ("n2", "n3")
+
+    @pytest.mark.asyncio
     async def test_complete_task(self):
         master = ClusterMaster()
         info = NodeInfo(

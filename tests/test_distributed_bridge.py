@@ -221,7 +221,10 @@ class TestDistributedMLXBridge:
         with patch.object(httpx, "AsyncClient", return_value=mock_client):
             result = await bridge.pipeline_inference("test", "hello", ["n1", "n2"])
             assert result["nodes"] == 2
-            assert result["output"] == "step_2"
+            # H1: forward 链 2 步 (step_1/step_2) + decode 第 3 步 (step_3)。
+            # mock 全 200 → decode 成功, decoded=True, output 取 decode 输出 step_3。
+            assert result["decoded"] is True
+            assert result["output"] == "step_3"
 
     @pytest.mark.asyncio
     async def test_data_parallel_inference_success_mock(self):

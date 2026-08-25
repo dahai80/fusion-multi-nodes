@@ -221,11 +221,31 @@ class DistributedMLXBridge:
                 self._active_pipelines[pipeline_id]["status"] = "failed"
                 return {"error": "流水线步骤执行失败", "pipeline_id": pipeline_id}
 
+        # H1 PIPELINE 出 token — forward 链末段 hidden_states 经 lm_head 解码。
+        # 上游 /distributed/decode (#630) 未落地 → 404, fallback 返隐藏状态 + 标记未解码。
+        final_shard_id = len(node_chain) - 1
+        decoded_output = current_input
+        decoded = False
+        try:
+            safe_final = sanitize_node_url_part(node_chain[-1])
+            dec_resp = await client.post(
+                f"http://{safe_final}:{fusion_mlx_port}/distributed/decode",
+                json={"shard_id": final_shard_id, "hidden_states": current_input, "max_tokens": 1},
+            )
+            if dec_resp.status_code == 200:
+                decoded_output = dec_resp.json().get("output", current_input)
+                decoded = True
+            else:
+                logger.warning(f"H1 decode 端点未就绪 (HTTP {dec_resp.status_code}), 返隐藏状态 — 上游 #630 待落地")
+        except Exception as e:
+            logger.warning(f"H1 decode 调用失败: {e}, 返隐藏状态 — 上游 #630 待落地")
+
         self._active_pipelines[pipeline_id]["status"] = "completed"
         self._cleanup_completed_pipelines()
         return {
             "pipeline_id": pipeline_id,
-            "output": current_input,
+            "output": decoded_output,
+            "decoded": decoded,
             "nodes": len(node_chain),
         }
 

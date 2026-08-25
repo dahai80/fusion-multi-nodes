@@ -39,3 +39,8 @@ node-audit.md
 ARCHITECTURE.md
 Fusion-Multi-Node.md
 audit_multi_node_report.md
+
+# 压测/容器 — 含真实集群密钥, 不入库
+.env.stress
+logs/
+
