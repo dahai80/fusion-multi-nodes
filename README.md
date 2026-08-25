@@ -676,6 +676,23 @@ pytest tests/test_pipeline_e2e.py -v
 > 默认模型 `mlx-community-Llama-3.2-1B-Instruct-4bit`, api_key 走配置 `mlx.fusion_mlx_api_key`。
 > fusion-mlx 停时 E2E 自动跳过 (skip-gate), 不阻塞 CI 全绿。
 
+### 跨机真网络 E2E (#76)
+
+真 bind 端口 + 真 HTTP 跨进程 (非 ASGITransport) — 进程内起真 uvicorn 真端口, 跨 TCP socket 通信。
+
+```bash
+# 真端口跨进程: 注册 / 派发 / 掉线重连 (免真模型, FakeBackend)
+pytest tests/test_real_network_e2e.py -v
+
+# 容器跨机: docker-compose 1 Master + 2 Agent (skip-gate docker 可用)
+pytest tests/test_real_network_e2e.py::TestContainerE2E -v
+```
+
+- 真注册: agent 经真 HTTP `/api/nodes/register` 到 master (真 socket)
+- 真派发: master → agent `/api/execute` 跨 HTTP (FakeBackend 完成非真推理)
+- 掉线重连: 停 agent → master 心跳超时标 OFFLINE → 重启同节点 → 重连恢复 ONLINE + 可派
+- 容器 E2E: `docker compose up --scale agent=2` 跨容器注册 + 派发; docker 不可用时 skip
+
 ---
 
 ## 📊 Key Constants
@@ -886,6 +903,7 @@ pytest tests/test_pipeline_e2e.py -v
 - **Master/Worker isolation** — Role-based permission, API path access control
 - **mTLS node auth** — Private CA + per-node leaf cert, env-gated mutual TLS (#80)
 - **Multi-tenant quota + priority queue** — Per-tenant concurrent cap, over-quota enqueue, priority-ordered dispatch (#81)
+- **Real-network E2E** — True port bind + real HTTP cross-process; node drop/reconnect; docker-compose cross-container (#76)
 - **Worker sandbox** — CPU/memory/disk limits, path & network whitelisting
 - **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards)
 - **AES-GCM encryption** — FMP protocol encrypted communication
