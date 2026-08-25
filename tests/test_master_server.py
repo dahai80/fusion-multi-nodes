@@ -106,6 +106,36 @@ class TestMasterServerNodeManagement:
         assert master_server.master.nodes["n1"].status == NodeStatus.ONLINE
 
     @pytest.mark.asyncio
+    async def test_auto_approve_by_env_pattern(self, monkeypatch):
+        # FUSION_AUTO_APPROVE_PATTERNS 匹配 ip 子串 → 免审批自动加入 (容器/可信 LAN)。
+        monkeypatch.setenv("FUSION_AUTO_APPROVE_PATTERNS", "192.168.,10.")
+        master = ClusterMaster(heartbeat_timeout=60.0)
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        assert server._approval_manager is not None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await _register_node(
+                c, node_id="auto-1", ip_address="192.168.97.5"
+            )
+        assert resp.status_code == 200, f"自动审批应放行: {resp.status_code} {resp.text}"
+        assert "auto-1" in master.nodes
+
+    @pytest.mark.asyncio
+    async def test_no_auto_approve_without_env(self, monkeypatch):
+        # 未配 env → 走审批门 (非自动通过), 注册返回 202/待审批。
+        monkeypatch.delenv("FUSION_AUTO_APPROVE_PATTERNS", raising=False)
+        master = ClusterMaster(heartbeat_timeout=60.0)
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        assert server._approval_manager is not None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await _register_node(
+                c, node_id="pend-1", ip_address="192.168.97.6"
+            )
+        assert resp.status_code == 403, f"未配 env 应走审批门拒绝: {resp.status_code} {resp.text}"
+        assert "pend-1" not in master.nodes
+
+    @pytest.mark.asyncio
     async def test_list_nodes(self, client, master_server):
         await _register_node(client, node_id="n1")
         await _register_node(client, node_id="n2", hostname="mac2", ip_address="10.0.1.2")

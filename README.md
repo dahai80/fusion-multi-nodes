@@ -693,6 +693,36 @@ pytest tests/test_real_network_e2e.py::TestContainerE2E -v
 - 掉线重连: 停 agent → master 心跳超时标 OFFLINE → 重启同节点 → 重连恢复 ONLINE + 可派
 - 容器 E2E: `docker compose up --scale agent=2` 跨容器注册 + 派发; docker 不可用时 skip
 
+### 跨机 KV 共享规模化压测 (#79)
+
+N 真端口 agent 跨 HTTP 验 KV 缓存大规模迁移 — warm_cache 规模 + transfer 迁移 + 延迟 + 0 丢失 (合成 KVCacheEntry, 免真模型)。
+
+```bash
+# 4 压测用例: warm 规模 / warm 延迟 / warm→transfer 迁移 / 显存累计
+pytest tests/test_kv_stress.py -v
+```
+
+- warm 规模: M prompt × N node 全成功 (0 丢失)
+- warm 延迟: 单次 warm p99 < 1.0s
+- transfer 迁移: warm 到 node-0 → transfer 拉取到 node-1, 跨节点 0 丢失 (推模型: 源节点回传序列化 entry → 目标 store_local)
+- 显存累计: local_entries / total_size_bytes 代理显存占用
+
+> KV transfer 推模型修复 (v0.8.4): 原 `/api/kv/transfer` 路由回调 `transfer_from_remote` 致递归 + source_node 含冒号过 sanitize 失败 — 改推模型 (源节点查本地回传 entry, 目标反序列化 + store_local), 补 `_serialize_entry` + `lookup_local_by_id`。
+
+### 容器节点自动审批 (v0.8.4)
+
+`docker-compose` master 默认配 `FUSION_AUTO_APPROVE_PATTERNS` (可信网段子串匹配) — 容器/LAN 节点免手动 `cluster approve` 自动加入。
+
+```bash
+# compose 默认: 192.168. / 10. / 172. 网段自动审批
+docker compose up -d --scale agent=2
+
+# 裸机自定义可信网段 (逗号分隔, 匹配 hostname/ip 子串)
+FUSION_AUTO_APPROVE_PATTERNS="10.0.1." ./start.sh start
+```
+
+> 生产仅对可信网段开放自动审批; 未配 env 则走手动审批门 (`fusion-multi-node cluster approve <node_id>`)。
+
 ---
 
 ## 📊 Key Constants
@@ -904,6 +934,8 @@ pytest tests/test_real_network_e2e.py::TestContainerE2E -v
 - **mTLS node auth** — Private CA + per-node leaf cert, env-gated mutual TLS (#80)
 - **Multi-tenant quota + priority queue** — Per-tenant concurrent cap, over-quota enqueue, priority-ordered dispatch (#81)
 - **Real-network E2E** — True port bind + real HTTP cross-process; node drop/reconnect; docker-compose cross-container (#76)
+- **KV cache stress** — N-node cross-HTTP KV warm/transfer at scale, 0-loss migration, p99 latency baseline (#79)
+- **Auto node approval** — Trusted-subnet auto-join via `FUSION_AUTO_APPROVE_PATTERNS` env (container/LAN免审批) (v0.8.4)
 - **Worker sandbox** — CPU/memory/disk limits, path & network whitelisting
 - **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards)
 - **AES-GCM encryption** — FMP protocol encrypted communication

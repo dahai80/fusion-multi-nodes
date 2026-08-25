@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from typing import Any
@@ -166,7 +167,13 @@ class MasterServer:
         try:
             from fusion_multi_node.security.node_approval import NodeApprovalManager
 
-            self._approval_manager = NodeApprovalManager()
+            # FUSION_AUTO_APPROVE_PATTERNS: 逗号分隔的自动审批模式 (匹配 hostname/ip 子串)。
+            # 用于可信 LAN / 容器集群免审批自动加入 (生产: 仅对可信网段开放)。
+            raw_patterns = os.environ.get("FUSION_AUTO_APPROVE_PATTERNS", "").strip()
+            auto_patterns = [p.strip() for p in raw_patterns.split(",") if p.strip()]
+            self._approval_manager = NodeApprovalManager(auto_approve_patterns=auto_patterns)
+            if auto_patterns:
+                logger.info(f"节点自动审批模式已启用: {auto_patterns}")
         except Exception:
             self._approval_manager = None
         # E1: ClusterSyncManager 一次性构造于 __init__, 接入 start()/stop() 生命周期。

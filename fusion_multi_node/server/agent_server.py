@@ -320,17 +320,12 @@ class AgentServer:
 
         @app.post("/api/kv/transfer")
         async def kv_transfer(req: KVTransferRequest):
-            # E2: source_node 用本节点真实可寻址地址, 非 "self"。
-            # transfer_from_remote 向 source 回连拉缓存; "self" 解析为 0.0.0.0/失败。
-            source_addr = f"{self._host}:{self.agent.config.agent_port}"
-            ok = await self.kv_manager.transfer_from_remote(
-                req.cache_id,
-                source_node=source_addr,
-                target_node=req.target_node,
-            )
-            if not ok:
-                raise HTTPException(status_code=500, detail="KV 缓存传输失败")
-            return {"status": "ok"}
+            # 推模型: 源节点收到 transfer 请求 → 查本地缓存 → 回传序列化 entry。
+            # 不再回调 transfer_from_remote (避免递归)。target_node 仅记录用。
+            entry = self.kv_manager.lookup_local_by_id(req.cache_id)
+            if entry is None:
+                raise HTTPException(status_code=404, detail=f"KV 缓存未找到: {req.cache_id}")
+            return {"status": "ok", "entry": self.kv_manager._serialize_entry(entry)}
 
         @app.post("/api/kv/warm")
         async def kv_warm(req: KVWarmRequest):
