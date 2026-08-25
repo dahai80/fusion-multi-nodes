@@ -28,7 +28,11 @@ master = ClusterMaster(host="127.0.0.1", port=11452)
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `register_node` | `(node: NodeInfo) -> NodeInfo` | Register node, sets status=ONLINE, updates heartbeat |
+| `register_node` | `(node: NodeInfo) -> bool` | Register/update node (F-A12 PATCH 幂等). Returns `True` ok, `False` if banned |
+| `unregister_node` | `(node_id: str, reason: str = "") -> None` | Remove node; `reason="banned"` writes blacklist (`_BAN_DURATION_S`) |
+| `report_fault` | `(node_id: str, fault_type: str = "", message: str = "") -> bool` | Mark node FAULT + count; threshold in window → auto-ban (F-A13) |
+| `is_node_banned` | `(node_id: str) -> bool` | Whether node is currently in ban window |
+| `unban_node` | `(node_id: str) -> bool` | Manually lift ban; returns whether a ban was removed |
 | `assign_task` | `(task: ClusterTask) -> ClusterTask` | Assign task to best-scoring node |
 | `complete_task` | `(task_id: str, error: str = None) -> ClusterTask` | Complete or fail a task |
 | `cancel_task` | `(task_id: str) -> bool` | Cancel a pending/running task |
@@ -118,7 +122,7 @@ agent = NodeAgent(config)
 | `stop` | `() -> None` | Stop agent |
 | `collect_hardware_info` | `() -> dict` | Return CPU/memory/GPU info via psutil |
 | `execute_task` | `(task: dict) -> dict` | Execute task via fusion-mlx httpx API |
-| `report_fault` | `(error: str) -> None` | Report fault to master |
+| `report_fault` | `(fault_type: str = "", message: str = "") -> bool` | Report fault to master |
 
 ### AgentConfig
 
