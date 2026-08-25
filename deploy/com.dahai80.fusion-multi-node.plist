@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dahai80.fusion-multi-node</string>
+
+    <!-- H2 崩溃自愈: launchd KeepAlive 进程守护 + H3 任务持久化恢复 -->
+    <!-- 崩溃 → launchd 重启 → start() _restore_tasks 恢复 RUNNING→PENDING 重派, 不丢任务 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- 崩溃后节流重启: 避免反复崩溃打满 CPU (10s 间隔) -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- 替换占位符 (start.sh install-launchd 渲染):
+         @@VENV_BIN@@  = <repo>/.venv/bin (无 venv 则 /usr/bin)
+         @@FUSION_MN@@ = <repo>/.venv/bin/fusion-multi-node (无 venv 则 fusion-multi-node)
+         @@LOGDIR@@    = <repo>/logs
+         @@HOST@@      = 127.0.0.1
+         @@PORT@@      = 11452
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@@FUSION_MN@@</string>
+        <string>node</string>
+        <string>start</string>
+        <string>--role</string>
+        <string>master</string>
+        <string>--host</string>
+        <string>@@HOST@@</string>
+        <string>--port</string>
+        <string>@@PORT@@</string>
+        <string>--no-mdns</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>@@VENV_BIN@@:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>@@REPO@@</string>
+
+    <key>StandardOutPath</key>
+    <string>@@LOGDIR@@/stdout_master.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>@@LOGDIR@@/stderr_master.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

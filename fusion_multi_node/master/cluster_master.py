@@ -11,21 +11,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from fusion_multi_node.master.cloud_fallback import (
-    CloudConfig,
-    CloudFallbackClient,
-    CloudProvider,
-)
 from fusion_multi_node.master.election import ElectionCandidate, MasterElection
 from fusion_multi_node.master.load_metrics import (
     LoadMetrics,
@@ -219,8 +217,6 @@ class ClusterMaster:
         # M3-03 选举
         self._election: MasterElection | None = None
         self._is_leader = True
-        # M4-05 云端回退
-        self._cloud_client: CloudFallbackClient | None = None
         # P1 派发: Master→Agent /api/execute 投递。惰性复用 httpx + 集群 token
         # (与 master_server cancel 通知同 token, agent BearerAuthMiddleware 校验)。
         self._dispatch_token: str | None = None
@@ -230,6 +226,11 @@ class ClusterMaster:
         # report_fault 窗口内达阈值自动 ban; register_node 拒绝 ban 内节点。
         self._banned_nodes: dict[str, float] = {}
         self._fault_counts: dict[str, list[float]] = defaultdict(list)
+        # H3 任务持久化: 非终态任务落盘 + 启动恢复, Master 崩溃不丢 RUNNING/PENDING。
+        # 原子写 (tmp + os.replace), 与 config.py 同范式。终态任务 (COMPLETED/FAILED/
+        # CANCELLED/TIMEOUT) 不持久化 — 一次性结果, 恢复时按 RUNNING 重新派发。
+        self._task_store_path = Path.home() / ".fusion" / "multi-node" / "tasks.json"
+        self._persist_task: asyncio.Task | None = None
 
     # ── 节点管理 ──
 
@@ -299,6 +300,94 @@ class ClusterMaster:
         if removed:
             logger.info(f"节点手动解封: {node_id}")
         return removed
+
+    # ── H3 任务持久化 + 启动恢复 ──
+
+    _PERSIST_SKIP_FIELDS = {"spec"}  # spec 由 model_* 字段重建, 不直接序列化
+
+    def _task_to_dict(self, task: ClusterTask) -> dict[str, Any]:
+        d = asdict(task)
+        for f in self._PERSIST_SKIP_FIELDS:
+            d.pop(f, None)
+        d["mode"] = task.mode.value
+        d["status"] = task.status.value
+        return d
+
+    def _task_from_dict(self, d: dict[str, Any]) -> ClusterTask:
+        # RUNNING 恢复为 PENDING 重派 (派发中的任务崩溃后须重新调度)
+        st = d.get("status", "pending")
+        if st in ("running", "migrated"):
+            st = "pending"
+        return ClusterTask(
+            task_id=d["task_id"],
+            name=d.get("name", ""),
+            mode=ParallelMode(d.get("mode", "pipeline")),
+            model_name=d.get("model_name", ""),
+            model_id=d.get("model_id"),
+            model_shards=d.get("model_shards", []),
+            assigned_nodes=d.get("assigned_nodes", []),
+            status=TaskStatus(st),
+            created_at=d.get("created_at", 0.0),
+            started_at=d.get("started_at", 0.0),
+            timeout_seconds=d.get("timeout_seconds", 300.0),
+            error=d.get("error", ""),
+            user=d.get("user", ""),
+            required_capability=d.get("required_capability", ""),
+            preferred_node_id=d.get("preferred_node_id", ""),
+            priority=d.get("priority", 0),
+            degraded_from_model=d.get("degraded_from_model", ""),
+            degradation_count=d.get("degradation_count", 0),
+            max_degradations=d.get("max_degradations", 2),
+            sub_tasks=d.get("sub_tasks", []),
+            cancel_reason=d.get("cancel_reason", ""),
+            task_type=d.get("task_type", "inference"),
+            params=d.get("params", {}),
+            result=d.get("result", {}),
+        )
+
+    def _persist_tasks_locked(self) -> None:
+        """已持 _tasks_lock 下落盘非终态任务。终态 (COMPLETED/FAILED/CANCELLED/TIMEOUT) 不存。"""
+        _TERMINAL = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMEOUT}
+        try:
+            pending = [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
+            self._task_store_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._task_store_path.with_suffix(self._task_store_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump({"tasks": pending, "saved_at": time.time()}, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._task_store_path)
+            logger.debug(f"H3 任务持久化: {len(pending)} 非终态任务落盘")
+        except Exception as e:
+            logger.error(f"H3 任务持久化失败: {e}")
+
+    async def _persist_tasks(self) -> None:
+        """加锁落盘 (状态写点调用)。"""
+        async with self._tasks_lock:
+            self._persist_tasks_locked()
+
+    async def _restore_tasks(self) -> int:
+        """启动恢复: 读盘 → 重建非终态任务 (RUNNING/MIGRATED → PENDING 重派)。返回恢复数。"""
+        if not self._task_store_path.exists():
+            return 0
+        try:
+            data = json.loads(self._task_store_path.read_text())
+        except Exception as e:
+            logger.error(f"H3 任务恢复读盘失败: {e}")
+            return 0
+        tasks = data.get("tasks", [])
+        restored = 0
+        async with self._tasks_lock:
+            for d in tasks:
+                try:
+                    task = self._task_from_dict(d)
+                    self.tasks[task.task_id] = task
+                    restored += 1
+                except Exception as e:
+                    logger.warning(f"H3 任务恢复跳过 {d.get('task_id', '?')}: {e}")
+        if restored:
+            logger.warning(f"H3 启动恢复 {restored} 任务 (崩溃前未完成, 已置 PENDING 待重派)")
+        return restored
 
     async def update_heartbeat(
         self,
@@ -433,6 +522,9 @@ class ClusterMaster:
         """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。"""
         candidates = await self.get_online_nodes()
 
+        # S1 熔断: 跳过 ban 期内节点 (派发失败累积达阈值自动 ban, 不再被选中)
+        candidates = [n for n in candidates if not self.is_node_banned(n.node_id)]
+
         # M3-05 capability 过滤
         if required_capability:
             candidates = [n for n in candidates if required_capability in n.tags]
@@ -554,8 +646,6 @@ class ClusterMaster:
 
         if len(nodes) < (len(task.model_shards) or 1):
             logger.error(f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)}")
-            if self._cloud_client:
-                logger.info(f"M4-05 尝试云端回退: {task.name}")
             return False
 
         async with self._nodes_lock:
@@ -579,6 +669,7 @@ class ClusterMaster:
                 task.status = TaskStatus.RUNNING
                 task.started_at = time.time()
                 self.tasks[task.task_id] = task
+                self._persist_tasks_locked()  # H3 即时落盘
 
                 for node in confirmed:
                     node.active_tasks += 1
@@ -590,13 +681,6 @@ class ClusterMaster:
     def _enqueue_retry(self, task: ClusterTask) -> None:
         retry_count = getattr(task, "_retry_count", 0)
         if retry_count >= self._max_retry_attempts:
-            if self._cloud_client and task.model_name:
-                task._cloud_fallback_pending = True
-                task.status = TaskStatus.PENDING
-                task.assigned_nodes = []
-                self._pending_retry.append(task)
-                logger.info(f"任务重试超限，转云端回退: {task.name} ({task.task_id})")
-                return
             task.status = TaskStatus.FAILED
             task.error = f"重试次数超限 ({self._max_retry_attempts})"
             logger.error(f"任务重试放弃: {task.name} ({task.task_id})")
@@ -761,43 +845,49 @@ class ClusterMaster:
         node = nodes_snap.get(node_id)
         if not node:
             raise RuntimeError(f"节点 {node_id} 不存在或已离线")
-        # SSRF 守卫: agent ip 走 is_safe_peer_host (与 master_server/agent 一致)
-        if not is_safe_peer_host(node.ip_address):
-            raise RuntimeError(f"节点 {node_id} ip {node.ip_address} 非安全对端, 拒绝派发")
-        params = dict(task.params)
-        if pipeline_step_params is not None:
-            # P3 真实张量 PIPELINE — 走 /distributed/* 层前向链
-            task_type = "pipeline_step"
-            extra = {k: v for k, v in pipeline_step_params.items() if v is not None}
-            payload = {
-                "task_type": task_type,
-                "model_name": task.model_name,
-                "extra": extra,
-            }
-        else:
-            # 常规推理/Embedding 派发
-            payload = {
-                "task_type": task.task_type,
-                "model_name": task.model_name,
-                "prompt": params.get("prompt", ""),
-                "messages": params.get("messages", []),
-                "max_tokens": params.get("max_tokens", 2048),
-                "temperature": params.get("temperature", 0.7),
-                "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
-            }
-        url = build_safe_url("http", node.ip_address, node.port, "/api/execute")
-        headers = {"Authorization": f"Bearer {token}"}
-        resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        if data.get("status") != "ok":
-            raise RuntimeError(f"agent {node_id} 返回非 ok: {str(data)[:200]}")
-        agent_result = data.get("result", {})
-        # 注入 node_id 供上层聚合
-        if isinstance(agent_result, dict):
-            agent_result.setdefault("node_id", node_id)
-        return agent_result
+        # S1 熔断: 派发失败 (SSRF 拒绝 / HTTP 非 200 / agent 返回非 ok) 累计报告故障,
+        # 窗口内达 _FAULT_THRESHOLD (3) 自动 ban, select_nodes 跳过 ban 节点不再派发。
+        try:
+            # SSRF 守卫: agent ip 走 is_safe_peer_host (与 master_server/agent 一致)
+            if not is_safe_peer_host(node.ip_address):
+                raise RuntimeError(f"节点 {node_id} ip {node.ip_address} 非安全对端, 拒绝派发")
+            params = dict(task.params)
+            if pipeline_step_params is not None:
+                # P3 真实张量 PIPELINE — 走 /distributed/* 层前向链
+                task_type = "pipeline_step"
+                extra = {k: v for k, v in pipeline_step_params.items() if v is not None}
+                payload = {
+                    "task_type": task_type,
+                    "model_name": task.model_name,
+                    "extra": extra,
+                }
+            else:
+                # 常规推理/Embedding 派发
+                payload = {
+                    "task_type": task.task_type,
+                    "model_name": task.model_name,
+                    "prompt": params.get("prompt", ""),
+                    "messages": params.get("messages", []),
+                    "max_tokens": params.get("max_tokens", 2048),
+                    "temperature": params.get("temperature", 0.7),
+                    "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
+                }
+            url = build_safe_url("http", node.ip_address, node.port, "/api/execute")
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            if data.get("status") != "ok":
+                raise RuntimeError(f"agent {node_id} 返回非 ok: {str(data)[:200]}")
+            agent_result = data.get("result", {})
+            # 注入 node_id 供上层聚合
+            if isinstance(agent_result, dict):
+                agent_result.setdefault("node_id", node_id)
+            return agent_result
+        except Exception as e:
+            await self.report_fault(node_id, fault_type="dispatch_failed", message=str(e)[:200])
+            raise
 
     async def _finalize_task(
         self, task: ClusterTask, success: bool, error: str, result: dict[str, Any] | None = None
@@ -820,6 +910,7 @@ class ClusterMaster:
                     node = self.nodes.get(nid)
                     if node:
                         node.active_tasks = max(0, node.active_tasks - 1)
+                self._persist_tasks_locked()  # H3 终态落盘 (清掉该任务)
                 logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
 
     async def _snapshot_nodes(self, node_ids: list[str]) -> dict[str, NodeInfo]:
@@ -892,6 +983,7 @@ class ClusterMaster:
 
                 task.status = TaskStatus.CANCELLED
                 task.error = task.cancel_reason
+                self._persist_tasks_locked()  # H3 终态落盘
 
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
         return True
@@ -1145,51 +1237,6 @@ class ClusterMaster:
         self._is_leader = False
         logger.warning("本节点从 Leader 降级")
 
-    # ── M4-05 云端回退 (合规边界外, 默认禁用) ──
-    # 注意: 本项目定位"100%本地/离线", setup_cloud_fallback 不被 start() 调用。
-    # _cloud_client=None 时 fallback_to_cloud 直接返回 None。该能力计划迁移至
-    # fusion-gateway (上游 issue 跟踪)。AR审计 P1 合规边界。
-
-    def setup_cloud_fallback(
-        self,
-        provider: str = "openai",
-        api_key: str = "",
-        base_url: str = "",
-        max_cost_per_day: float = 10.0,
-        model: str = "",
-    ) -> None:
-        logger.warning(
-            "M4-05 云端回退违反'100%%本地/离线'定位, 默认禁用; 计划迁移至 fusion-gateway (AR审计 P1)"
-        )
-        try:
-            cloud_provider = CloudProvider(provider)
-        except ValueError:
-            cloud_provider = CloudProvider.OPENAI
-        config = CloudConfig(
-            provider=cloud_provider,
-            api_key=api_key,
-            base_url=base_url,
-            max_cost_per_day=max_cost_per_day,
-            default_model=model or "gpt-4o-mini",
-        )
-        self._cloud_client = CloudFallbackClient(config)
-        logger.info(f"M4-05 云端回退已配置: provider={provider} model={model}")
-
-    async def fallback_to_cloud(self, task: ClusterTask, prompt: str) -> str | None:
-        if not self._cloud_client:
-            logger.warning("云端回退未配置")
-            return None
-        try:
-            result = await self._cloud_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=self._cloud_client._config.default_model,
-            )
-            logger.info(f"M4-05 云端回退成功: {task.name} ({task.task_id})")
-            return result
-        except Exception as e:
-            logger.error(f"M4-05 云端回退失败: {task.name} - {e}")
-            return None
-
     # ── 生命周期 ──
 
     async def start(
@@ -1208,8 +1255,12 @@ class ClusterMaster:
         logger.info(f"Cluster Master 启动: {self.host}:{self.port}")
         logger.info(f"节点发现端口: {self.discovery_port}")
 
+        # H3 启动恢复: 重建崩溃前未完成任务 (RUNNING→PENDING 重派)
+        await self._restore_tasks()
+
         self._health_task = asyncio.create_task(self._health_check_loop())
         self._retry_task = asyncio.create_task(self._retry_loop())
+        self._persist_task = asyncio.create_task(self._persist_loop())
 
         # P4 HA 选举接线 — config 门控, 单 Master 默认不启用
         if ha_config and ha_config.get("enabled") and ha_config.get("node_id") and ha_config.get("peers"):
@@ -1238,13 +1289,15 @@ class ClusterMaster:
     async def stop(self) -> None:
         """停止集群主节点。"""
         self._running = False
-        for task in (self._health_task, self._retry_task):
+        for task in (self._health_task, self._retry_task, self._persist_task):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # H3 停机前最终落盘 (保留未完成任务供下次启动恢复)
+        await self._persist_tasks()
         # P1 派发: 取消在途派发任务 + 关闭 http 客户端
         for dtask in list(self._dispatch_tasks.values()):
             if not dtask.done():
@@ -1308,6 +1361,15 @@ class ClusterMaster:
             self._mdns.unregister()
             self._mdns = None
 
+    async def _persist_loop(self) -> None:
+        """H3 周期快照兜底 (15s) — 关键状态写点已即时落盘, 此处防漏写。"""
+        try:
+            while self._running:
+                await asyncio.sleep(15)
+                await self._persist_tasks()
+        except asyncio.CancelledError:
+            pass
+
     async def _retry_loop(self) -> None:
         """重试队列处理循环。"""
         try:
@@ -1318,18 +1380,6 @@ class ClusterMaster:
                 retry_tasks = self._pending_retry[:]
                 self._pending_retry.clear()
                 for task in retry_tasks:
-                    if getattr(task, "_cloud_fallback_pending", False):
-                        prompt = f"任务 {task.name} (model={task.model_name})"
-                        result = await self.fallback_to_cloud(task, prompt)
-                        if result:
-                            task.status = TaskStatus.COMPLETED
-                            task.completed_at = time.time()
-                            task.error = ""
-                            logger.info(f"云端回退完成: {task.name}")
-                        else:
-                            task.status = TaskStatus.FAILED
-                            task.error = "云端回退失败"
-                        continue
                     ok = await self.assign_task(task)
                     if not ok:
                         self._enqueue_retry(task)
@@ -1432,6 +1482,80 @@ class ClusterMaster:
         }
         stats["load_summary"] = self.load_router.get_cluster_load_summary()
         return stats
+
+    async def get_prometheus_metrics(self) -> str:
+        """S2 Prometheus exposition format — 集群级聚合指标供 /api/v1/metrics 抓取。
+
+        复用 get_stats (节点/任务/KV/内存) + 派发延迟 (completed_at - started_at)
+        + 重试计数 (_retry_count)。纯文本 0.0.4 exposition, 无外部依赖。
+        """
+        stats = await self.get_stats()
+        latencies: list[float] = []
+        retries = 0
+        pending = 0
+        running = 0
+        async with self._tasks_lock:
+            for t in self.tasks.values():
+                retries += getattr(t, "_retry_count", 0)
+                if t.status == TaskStatus.PENDING:
+                    pending += 1
+                elif t.status == TaskStatus.RUNNING:
+                    running += 1
+                if t.status == TaskStatus.COMPLETED and t.started_at > 0 and t.completed_at > t.started_at:
+                    latencies.append(t.completed_at - t.started_at)
+        lat_sorted = sorted(latencies)
+        n = len(lat_sorted)
+
+        def _pctl(q: float) -> float:
+            if n == 0:
+                return 0.0
+            idx = min(n - 1, max(0, int(q * n)))
+            return lat_sorted[idx]
+
+        lines = [
+            "# HELP fusion_cluster_nodes_total 集群注册节点总数",
+            "# TYPE fusion_cluster_nodes_total gauge",
+            f"fusion_cluster_nodes_total {stats['total_nodes']}",
+            "# HELP fusion_cluster_nodes_online 在线节点数",
+            "# TYPE fusion_cluster_nodes_online gauge",
+            f"fusion_cluster_nodes_online {stats['online_nodes']}",
+            "# HELP fusion_cluster_tasks_total 任务总数",
+            "# TYPE fusion_cluster_tasks_total gauge",
+            f"fusion_cluster_tasks_total {stats['total_tasks']}",
+            "# HELP fusion_cluster_tasks_running 运行中任务数",
+            "# TYPE fusion_cluster_tasks_running gauge",
+            f"fusion_cluster_tasks_running {running}",
+            "# HELP fusion_cluster_tasks_pending 待派发任务数",
+            "# TYPE fusion_cluster_tasks_pending gauge",
+            f"fusion_cluster_tasks_pending {pending}",
+            "# HELP fusion_cluster_tasks_completed 已完成任务数",
+            "# TYPE fusion_cluster_tasks_completed gauge",
+            f"fusion_cluster_tasks_completed {stats['completed_tasks']}",
+            "# HELP fusion_cluster_tasks_failed 失败/超时任务数",
+            "# TYPE fusion_cluster_tasks_failed gauge",
+            f"fusion_cluster_tasks_failed {stats['failed_tasks']}",
+            "# HELP fusion_cluster_task_retries_total 任务重试总次数",
+            "# TYPE fusion_cluster_task_retries_total counter",
+            f"fusion_cluster_task_retries_total {retries}",
+            "# HELP fusion_cluster_kv_cache_entries KV 缓存条目数",
+            "# TYPE fusion_cluster_kv_cache_entries gauge",
+            f"fusion_cluster_kv_cache_entries {stats['kv_cache_entries']}",
+            "# HELP fusion_cluster_memory_total_gb 集群总内存 GB",
+            "# TYPE fusion_cluster_memory_total_gb gauge",
+            f"fusion_cluster_memory_total_gb {stats['total_memory_gb']:.2f}",
+            "# HELP fusion_cluster_memory_available_gb 集群可用内存 GB",
+            "# TYPE fusion_cluster_memory_available_gb gauge",
+            f"fusion_cluster_memory_available_gb {stats['available_memory_gb']:.2f}",
+            "# HELP fusion_cluster_dispatch_latency_seconds 派发延迟秒 (已完成任务)",
+            "# TYPE fusion_cluster_dispatch_latency_seconds summary",
+            f'fusion_cluster_dispatch_latency_seconds{{quantile="0.5"}} {_pctl(0.5):.4f}',
+            f'fusion_cluster_dispatch_latency_seconds{{quantile="0.9"}} {_pctl(0.9):.4f}',
+            f'fusion_cluster_dispatch_latency_seconds{{quantile="0.99"}} {_pctl(0.99):.4f}',
+            f"fusion_cluster_dispatch_latency_seconds_sum {sum(latencies):.4f}",
+            f"fusion_cluster_dispatch_latency_seconds_count {n}",
+            "",
+        ]
+        return "\n".join(lines)
 
 
 # ── HA Standby (未接线原型, 非生产 HA) ──

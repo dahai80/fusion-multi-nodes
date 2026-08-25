@@ -162,13 +162,70 @@ restart() {
     start
 }
 
+# ── H2 launchd 进程守护: 崩溃自动重启 + H3 任务持久化恢复 = 不丢任务 ──
+# install-launchd: 渲染 deploy plist 占位符 → ~/Library/LaunchAgents → launchctl load
+# uninstall-launchd: launchctl unload + 删 plist
+# 现网单 Master: KeepAlive 崩溃重启 (10s 节流), start() _restore_tasks 恢复 RUNNING→PENDING 重派
+
+LAUNCHD_LABEL="com.dahai80.fusion-multi-node"
+PLIST_TEMPLATE="${SCRIPT_DIR}/deploy/com.dahai80.fusion-multi-node.plist"
+LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+
+install_launchd() {
+    [[ "$ROLE" != "master" ]] && { log_error "install-launchd 仅支持 master 角色 (HA 守护 Master)"; exit 2; }
+    [[ ! -f "$PLIST_TEMPLATE" ]] && { log_error "plist 模板缺失: $PLIST_TEMPLATE"; exit 2; }
+    mkdir -p "${HOME}/Library/LaunchAgents" "$LOG_DIR"
+
+    local venv_bin="${VENV}/bin"
+    local fusion_mn="${venv_bin}/fusion-multi-node"
+    if [[ ! -x "$fusion_mn" ]]; then
+        log_warn "venv 无 fusion-multi-node, 用 PATH 中的 fusion-multi-node"
+        venv_bin="/usr/local/bin:/usr/bin"
+        fusion_mn="fusion-multi-node"
+    fi
+
+    sed \
+        -e "s|@@VENV_BIN@@|${venv_bin}|g" \
+        -e "s|@@FUSION_MN@@|${fusion_mn}|g" \
+        -e "s|@@LOGDIR@@|${LOG_DIR}|g" \
+        -e "s|@@HOST@@|${HOST}|g" \
+        -e "s|@@PORT@@|${PORT}|g" \
+        -e "s|@@REPO@@|${SCRIPT_DIR}|g" \
+        "$PLIST_TEMPLATE" > "$LAUNCHD_PLIST"
+    log_info "渲染 launchd plist → $LAUNCHD_PLIST"
+
+    # 若 nohup 进程在跑, 先停 (交给 launchd 托管, 避免双实例)
+    if is_running; then
+        log_warn "检测到 nohup 进程 (PID $(get_pid)), 先停止转交 launchd 托管"
+        stop || true
+    fi
+
+    launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
+    launchctl load "$LAUNCHD_PLIST"
+    log_info "launchd 已加载 ${LAUNCHD_LABEL} (RunAtLoad + KeepAlive 崩溃自愈)"
+    log_info "崩溃 → launchd 10s 节流重启 → start() _restore_tasks 恢复任务 (H3), 不丢任务"
+    log_info "查看: launchctl list | grep fusion-multi-node ; 日志: ${LOG_DIR}/stdout_master.launchd.log"
+}
+
+uninstall_launchd() {
+    if [[ -f "$LAUNCHD_PLIST" ]]; then
+        launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
+        rm -f "$LAUNCHD_PLIST"
+        log_info "launchd 已卸载 ${LAUNCHD_LABEL} (plist 已删)"
+    else
+        log_info "无 launchd plist (${LAUNCHD_PLIST}), 未安装"
+    fi
+}
+
 case "${1:-status}" in
     start)   start ;;
     stop)    stop ;;
     restart) restart ;;
     status)  status ;;
+    install-launchd)   install_launchd ;;
+    uninstall-launchd) uninstall_launchd ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status}"
+        echo "Usage: $0 {start|stop|restart|status|install-launchd|uninstall-launchd}"
         exit 2
         ;;
 esac

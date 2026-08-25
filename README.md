@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-861%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-888%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -29,7 +29,7 @@
 
 | Module | Responsibility |
 |--------|---------------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, 真实张量 PIPELINE 层切分链 (接 fusion-mlx `/distributed/*`), master→agent 派发循环。HA 选举接 `start(ha_config=)` (默认关闭单 Master) |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, 真实张量 PIPELINE 层切分链 (接 fusion-mlx `/distributed/*`), master→agent 派发循环, **H3 任务持久化+崩溃恢复** (RUNNING/PENDING 原子落盘, 崩溃重启自动重派)。HA 选举接 `start(ha_config=)` (默认关闭单 Master)。cloud_fallback 调度路径 v0.8.2 已切断 (100% 本地) |
 | **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (上游 `/distributed/load_shard`+`pipeline_step`, b64.npy 激活跨节点) |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server |
@@ -195,7 +195,7 @@ await master.degrade_task("task_1")  # 70b→32b→13b→8b→3b→1b
 master.complete_task("task_1")
 ```
 
-**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, cloud fallback on retry exhaustion.
+**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, task-level circuit breaker (S1 dispatch-fault auto-ban).
 
 #### 节点注册幂等 + 故障黑名单 (F-A12 / F-A13, #20)
 
@@ -217,12 +217,52 @@ assert await master.register_node(node) is False       # ban 期拒绝
 master.unban_node("node_1")                            # 手动解封
 ```
 
+#### 任务级熔断器 (S1, #70) — 派发失败自动 ban
+
+- **派发失败报故障**: `_dispatch_to_node` 失败 (SSRF 拒绝 / agent HTTP 非 200 / agent 返回非 ok)
+  → 自动调 `report_fault(node_id, "dispatch_failed")`, 计入 F-A13 故障窗口。
+- **调度跳过 ban 节点**: `select_nodes` 候选过滤跳过 ban 期内节点 — 原仅 `register_node`
+  拦截, 调度路径漏拦, 故障节点会被反复派发; S1 补齐调度侧拦截。
+- 连续派发失败达 `_FAULT_THRESHOLD` (3) 自动 ban, ban 期内不再被选中; 到期/解封后恢复可选。
+
+```python
+# 派发失败 3 次 → 节点自动 ban, select_nodes 不再选它
+for i in range(master._FAULT_THRESHOLD):
+    await master._dispatch_task(task_failing_on_node_1)
+assert master.is_node_banned("node_1")
+assert await master.select_nodes(ParallelMode.DATA, count=1) == []  # 全 ban 返回空
+```
+
+#### 生产监控指标端点 (S2, #71) — Prometheus exposition
+
+- **`GET /api/v1/metrics`**: 纯文本 Prometheus 0.0.4 exposition, 无外部依赖, 可被 Prometheus / Grafana agent 直接抓取。
+- 集群级聚合指标:
+  - 节点: `fusion_cluster_nodes_total` / `fusion_cluster_nodes_online`
+  - 任务: `fusion_cluster_tasks_total` / `_running` / `_pending` / `_completed` / `_failed`
+  - 重试: `fusion_cluster_task_retries_total` (counter)
+  - KV: `fusion_cluster_kv_cache_entries`
+  - 内存: `fusion_cluster_memory_total_gb` / `_available_gb`
+  - 派发延迟: `fusion_cluster_dispatch_latency_seconds` (summary, p50/p90/p99 + sum/count)
+- 复用 `get_stats` + 派发延迟 (`completed_at - started_at`) + `_retry_count`。Bearer 鉴权不豁免 — 内部抓取携带集群 token。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:11452/api/v1/metrics
+```
+
 ### Master Election (`fusion_multi_node.master.election`) — P4 已接 start(), 默认关闭
 
 > **当前状态: P4 已接线 `ClusterMaster.start(ha_config=...)`。** `ha.enabled=True` 时调
 > `setup_election` 启动选举循环; 默认 `enabled=False` 单 Master 向后兼容。Raft-simplified
 > 优先级投票, `on_elected`/`on_deposed` 回调。**注意:** StandbyMaster/LEARNING 状态同步 +
 > 持久化 term/vote 仍为原型, 不构成完整 HA 承诺; 多 Master 部署需自行确保状态同步与持久化。
+>
+> **H3 任务持久化 (v0.8.2, 已接):** 即使单 Master 无完整 HA, RUNNING/PENDING 任务会原子落盘
+> (`~/.fusion/multi-node/tasks.json`), Master 进程崩溃后重启 `start()` 自动 `_restore_tasks`
+> 恢复 (RUNNING→PENDING 重派), 不丢任务。
+>
+> **H2 崩溃自愈 (v0.8.2, 已接):** launchd 进程守护 — `./start.sh install-launchd` 渲染
+> `deploy/com.dahai80.fusion-multi-node.plist` (KeepAlive 崩溃 10s 节流自动重启) → launchctl load。
+> 崩溃 → launchd 重启 → H3 恢复任务 = 自愈闭环, 不丢任务。详见 `docs/HA-CRASH-RECOVERY.md`。
 
 ```python
 from fusion_multi_node.master import ClusterMaster
@@ -236,9 +276,9 @@ await master.start(ha_config={
 })
 ```
 
-### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, 默认禁用
+### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, v0.8.2 调度路径已切断
 
-> **违反"100%本地/离线"定位。** 本项目定位为本地优先离线集群, 不提供云 API 出站。`setup_cloud_fallback` 默认不调用, `_cloud_client=None` 时 `fallback_to_cloud` 直接返回 `None`。该模块计划迁移至 fusion-gateway (上游 issue 跟踪)。以下 API 仅为兼容保留, 不应在本地集群启用:
+> **违反"100%本地/离线"定位。** 本项目定位为本地优先离线集群, 不提供云 API 出站。**v0.8.2 起 `ClusterMaster` 调度路径已全部切断** — `setup_cloud_fallback` / `fallback_to_cloud` / `_cloud_client` / `_retry_loop` 云端分支均已删除, Master 不再可达云 API。`cloud_fallback.py` 模块文件 + 单元测试保留供独立验证, 计划迁移至 fusion-gateway (issue #106)。以下模块级 API 仍可独立使用, 但不应接入本地集群调度:
 
 ```python
 from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
@@ -559,7 +599,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (805 tests)
+# Run all tests (888 tests)
 pytest tests/ -v
 
 # With coverage
@@ -570,6 +610,26 @@ pytest tests/test_cluster_master.py -v
 pytest tests/test_protocol.py -v
 pytest tests/test_new_features.py -v
 ```
+
+### 真实模型 E2E (需 fusion-mlx 运行)
+
+```bash
+~/claude-home/fusion-mlx/start.sh start        # 启动推理引擎 (端口 11434)
+
+# DATA 并行 2 节点真推理 (skip-gate: fusion-mlx alive + 模型在 /v1/models 列表)
+pytest tests/test_data_parallelism_e2e.py -v
+
+# 跨节点 KV 缓存共享 (合成数据, 无需模型, 无 skip-gate)
+pytest tests/test_kv_sharing_e2e.py -v
+
+# Pipeline 并行层切分真推理
+pytest tests/test_pipeline_e2e.py -v
+
+~/claude-home/fusion-mlx/start.sh stop         # 用完关闭
+```
+
+> 默认模型 `mlx-community-Llama-3.2-1B-Instruct-4bit`, api_key 走配置 `mlx.fusion_mlx_api_key`。
+> fusion-mlx 停时 E2E 自动跳过 (skip-gate), 不阻塞 CI 全绿。
 
 ---
 
@@ -613,7 +673,7 @@ pytest tests/test_new_features.py -v
 
 **P1 HA 接线或砍 + 合规边界**
 - [x] #14 砍 HA 虚假宣称: StandbyMaster/MasterElection/setup_election 标未接线死代码, 现网单 Master 无 HA
-- [x] #15 合规边界: cloud_fallback/mcp_gateway/ast_diff 默认禁用 + AR 审计 P2 标注, 待迁移 fusion-gateway/fusion-cowork (上游 issue); cluster_sync LAN-only is_safe_peer_host 加固
+- [x] #15 合规边界: cloud_fallback **v0.8.2 调度路径已切断** (ClusterMaster 不再可达云 API); mcp_gateway/ast_diff/cluster_sync 功能归属债待迁移 fusion-gateway (#106) / fusion-cowork (#61); cluster_sync LAN-only is_safe_peer_host 加固
 
 **P2 未接线原型门禁 + security 接线 + 无界增长**
 - [x] #17 DataScrubber 补 openai_key/github_pat/slack_token/jwt_token + 数字边界修 CJK 邻接; DataIsolation realpath+commonpath 防符号链接绕过; PermissionManager block-by-default (已验证 fail-closed)
@@ -739,7 +799,19 @@ pytest tests/test_new_features.py -v
 - [x] P2: CLI --transport fmp wiring (FMPServer + FMPConnectionManager)
 - [x] 805 tests, 0 ruff errors
 
+### v0.8.2 ✅ — 生产就绪硬阻断 + 软债 (2026-08-25)
+- [x] H3 Master 任务持久化 + 崩溃启动恢复 (原子落盘, RUNNING→PENDING 重派)
+- [x] H2 launchd 进程守护 — 崩溃自愈闭环 (KeepAlive 重启 + H3 恢复)
+- [x] H4 cloud_fallback 调度路径切断 (100% 本地合规); 功能归属债待迁移 fusion-gateway/fusion-cowork
+- [x] H1 PIPELINE 无 token 输出 — 上游 fusion-mlx #630 (decode/lm_head 端点, 本仓不可修)
+- [x] S1 任务级熔断器 — 派发失败报故障 + select_nodes 跳过 ban 节点
+- [x] S2 生产监控指标端点 /api/v1/metrics (Prometheus exposition)
+- [x] S3 负载/压测基线测试 (调度层吞吐 / 尾延迟 / 无丢失)
+- [x] S4 真实模型集成测试覆盖 (DATA 并行 E2E 真推理 + KV 共享 E2E 真 ASGI 路由链; 附修 3 生产 bug: FusionMLXBackend `/v1/*` 漏鉴权 / KVSharingManager 跨节点 HTTP 漏鉴权 / KVWarmRequest 契约错配)
+- [x] 888 tests, 0 ruff errors
+
 ### Future
+- [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Plugin ecosystem cluster registration
 - [ ] Cluster monitoring dashboard (fusion-studio)

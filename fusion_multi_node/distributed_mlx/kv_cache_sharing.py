@@ -91,10 +91,14 @@ class KVSharingManager:
         max_local_cache_mb: float = 4096.0,
         max_remote_lookup_ms: float = 50.0,
         enable_compression: bool = True,
+        cluster_token: str = "",
     ):
         self.max_local_cache_mb = max_local_cache_mb
         self.max_remote_lookup_ms = max_remote_lookup_ms
         self.enable_compression = enable_compression
+        # 跨节点 KV HTTP 调用 (lookup/transfer/warm) 需过对端 BearerAuthMiddleware。
+        # 缺 token → 全部 401 (生产 agent 默认鉴权)。由 AgentServer 透传集群共享 token。
+        self._cluster_token = cluster_token
 
         # 本地缓存
         self._local_cache: OrderedDict[str, KVCacheEntry] = OrderedDict()
@@ -124,6 +128,12 @@ class KVSharingManager:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=timeout)
         return self._http_client
+
+    def _auth_headers(self) -> dict[str, str]:
+        """跨节点 KV HTTP 调用鉴权头 — Bearer 集群共享 token。"""
+        if self._cluster_token:
+            return {"Authorization": f"Bearer {self._cluster_token}"}
+        return {}
 
     async def close(self) -> None:
         if self._http_client and not self._http_client.is_closed:
@@ -209,6 +219,7 @@ class KVSharingManager:
                         "model_name": model_name,
                         "prompt_hash": prompt_hash,
                     },
+                    headers=self._auth_headers(),
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -238,6 +249,7 @@ class KVSharingManager:
                     "compress": self.enable_compression,
                     "protocol": KV_SYNC_PROTOCOL,
                 },
+                headers=self._auth_headers(),
             )
             return resp.status_code == 200
         except Exception as e:
@@ -291,6 +303,7 @@ class KVSharingManager:
                             "prompt": prompt,
                             "prompt_hash": prompt_hash,
                         },
+                        headers=self._auth_headers(),
                     )
                     if resp.status_code == 200:
                         results["success"] += 1

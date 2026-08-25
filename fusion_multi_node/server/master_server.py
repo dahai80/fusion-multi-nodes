@@ -611,6 +611,17 @@ class MasterServer:
                 "load_summary": stats.get("load_summary", {}),
             }
 
+        # ── S2 Prometheus 监控指标端点 ──
+        # 集群级聚合: 节点数/任务状态/KV 池/内存/派发延迟分位/重试次数。
+        # 纯文本 0.0.4 exposition, 无外部依赖。Bearer 鉴权不豁免 (内部抓取携带 token)。
+
+        @app.get("/api/v1/metrics")
+        async def prometheus_metrics():
+            from fastapi.responses import PlainTextResponse
+
+            body = await self.master.get_prometheus_metrics()
+            return PlainTextResponse(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
+
         @app.get("/api/v1/nodes/{node_id}/metrics")
         async def node_metrics(node_id: str):
             node = await self.master.get_node(node_id)

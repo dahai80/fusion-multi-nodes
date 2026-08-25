@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-25
+
+### Added
+
+- **H3 Master 任务持久化 + 崩溃启动恢复** (#66)
+  - `_persist_tasks_locked`: 原子落盘非终态任务 (tmp+os.replace+fsync), 终态不存
+  - 写点即时落盘: assign_task (RUNNING) / _finalize_task (终态) / cancel_task (终态), 均持 `_tasks_lock`
+  - `_persist_loop`: 15s 周期快照兜底; `start()` 调 `_restore_tasks()` 恢复, `stop()` 最终落盘
+  - `_restore_tasks`: RUNNING/MIGRATED → PENDING 重派 (崩溃前派发中任务须重新调度)
+  - `tests/test_task_persistence.py` (10 用例): 恢复语义 / 终态不存 / 原子写 / 损坏文件 / 全链路 start→stop→restore
+- **H2 launchd 进程守护 — 崩溃自愈闭环** (#69)
+  - `deploy/com.dahai80.fusion-multi-node.plist`: launchd 模板 (KeepAlive 崩溃重启 + ThrottleInterval 10s 节流 + RunAtLoad), 占位符渲染 (venv/host/port/logdir)
+  - `start.sh install-launchd` / `uninstall-launchd`: 渲染 plist → `~/Library/LaunchAgents` → launchctl load/unload; 检测 nohup 进程先停转交 launchd (避双实例)
+  - 崩溃 → launchd 重启 → H3 `_restore_tasks` 恢复 = 不丢任务 (进程层 + 数据层双保障)
+  - `docs/HA-CRASH-RECOVERY.md`: 崩溃自愈链路图 + 两层保障 + 局限说明
+- **S1 任务级熔断器** (#70) — 派发失败自动 ban, 不再持续往故障节点派发
+  - `_dispatch_to_node` 失败 (SSRF 拒绝 / HTTP 非 200 / agent 返回非 ok) → `report_fault(node_id, "dispatch_failed")` 累计故障
+  - `select_nodes` 候选过滤跳过 ban 期内节点 (gap: 原 ban 仅在 `register_node` 拦截, 调度路径漏拦)
+  - 窗口内达 `_FAULT_THRESHOLD` (3) 自动 ban, ban 期内不被选中, 到期/手动解封后恢复可选
+  - `tests/test_task_circuit_breaker.py` (6 用例): 派发失败报故障 / 重复失败 ban / 成功不报故障 / ban 节点跳过 / 全 ban 返回空 / 解封重选
+- **S2 生产监控指标端点** (#71) — Prometheus exposition `/api/v1/metrics`
+  - `ClusterMaster.get_prometheus_metrics`: 纯文本 0.0.4 exposition, 无外部依赖
+  - 集群级聚合: 节点总数/在线, 任务总数/运行/待派发/完成/失败, 重试总次数, KV 缓存条目, 内存总量/可用, 派发延迟分位 (p50/p90/p99 + sum/count)
+  - 复用 `get_stats` + 派发延迟 (completed_at - started_at) + `_retry_count`; Bearer 鉴权不豁免 (内部抓取携带 token)
+  - `tests/test_master_server.py::TestPrometheusMetrics` (4 用例): 鉴权 / text-plain / exposition shape / 空集群
+- **S3 负载/压测基线测试** (#72) — 调度层压测吞吐 / 尾延迟 / 无丢失
+  - `tests/test_load_stress.py` (3 用例): 四节点集群 + FastBackend (零延迟, 免真模型), 真派发走 PortRoutingTransport ASGI 路由
+  - 并发 40 任务无丢失 (lost=0/failed=0/backend_calls=40), 派发吞吐 > 20 task/s
+  - 派发延迟尾部分布 (p95 < 1.0s, p99 < 2.0s); DATA 并行两节点 20 任务吞吐 > 10 task/s
+  - 压测放开 agent 限流 (默认 30 req/min → 100000) + 节点 max_tasks=200 (测调度吞吐非容量上限)
+- **S4 真实模型集成测试覆盖** (#73) — DATA 并行 E2E 真推理 + KV 共享 E2E 真 ASGI 路由链
+  - `tests/test_data_parallelism_e2e.py` (1 用例): skip-gate `_mlx_alive() and _model_available()` (查 `/v1/models` 列表含模型 id), fusion-mlx 停则跳过; 2 节点 DATA 并行真推理 (`mlx-community-Llama-3.2-1B-Instruct-4bit`), 断 COMPLETED / node_count==2 / 两节点各返非空 content+usage
+  - `tests/test_kv_sharing_e2e.py` (4 用例): 合成 KVCacheEntry 验跨节点 HTTP 路由链 (非模型张量, 无 skip-gate) — 同节点 store→lookup round-trip / 未命中 404 / warm 跨节点推送 / stats 路由; `PortRoutingTransport` 按 URL 端口路由到 ASGI (无真 TCP), manager `_get_http_client` monkeypatch 重写 `:11458` 端口
+  - 覆盖原 17/24 单元 mock 文件未触达的 agent_server KV 路由端到端
+
+### Changed
+
+- **H4 cloud_fallback 调度路径切断** (#67) — 唯一违"100%本地/离线"定位的模块
+  - 删 `ClusterMaster.setup_cloud_fallback` / `fallback_to_cloud` / `_cloud_client` 字段 / import
+  - `_enqueue_retry`: 重试超限直接 FAILED, 不再转云端回退
+  - `_retry_loop`: 删 `_cloud_fallback_pending` 分支, 纯重试
+  - `cloud_fallback.py` 模块文件 + 单元测试保留供独立验证, 不再接调度器; 待迁移 fusion-gateway (#106)
+- **功能归属债区分** (#67) — ast_diff / cluster_sync / mcp_gateway 均纯本地计算 (非云合规债)
+  - ast_diff 被 `secure_transfer` (PII 脱敏传输) 复用 → 待迁移 fusion-cowork (#61)
+  - cluster_sync 被 `master_server` (LAN 模型清单) 复用 → 待迁移 fusion-cowork (#61)
+  - mcp_gateway 未接线死代码 → 待迁移 fusion-gateway (#106)
+- `__init__.py` `__version__` 0.7.1 → 0.8.2 (历史漏更新修正); 注释区分云合规债 vs 功能归属债
+- pyproject.toml version 0.8.1 → 0.8.2
+
+### Fixed
+
+- CLAUDE.md: cluster_sync "not wired into lifecycle" 实为已接 master_server start()/stop() — 更正; cloud_fallback 标注 v0.8.2 切断现状
+- **FusionMLXBackend `/v1/*` 漏带鉴权头** (#73, S4 E2E 暴露) — `chat`/`embed` POST `/v1/chat/completions`、`/v1/embeddings` 未带 `Authorization`。fusion-mlx 启用 api_key 时 `/v1/*` 同样受保护 (与 `/distributed/*` 同源), 漏带一律 401。补 `headers=self._dist_headers()`。生产缺陷: 任何启用 auth 的 fusion-mlx 推理直接 401
+- **KVSharingManager 跨节点 HTTP 漏带鉴权头** (#73, S4 E2E 暴露) — `lookup_remote`/`transfer_from_remote`/`warm_cache` POST 对端 agent `/api/kv/*` 未带 `Authorization`。对端 `BearerAuthMiddleware` 默认鉴权, 缺 token 全部 401。`KVSharingManager` 加 `cluster_token` 参数 + `_auth_headers()`, `AgentServer.__init__` 透传 `shared_token`。生产缺陷: 跨节点 KV 共享在鉴权 agent 上全部 401
+- **KVWarmRequest 契约错配 + kv_warm 路由递归** (#73, S4 E2E 暴露) — schema 要求 `prompts: list[str]` (复数必填) 但 `warm_cache` 发 `{model_name, prompt, prompt_hash}` (单数) → 422; 且 `/api/kv/warm` 路由回调 `self.kv_manager.warm_cache` (二次跨节点远推 → 递归)。改 schema 为 `{model_name, prompt, prompt_hash, total_tokens, total_size_bytes}`, 路由只本地 `store_local` (跨节点分发归 `warm_cache`)
+
 ## [0.8.1] - 2026-08-25
 
 ### Added
@@ -172,6 +228,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** — 15+ commands across 7 groups
 - 585 tests, 96.1% code coverage
 
+[0.8.2]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.4.0...v0.8.0
 [0.4.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.3.0...v0.4.0
