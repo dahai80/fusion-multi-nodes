@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-25
+
+### Added
+
+- **H3 Master 任务持久化 + 崩溃启动恢复** (#66)
+  - `_persist_tasks_locked`: 原子落盘非终态任务 (tmp+os.replace+fsync), 终态不存
+  - 写点即时落盘: assign_task (RUNNING) / _finalize_task (终态) / cancel_task (终态), 均持 `_tasks_lock`
+  - `_persist_loop`: 15s 周期快照兜底; `start()` 调 `_restore_tasks()` 恢复, `stop()` 最终落盘
+  - `_restore_tasks`: RUNNING/MIGRATED → PENDING 重派 (崩溃前派发中任务须重新调度)
+  - `tests/test_task_persistence.py` (10 用例): 恢复语义 / 终态不存 / 原子写 / 损坏文件 / 全链路 start→stop→restore
+
+### Changed
+
+- **H4 cloud_fallback 调度路径切断** (#67) — 唯一违"100%本地/离线"定位的模块
+  - 删 `ClusterMaster.setup_cloud_fallback` / `fallback_to_cloud` / `_cloud_client` 字段 / import
+  - `_enqueue_retry`: 重试超限直接 FAILED, 不再转云端回退
+  - `_retry_loop`: 删 `_cloud_fallback_pending` 分支, 纯重试
+  - `cloud_fallback.py` 模块文件 + 单元测试保留供独立验证, 不再接调度器; 待迁移 fusion-gateway (#106)
+- **功能归属债区分** (#67) — ast_diff / cluster_sync / mcp_gateway 均纯本地计算 (非云合规债)
+  - ast_diff 被 `secure_transfer` (PII 脱敏传输) 复用 → 待迁移 fusion-cowork (#61)
+  - cluster_sync 被 `master_server` (LAN 模型清单) 复用 → 待迁移 fusion-cowork (#61)
+  - mcp_gateway 未接线死代码 → 待迁移 fusion-gateway (#106)
+- `__init__.py` `__version__` 0.7.1 → 0.8.2 (历史漏更新修正); 注释区分云合规债 vs 功能归属债
+- pyproject.toml version 0.8.1 → 0.8.2
+
+### Fixed
+
+- CLAUDE.md: cluster_sync "not wired into lifecycle" 实为已接 master_server start()/stop() — 更正; cloud_fallback 标注 v0.8.2 切断现状
+
 ## [0.8.1] - 2026-08-25
 
 ### Added
@@ -172,6 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** — 15+ commands across 7 groups
 - 585 tests, 96.1% code coverage
 
+[0.8.2]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.4.0...v0.8.0
 [0.4.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.3.0...v0.4.0

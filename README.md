@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-861%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-872%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -29,7 +29,7 @@
 
 | Module | Responsibility |
 |--------|---------------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, 真实张量 PIPELINE 层切分链 (接 fusion-mlx `/distributed/*`), master→agent 派发循环。HA 选举接 `start(ha_config=)` (默认关闭单 Master) |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, 真实张量 PIPELINE 层切分链 (接 fusion-mlx `/distributed/*`), master→agent 派发循环, **H3 任务持久化+崩溃恢复** (RUNNING/PENDING 原子落盘, 崩溃重启自动重派)。HA 选举接 `start(ha_config=)` (默认关闭单 Master)。cloud_fallback 调度路径 v0.8.2 已切断 (100% 本地) |
 | **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (上游 `/distributed/load_shard`+`pipeline_step`, b64.npy 激活跨节点) |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server |
@@ -223,6 +223,10 @@ master.unban_node("node_1")                            # 手动解封
 > `setup_election` 启动选举循环; 默认 `enabled=False` 单 Master 向后兼容。Raft-simplified
 > 优先级投票, `on_elected`/`on_deposed` 回调。**注意:** StandbyMaster/LEARNING 状态同步 +
 > 持久化 term/vote 仍为原型, 不构成完整 HA 承诺; 多 Master 部署需自行确保状态同步与持久化。
+>
+> **H3 任务持久化 (v0.8.2, 已接):** 即使单 Master 无完整 HA, RUNNING/PENDING 任务会原子落盘
+> (`~/.fusion/multi-node/tasks.json`), Master 进程崩溃后重启 `start()` 自动 `_restore_tasks`
+> 恢复 (RUNNING→PENDING 重派), 不丢任务。崩溃自愈依赖进程守护 (launchd/supervisor, 待 H2 落地)。
 
 ```python
 from fusion_multi_node.master import ClusterMaster
@@ -236,9 +240,9 @@ await master.start(ha_config={
 })
 ```
 
-### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, 默认禁用
+### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, v0.8.2 调度路径已切断
 
-> **违反"100%本地/离线"定位。** 本项目定位为本地优先离线集群, 不提供云 API 出站。`setup_cloud_fallback` 默认不调用, `_cloud_client=None` 时 `fallback_to_cloud` 直接返回 `None`。该模块计划迁移至 fusion-gateway (上游 issue 跟踪)。以下 API 仅为兼容保留, 不应在本地集群启用:
+> **违反"100%本地/离线"定位。** 本项目定位为本地优先离线集群, 不提供云 API 出站。**v0.8.2 起 `ClusterMaster` 调度路径已全部切断** — `setup_cloud_fallback` / `fallback_to_cloud` / `_cloud_client` / `_retry_loop` 云端分支均已删除, Master 不再可达云 API。`cloud_fallback.py` 模块文件 + 单元测试保留供独立验证, 计划迁移至 fusion-gateway (issue #106)。以下模块级 API 仍可独立使用, 但不应接入本地集群调度:
 
 ```python
 from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
@@ -613,7 +617,7 @@ pytest tests/test_new_features.py -v
 
 **P1 HA 接线或砍 + 合规边界**
 - [x] #14 砍 HA 虚假宣称: StandbyMaster/MasterElection/setup_election 标未接线死代码, 现网单 Master 无 HA
-- [x] #15 合规边界: cloud_fallback/mcp_gateway/ast_diff 默认禁用 + AR 审计 P2 标注, 待迁移 fusion-gateway/fusion-cowork (上游 issue); cluster_sync LAN-only is_safe_peer_host 加固
+- [x] #15 合规边界: cloud_fallback **v0.8.2 调度路径已切断** (ClusterMaster 不再可达云 API); mcp_gateway/ast_diff/cluster_sync 功能归属债待迁移 fusion-gateway (#106) / fusion-cowork (#61); cluster_sync LAN-only is_safe_peer_host 加固
 
 **P2 未接线原型门禁 + security 接线 + 无界增长**
 - [x] #17 DataScrubber 补 openai_key/github_pat/slack_token/jwt_token + 数字边界修 CJK 邻接; DataIsolation realpath+commonpath 防符号链接绕过; PermissionManager block-by-default (已验证 fail-closed)
