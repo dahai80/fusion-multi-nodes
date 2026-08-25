@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.7.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-826%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-852%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -29,8 +29,8 @@
 
 | Module | Responsibility |
 |--------|---------------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync. ⚠️master election / HA standby **未接线** (现网单 Master) |
-| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, cloud fallback, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, 真实张量 PIPELINE 层切分链 (接 fusion-mlx `/distributed/*`), master→agent 派发循环。HA 选举接 `start(ha_config=)` (默认关闭单 Master) |
+| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (上游 `/distributed/load_shard`+`pipeline_step`, b64.npy 激活跨节点) |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server |
 | **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing |
@@ -47,7 +47,7 @@
 │                    Claude Code / API / fusion-desk UI         │
 │                           ↓                                  │
 │              fusion-multi-node Cluster Master                 │
-│  (Discovery, Scheduler, KV Pool, [Election⚠未接线],          │
+│  (Discovery, Scheduler, KV Pool, [Election·HA 可选],          │
 │   [Autoscaler⚠未接线], Cloud Fallback, Degradation,          │
 │   Security, Observability)                                   │
 │                           ↓                                  │
@@ -132,7 +132,39 @@ fusion-multi-node kv stats/warm                # KV cache management
 
 ### 1. Cluster Master (`fusion_multi_node.master`)
 
-The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache, master election, cloud fallback, task auto-degradation.
+The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache, master election, cloud fallback, task auto-degradation, 真实张量 PIPELINE 层切分链。
+
+#### Pipeline Parallelism — 真实张量层切分 (接 fusion-mlx `/distributed/*`, #621)
+
+PIPELINE 模式按 `model_shards` 把模型切成多段, 每节点跑一段层前向。首段带 `input_ids`
+(embed + layers), 后续段带上一段出口 `hidden_states` (b64.npy, 仅 layers)。激活张量
+经调度器顺序链传到末节点, 末节点出口 = 最终 hidden_states。
+
+```python
+from fusion_multi_node.master import ClusterMaster, ClusterTask, ParallelMode
+
+task = ClusterTask(
+    task_id="task-pipeline",
+    name="layer-split",
+    mode=ParallelMode.PIPELINE,
+    model_name="Llama-3.2-1B-Instruct-4bit",
+    model_shards=[
+        {"shard_index": 0, "layer_range": [0, 8]},
+        {"shard_index": 1, "layer_range": [8, 16]},
+    ],
+    task_type="pipeline_step",
+    params={
+        "model_id": "~/.fusion-mlx/models/mlx-community-Llama-3.2-1B-Instruct-4bit",
+        "input_ids": [10, 20, 30, 40],
+    },
+)
+await master.assign_task(task)
+# → 末节点返回 hidden_states (shape [1,4,2048] float16, b64.npy)
+# lm_head/解码超上游 /distributed/* 首版范围 — 调度器只负责层前向链, 不做 token 生成
+```
+
+> 真模型 E2E 已验证 (Llama-3.2-1B-Instruct-4bit, 16 层切 [0,8]/[8,16],
+> 见 `tests/test_pipeline_e2e.py`)。需 fusion-mlx 运行 + `mlx.fusion_mlx_api_key` 配置。
 
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
@@ -165,19 +197,23 @@ master.complete_task("task_1")
 
 **Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, cloud fallback on retry exhaustion.
 
-### Master Election (`fusion_multi_node.master.election`) — ⚠️ 未接线, 非生产可用
+### Master Election (`fusion_multi_node.master.election`) — P4 已接 start(), 默认关闭
 
-> **当前状态: 未接线死代码。** `ClusterMaster.start()` 不调用 `setup_election`, `StandbyMaster` 零生产实例化。现网为单 Master, 无 HA, Master 挂 = 集群挂。以下 API 仅为单元级原型, 不构成高可用承诺。完整 HA 接线 (LEARNING 状态同步 + 持久化 term/vote) 列为后续路线图。
-
-Raft-simplified leader election with priority-based voting (原型, 未接生产路径):
+> **当前状态: P4 已接线 `ClusterMaster.start(ha_config=...)`。** `ha.enabled=True` 时调
+> `setup_election` 启动选举循环; 默认 `enabled=False` 单 Master 向后兼容。Raft-simplified
+> 优先级投票, `on_elected`/`on_deposed` 回调。**注意:** StandbyMaster/LEARNING 状态同步 +
+> 持久化 term/vote 仍为原型, 不构成完整 HA 承诺; 多 Master 部署需自行确保状态同步与持久化。
 
 ```python
-from fusion_multi_node.master.election import MasterElection, ElectionState
+from fusion_multi_node.master import ClusterMaster
 
-election = MasterElection(node_id="node-1", priority=5, known_nodes=["node-2", "node-3"])
-await election.start()
-resp = await election.handle_vote_request(req)
-await election.receive_heartbeat("leader-id", term=2)
+master = ClusterMaster(host="127.0.0.1", port=11452)
+await master.start(ha_config={
+    "enabled": True,
+    "node_id": "master-1",
+    "priority": 5,
+    "peers": ["master-2", "master-3"],
+})
 ```
 
 ### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, 默认禁用

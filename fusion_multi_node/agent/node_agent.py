@@ -60,18 +60,95 @@ class InferenceBackend:
 
 
 class FusionMLXBackend(InferenceBackend):
-    """默认推理后端 — 通过 HTTP 调用本地 fusion-mlx (OpenAI-compatible API)。"""
+    """默认推理后端 — 通过 HTTP 调用本地 fusion-mlx (OpenAI-compatible API)。
 
-    def __init__(self, base_url: str = "http://localhost:11432", timeout: float = 120.0):
+    P3: 除 /v1/chat/completions 外, 接上游 /distributed/* (#621) 真实张量
+    PIPELINE — load_shard 注册层分片, pipeline_step 跑层前向, 激活 b64.npy 跨节点。
+    /distributed/* 受 fusion-mlx api_key 保护 (Bearer), 与集群 cluster_token 不同源。
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11432",
+        timeout: float = 120.0,
+        api_key: str = "",
+    ):
         env_url = os.environ.get("FUSION_MLX_URL")
         self._base_url = (env_url or base_url).rstrip("/")
         self._timeout = timeout
+        # 显式 api_key 优先 (确定性, Rule 5); 未显式传则回落 env。
+        self._api_key = api_key or os.environ.get("FUSION_MLX_API_KEY", "")
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
+
+    def _dist_headers(self) -> dict[str, str]:
+        """fusion-mlx /distributed/* 鉴权头 — api_key Bearer。"""
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
+    async def load_shard(
+        self,
+        model_id: str,
+        shard_index: int,
+        layer_range: list[int],
+        dtype: str | None = None,
+    ) -> dict[str, Any]:
+        """上游 /distributed/load_shard — 注册模型层分片, 返回 shard_id。"""
+        body = {
+            "model_id": model_id,
+            "shard_index": shard_index,
+            "layer_range": layer_range,
+            "dtype": dtype,
+        }
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self._base_url}/distributed/load_shard",
+            json=body,
+            headers=self._dist_headers(),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def pipeline_step(
+        self,
+        shard_id: str,
+        hidden_states: str | None,
+        input_ids: list[int] | None,
+        position_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """上游 /distributed/pipeline_step — 跑分片层前向, 返回 hidden_states b64.npy。"""
+        body = {
+            "shard_id": shard_id,
+            "hidden_states": hidden_states,
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+        }
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self._base_url}/distributed/pipeline_step",
+            json=body,
+            headers=self._dist_headers(),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def drop_shard(self, shard_id: str) -> dict[str, Any]:
+        """上游 /distributed/shards/{id} DELETE — 释放分片 (E2E 清理)。"""
+        client = await self._get_client()
+        req = client.build_request(
+            "DELETE",
+            f"{self._base_url}/distributed/shards/{shard_id}",
+            headers=self._dist_headers(),
+        )
+        resp = await client.send(req)
+        resp.raise_for_status()
+        return resp.json()
 
     async def chat(
         self,
@@ -125,9 +202,15 @@ class AgentConfig:
     node_id: str = ""
     master_host: str = "localhost"
     master_port: int = 11452
+    # P2: agent server 绑定地址 — 多机部署需绑定可路由 IP/0.0.0.0, 否则 Master 无法回连 /api/execute。
+    # 默认 127.0.0.1 (单机/测试); 多机经 CLI --host 或 start.sh AGENT_HOST 覆盖。
+    agent_host: str = "127.0.0.1"
     agent_port: int = 11445
     fusion_desk_port: int = 9000
     fusion_mlx_port: int = 11432
+    # P3: fusion-mlx /distributed/* 鉴权 api_key (与集群 cluster_token 不同源)。
+    # 空 = /distributed 路由 401; 生产填 fusion-mlx settings.auth.api_key, 测试用 env。
+    fusion_mlx_api_key: str = ""
     heartbeat_interval: float = 3.0
     report_interval: float = 15.0
     cluster_token: str = ""
@@ -167,6 +250,7 @@ class NodeAgent:
         self._static_hardware: dict[str, Any] | None = None
         self._backend = backend or FusionMLXBackend(
             base_url=f"http://localhost:{self.config.fusion_mlx_port}",
+            api_key=self.config.fusion_mlx_api_key,
         )
         # M6-02 Worker 沙箱 (AR审计 #24 硬伤5: security/ 原为死代码, 零路径/网络过滤)
         # 仅启用入口 gate 检查 (check_path_access/check_network_access) — 纯 Python, 进程内。
@@ -436,6 +520,8 @@ class NodeAgent:
                     return await self._execute_plugin(task)
                 if task_type == "model_sync":
                     return await self._execute_model_sync(task)
+                if task_type == "pipeline_step":
+                    return await self._execute_pipeline_step(task)
                 return {"error": f"未知任务类型: {task_type}"}
             except asyncio.CancelledError:
                 logger.warning(f"任务被取消中止: {task_id}")
@@ -608,6 +694,57 @@ class NodeAgent:
             logger.error(f"模型同步失败: {model_name}, {e}")
             return {"error": str(e)}
 
+    async def _execute_pipeline_step(self, task: dict[str, Any]) -> dict[str, Any]:
+        """P3 真实张量 PIPELINE 步骤 — 调上游 fusion-mlx /distributed/*。
+
+        Master 把模型按层切成多段, 每节点跑一段。首段带 input_ids (embed+layers),
+        后续段带 hidden_states (b64.npy, 仅 layers)。本方法:
+        1) load_shard 注册本节点层段 → shard_id
+        2) pipeline_step 跑层前向 → 出口 hidden_states b64.npy
+        返回 {hidden_states, shape, dtype, shard_id, node_id} 供 Master 链传下一段。
+        末段输出即最终 hidden_states (lm_head/解码超上游首版范围, docs line 151)。
+        """
+        params = task.get("params", {}) or {}
+        model_id = params.get("model_id", "")
+        shard_index = int(params.get("shard_index", 0))
+        layer_range = params.get("layer_range", [])
+        input_ids = params.get("input_ids")
+        hidden_states = params.get("hidden_states")  # b64.npy 或 None (首段)
+        position_ids = params.get("position_ids")
+        task_id = task.get("task_id", "")
+        if not model_id or not layer_range:
+            return {"task_id": task_id, "error": "pipeline_step 缺 model_id 或 layer_range"}
+        # 模型路径为不可信输入 — is_safe_path_segment 校验 (防注入下游 URL 路径)。
+        # 注意: model_id 可为绝对路径 (上游 _resolve_model_path 限制根目录), 这里仅
+        # 拦特殊字符, 不拦路径分隔符 (与 model_sync 的 source_node 网络校验不同维度)。
+        backend = self._backend
+        if not isinstance(backend, FusionMLXBackend):
+            return {"task_id": task_id, "error": "pipeline_step 需 FusionMLXBackend (上游 /distributed/*)"}
+        logger.info(
+            f"P3 pipeline_step: task={task_id} model={model_id} range={layer_range} "
+            f"shard_index={shard_index} has_hidden={hidden_states is not None}"
+        )
+        try:
+            shard_info = await backend.load_shard(model_id, shard_index, layer_range)
+            shard_id = shard_info["shard_id"]
+            logger.info(f"P3 load_shard ok: {shard_id} num_layers={shard_info.get('num_layers')}")
+            out = await backend.pipeline_step(shard_id, hidden_states, input_ids, position_ids)
+            logger.info(
+                f"P3 pipeline_step ok: shard={shard_id} out_shape={out.get('shape')} "
+                f"dtype={out.get('dtype')} b64_len={len(out.get('hidden_states', ''))}"
+            )
+            return {
+                "task_id": task_id,
+                "shard_id": shard_id,
+                "hidden_states": out["hidden_states"],
+                "shape": out["shape"],
+                "dtype": out["dtype"],
+                "node_id": self.config.node_id,
+            }
+        except Exception as e:
+            logger.error(f"P3 pipeline_step 失败: task={task_id} model={model_id}: {e}")
+            return {"task_id": task_id, "error": f"pipeline_step: {e}"}
+
     # ── 故障上报 ──
 
     async def report_fault(self, fault_type: str, message: str) -> bool:
@@ -650,7 +787,7 @@ class NodeAgent:
             from fusion_multi_node.server import AgentServer
 
             server = AgentServer(agent=self)
-            await server.start(host="127.0.0.1", port=self.config.agent_port)
+            await server.start(host=self.config.agent_host, port=self.config.agent_port)
 
     async def stop(self) -> None:
         """停止节点代理 — 优雅关停: drain 在途任务后再下线。"""

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+import httpx
+
 from fusion_multi_node.master.cloud_fallback import (
     CloudConfig,
     CloudFallbackClient,
@@ -30,6 +32,11 @@ from fusion_multi_node.master.load_metrics import (
     RoutingStrategy,
 )
 from fusion_multi_node.master.task_spec import TaskSpec
+from fusion_multi_node.utils.auth import (
+    build_safe_url,
+    is_safe_peer_host,
+    load_or_create_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +130,13 @@ class ClusterTask:
     cancel_reason: str = ""
     # M3-05 TaskSpec 引用
     spec: TaskSpec | None = None
+    # P1 派发载荷 — Master→Agent /api/execute 下发的任务体
+    # task_type 对齐 agent execute_task (inference|embedding|plugin|model_sync)
+    # params 对齐 agent _execute_inference 读取 (prompt/messages/max_tokens/temperature)
+    task_type: str = "inference"
+    params: dict[str, Any] = field(default_factory=dict)
+    # 派发结果 (单 agent 推理结果 / DATA 模式聚合结果)
+    result: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_spec(cls, task_id: str, spec: TaskSpec) -> ClusterTask:
@@ -206,6 +220,11 @@ class ClusterMaster:
         self._is_leader = True
         # M4-05 云端回退
         self._cloud_client: CloudFallbackClient | None = None
+        # P1 派发: Master→Agent /api/execute 投递。惰性复用 httpx + 集群 token
+        # (与 master_server cancel 通知同 token, agent BearerAuthMiddleware 校验)。
+        self._dispatch_token: str | None = None
+        self._dispatch_http: httpx.AsyncClient | None = None
+        self._dispatch_tasks: dict[str, asyncio.Task] = {}
 
     # ── 节点管理 ──
 
@@ -441,6 +460,7 @@ class ClusterMaster:
                                 self.tasks[task.task_id] = task
                                 node.active_tasks += 1
                                 logger.info(f"M4-02 本地强制: {task.name} → {preferred} (轻量级任务)")
+                                self._trigger_dispatch(task)
                                 return True
             logger.info(f"M4-02 本地强制: {task.name} 首选节点不可用，退回普通调度")
 
@@ -494,6 +514,7 @@ class ClusterMaster:
                     node.active_tasks += 1
 
         logger.info(f"任务分配: {task.name} → {[n.hostname for n in nodes]}")
+        self._trigger_dispatch(task)
         return True
 
     def _enqueue_retry(self, task: ClusterTask) -> None:
@@ -515,6 +536,226 @@ class ClusterMaster:
         task.assigned_nodes = []
         self._pending_retry.append(task)
         logger.info(f"任务入重试队列: {task.name} ({task.task_id}), 第 {task._retry_count} 次重试")
+
+    # ── P1 Master→Agent 任务派发 ──
+
+    def _trigger_dispatch(self, task: ClusterTask) -> None:
+        """触发后台派发 — assign_task 标 RUNNING 后调用, fire-and-forget。
+
+        旧实现 assign_task 仅标 RUNNING 填 assigned_nodes, 不发任何 HTTP →
+        agent 从未执行提交任务 (消费链断裂)。此处补真实派发。
+        幂等: 同 task_id 已在派发则跳过。
+        """
+        if not task.assigned_nodes:
+            logger.warning(f"派发跳过: 任务 {task.task_id} 无 assigned_nodes")
+            return
+        if task.task_id in self._dispatch_tasks and not self._dispatch_tasks[task.task_id].done():
+            logger.debug(f"派发跳过: 任务 {task.task_id} 已在派发中")
+            return
+        handle = asyncio.create_task(self._dispatch_task(task), name=f"dispatch_{task.task_id}")
+        self._dispatch_tasks[task.task_id] = handle
+        handle.add_done_callback(lambda h: self._dispatch_tasks.pop(task.task_id, None))
+
+    def _get_dispatch_token(self) -> str:
+        """惰性加载集群 token — 与 agent BearerAuthMiddleware 同源。"""
+        if self._dispatch_token is None:
+            self._dispatch_token = load_or_create_token()
+        return self._dispatch_token
+
+    async def _get_dispatch_http(self) -> httpx.AsyncClient:
+        if self._dispatch_http is None or self._dispatch_http.is_closed:
+            self._dispatch_http = httpx.AsyncClient(timeout=300.0)
+        return self._dispatch_http
+
+    async def _dispatch_task(self, task: ClusterTask) -> None:
+        """派发任务到 assigned_nodes — DATA 并发各节点 / PIPELINE 顺序链式。
+
+        PIPELINE 接上游 fusion-mlx /distributed/* (#621) 真实层切分: 各节点跑模型
+        一段层前向, hidden_states (b64.npy) 经调度器顺序链传; 末节点输出 = 最终
+        hidden_states (lm_head/解码超上游首版范围, 见 _dispatch_pipeline)。
+        """
+        node_ids = list(task.assigned_nodes)
+        nodes_snap = await self._snapshot_nodes(node_ids)
+        token = self._get_dispatch_token()
+        try:
+            if task.mode == ParallelMode.PIPELINE:
+                await self._dispatch_pipeline(task, node_ids, nodes_snap, token)
+            else:
+                await self._dispatch_data(task, node_ids, nodes_snap, token)
+        except Exception as e:
+            logger.error(f"派发异常: {task.name} ({task.task_id}): {e}")
+            await self._finalize_task(task, success=False, error=f"派发异常: {e}")
+
+    async def _dispatch_data(
+        self, task: ClusterTask, node_ids: list[str], nodes_snap: dict[str, NodeInfo], token: str
+    ) -> None:
+        """DATA 并行 — 各 assigned_node 并发 POST /api/execute, 任一失败记 error 但不阻塞其余。"""
+        client = await self._get_dispatch_http()
+        coros = [self._dispatch_to_node(client, task, nid, nodes_snap, token) for nid in node_ids]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        outputs = []
+        errors = []
+        for nid, r in zip(node_ids, results):
+            if isinstance(r, Exception):
+                errors.append(f"{nid}: {type(r).__name__}: {r}")
+            elif isinstance(r, dict) and "error" in r:
+                errors.append(f"{nid}: {r['error']}")
+            elif isinstance(r, dict):
+                outputs.append(r)
+            else:
+                errors.append(f"{nid}: 空响应")
+        success = bool(outputs) and not errors
+        await self._finalize_task(
+            task,
+            success=success,
+            error="; ".join(errors) if errors else "",
+            result={"outputs": outputs, "errors": errors, "node_count": len(node_ids)},
+        )
+
+    async def _dispatch_pipeline(
+        self, task: ClusterTask, node_ids: list[str], nodes_snap: dict[str, NodeInfo], token: str
+    ) -> None:
+        """PIPELINE 真实层切分链式 — 接上游 fusion-mlx /distributed/* (#621)。
+
+        task.model_shards 各段带 layer_range + shard_index; 节点顺序对应 assigned_nodes。
+        首段 (shard_index=0) 带 input_ids (embed+layers), 后续段带上一段出口 hidden_states
+        (b64.npy, 仅 layers)。末段出口 = 最终 hidden_states (lm_head/解码超上游首版范围,
+        docs/distributed-pipeline.md line 151 — 调度器只负责层前向链, 不做 token 生成)。
+        每节点派发 task_type=pipeline_step, 经 _dispatch_to_node 透传 pipeline 字段。
+        """
+        client = await self._get_dispatch_http()
+        model_id = task.params.get("model_id", task.model_name)
+        input_ids = task.params.get("input_ids")
+        hidden_states = None  # 首段 None → 上游 embed+layers
+        steps = []
+        for idx, nid in enumerate(node_ids):
+            shard = task.model_shards[idx] if idx < len(task.model_shards) else {}
+            layer_range = shard.get("layer_range", [])
+            shard_index = int(shard.get("shard_index", idx))
+            step_params = {
+                "model_id": model_id,
+                "shard_index": shard_index,
+                "layer_range": layer_range,
+                "hidden_states": hidden_states,
+                "input_ids": input_ids if idx == 0 else None,
+            }
+            r = await self._dispatch_to_node(
+                client, task, nid, nodes_snap, token, pipeline_step_params=step_params
+            )
+            if isinstance(r, Exception):
+                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} 失败: {r}")
+                return
+            if isinstance(r, dict) and "error" in r:
+                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid}: {r['error']}")
+                return
+            if not isinstance(r, dict) or "hidden_states" not in r:
+                await self._finalize_task(
+                    task, success=False, error=f"流水线步骤 {nid} 未返回 hidden_states"
+                )
+                return
+            hidden_states = r["hidden_states"]
+            steps.append({
+                "node_id": nid,
+                "shard_id": r.get("shard_id", ""),
+                "shape": r.get("shape"),
+                "dtype": r.get("dtype"),
+            })
+            logger.info(f"P3 流水线段 {idx} ({nid}) 完成: shape={r.get('shape')} dtype={r.get('dtype')}")
+        await self._finalize_task(
+            task,
+            success=True,
+            error="",
+            result={
+                "hidden_states": hidden_states,
+                "shape": steps[-1].get("shape") if steps else None,
+                "dtype": steps[-1].get("dtype") if steps else None,
+                "steps": steps,
+                "node_count": len(node_ids),
+            },
+        )
+
+    async def _dispatch_to_node(
+        self,
+        client: httpx.AsyncClient,
+        task: ClusterTask,
+        node_id: str,
+        nodes_snap: dict[str, NodeInfo],
+        token: str,
+        pipeline_step_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/execute 到单 agent。返回 agent 结果 dict 或 raise。
+
+        pipeline_step_params 非空 → task_type=pipeline_step, extra 透传 pipeline 字段
+        (model_id/layer_range/hidden_states/input_ids/...)。否则走 task.task_type 常规派发。
+        """
+        node = nodes_snap.get(node_id)
+        if not node:
+            raise RuntimeError(f"节点 {node_id} 不存在或已离线")
+        # SSRF 守卫: agent ip 走 is_safe_peer_host (与 master_server/agent 一致)
+        if not is_safe_peer_host(node.ip_address):
+            raise RuntimeError(f"节点 {node_id} ip {node.ip_address} 非安全对端, 拒绝派发")
+        params = dict(task.params)
+        if pipeline_step_params is not None:
+            # P3 真实张量 PIPELINE — 走 /distributed/* 层前向链
+            task_type = "pipeline_step"
+            extra = {k: v for k, v in pipeline_step_params.items() if v is not None}
+            payload = {
+                "task_type": task_type,
+                "model_name": task.model_name,
+                "extra": extra,
+            }
+        else:
+            # 常规推理/Embedding 派发
+            payload = {
+                "task_type": task.task_type,
+                "model_name": task.model_name,
+                "prompt": params.get("prompt", ""),
+                "messages": params.get("messages", []),
+                "max_tokens": params.get("max_tokens", 2048),
+                "temperature": params.get("temperature", 0.7),
+                "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
+            }
+        url = build_safe_url("http", node.ip_address, node.port, "/api/execute")
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = await client.post(url, json=payload, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        if data.get("status") != "ok":
+            raise RuntimeError(f"agent {node_id} 返回非 ok: {str(data)[:200]}")
+        agent_result = data.get("result", {})
+        # 注入 node_id 供上层聚合
+        if isinstance(agent_result, dict):
+            agent_result.setdefault("node_id", node_id)
+        return agent_result
+
+    async def _finalize_task(
+        self, task: ClusterTask, success: bool, error: str, result: dict[str, Any] | None = None
+    ) -> None:
+        """派发完成回填任务状态 + 释放节点 active_tasks 计数。"""
+        async with self._nodes_lock:
+            async with self._tasks_lock:
+                t = self.tasks.get(task.task_id)
+                if not t or t.status != TaskStatus.RUNNING:
+                    # 已被 cancel/timeout 改态, 不覆盖
+                    cur_state = t.status.value if t else "gone"
+                    logger.debug(f"派发回填跳过: 任务 {task.task_id} 状态已非 RUNNING ({cur_state})")
+                    return
+                t.status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
+                t.completed_at = time.time()
+                t.error = error
+                if result is not None:
+                    t.result = result
+                for nid in t.assigned_nodes:
+                    node = self.nodes.get(nid)
+                    if node:
+                        node.active_tasks = max(0, node.active_tasks - 1)
+                logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
+
+    async def _snapshot_nodes(self, node_ids: list[str]) -> dict[str, NodeInfo]:
+        """快照节点 (深拷贝引用, 派发期间不被 heartbeat 改字段影响)。"""
+        async with self._nodes_lock:
+            return {nid: self.nodes[nid] for nid in node_ids if nid in self.nodes}
 
     async def migrate_task(self, task_id: str) -> bool:
         """故障迁移任务到其他节点。"""
@@ -784,9 +1025,10 @@ class ClusterMaster:
         )
         return False
 
-    # ── M3-03 选举配置 (未接线原型, 非生产 HA) ──
-    # 注意: setup_election 不被 ClusterMaster.start() 调用, 现网为单 Master 无 HA。
-    # StandbyMaster/MasterElection 仅为单元级原型, 不构成高可用承诺 (AR审计 P1)。
+    # ── M3-03 选举配置 ──
+    # P4: setup_election 已接 start(ha_config=...) — enabled=True 时启动选举循环。
+    # 默认 enabled=False (单 Master 向后兼容)。StandbyMaster/LEARNING 同步仍为原型,
+    # 不构成完整 HA 承诺; 多 Master 部署需自行确保持久化 term/vote + 状态同步。
 
     def setup_election(
         self,
@@ -875,14 +1117,39 @@ class ClusterMaster:
 
     # ── 生命周期 ──
 
-    async def start(self, with_server: bool = True, with_mdns: bool = True) -> None:
-        """启动集群主节点服务。"""
+    async def start(
+        self,
+        with_server: bool = True,
+        with_mdns: bool = True,
+        ha_config: dict[str, Any] | None = None,
+    ) -> None:
+        """启动集群主节点服务。
+
+        ha_config (P4 HA): {"enabled": bool, "node_id": str, "priority": int, "peers": [str]}
+        enabled=True 时接 setup_election 启动选举循环; 否则单 Master 无 HA (默认)。
+        选举投票传输层 (集群内拉票 HTTP) 尚未实现, 现网 HA 为就绪骨架。
+        """
         self._running = True
         logger.info(f"Cluster Master 启动: {self.host}:{self.port}")
         logger.info(f"节点发现端口: {self.discovery_port}")
 
         self._health_task = asyncio.create_task(self._health_check_loop())
         self._retry_task = asyncio.create_task(self._retry_loop())
+
+        # P4 HA 选举接线 — config 门控, 单 Master 默认不启用
+        if ha_config and ha_config.get("enabled") and ha_config.get("node_id") and ha_config.get("peers"):
+            self.setup_election(
+                node_id=ha_config["node_id"],
+                priority=ha_config.get("priority", 0),
+                known_nodes=[
+                    {"node_id": pid, "priority": 0} for pid in ha_config["peers"] if pid != ha_config["node_id"]
+                ],
+            )
+            if self._election:
+                await self._election.start()
+                logger.warning("P4 HA 选举已启动 — 注意: 投票传输层未实现, 现网为单 Master")
+        else:
+            logger.info("P4 HA 未启用 — 单 Master 模式 (默认)")
 
         if with_mdns:
             self._start_mdns()
@@ -903,6 +1170,21 @@ class ClusterMaster:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # P1 派发: 取消在途派发任务 + 关闭 http 客户端
+        for dtask in list(self._dispatch_tasks.values()):
+            if not dtask.done():
+                dtask.cancel()
+                try:
+                    await dtask
+                except asyncio.CancelledError:
+                    pass
+        self._dispatch_tasks.clear()
+        if self._dispatch_http and not self._dispatch_http.is_closed:
+            await self._dispatch_http.aclose()
+            self._dispatch_http = None
+        # P4 HA: 停止选举循环
+        if self._election:
+            await self._election.stop()
         self._stop_mdns()
         logger.info("Cluster Master 已停止")
 

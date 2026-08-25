@@ -133,10 +133,11 @@ class TestExecuteEndpoint:
         assert data["result"] == {"content": "hello world"}
         call_args = mock_agent.execute_task.call_args[0][0]
         assert call_args["type"] == "inference"
+        assert call_args["model"] == "llama-3b"
         assert call_args["model_name"] == "llama-3b"
-        assert call_args["prompt"] == "say hello"
-        assert call_args["max_tokens"] == 2048
-        assert call_args["temperature"] == 0.7
+        assert call_args["params"]["prompt"] == "say hello"
+        assert call_args["params"]["max_tokens"] == 2048
+        assert call_args["params"]["temperature"] == 0.7
 
     @pytest.mark.asyncio
     async def test_execute_task_with_extra(self, client, mock_agent):
@@ -151,7 +152,7 @@ class TestExecuteEndpoint:
         )
         assert resp.status_code == 200
         call_args = mock_agent.execute_task.call_args[0][0]
-        assert call_args["top_p"] == 0.9
+        assert call_args["params"]["top_p"] == 0.9
 
     @pytest.mark.asyncio
     async def test_execute_task_failure(self, client, mock_agent):
