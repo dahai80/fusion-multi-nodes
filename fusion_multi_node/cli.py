@@ -187,7 +187,7 @@ async def _async_node_start(
     else:
         from .agent import AgentConfig
 
-        actual_port = port or 11445
+        actual_port = port or 11458
         config = AgentConfig(
             master_host=master_host,
             master_port=master_port,

@@ -23,7 +23,7 @@ class TestAgentConfig:
         cfg = AgentConfig()
         assert cfg.master_host == "localhost"
         assert cfg.master_port == 11452
-        assert cfg.agent_port == 11445
+        assert cfg.agent_port == 11458
         assert cfg.heartbeat_interval > 0
 
     def test_custom(self):

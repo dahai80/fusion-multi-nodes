@@ -94,7 +94,7 @@ class ClusterConfig:
             "master_host": "127.0.0.1",
             "master_port": 11452,
             "discovery_port": 11450,
-            "agent_port": 11445,
+            "agent_port": 11458,
             "mcp_port": 11446,
             "heartbeat_timeout": 15.0,
             "heartbeat_interval": 3.0,
@@ -140,19 +140,20 @@ class ClusterConfig:
         self._data: dict[str, Any] = {}
         self.load()
 
-    # v0.6.5 旧端口 → 当前默认端口映射（自动迁移）
+    # 旧端口 → 当前默认端口映射（自动迁移）
     _STALE_PORT_MAP = {
         9753: 11452,  # master
         9754: 11450,  # discovery
-        9755: 11445,  # agent
+        9755: 11458,  # agent (v0.6.5 旧)
         9756: 11446,  # mcp
         8000: 11432,  # fusion_mlx（旧误用值）
+        11445: 11458,  # agent (v0.8.0 前默认, 与 fusion-comfyui 撞, issue #19 迁出)
     }
     # 端口键 → 期望默认值（用于校验迁移结果）
     _PORT_KEYS = {
         "cluster.master_port": 11452,
         "cluster.discovery_port": 11450,
-        "cluster.agent_port": 11445,
+        "cluster.agent_port": 11458,
         "cluster.mcp_port": 11446,
         "mlx.fusion_mlx_port": 11432,
     }

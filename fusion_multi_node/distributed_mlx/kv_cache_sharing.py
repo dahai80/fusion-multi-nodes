@@ -204,7 +204,7 @@ class KVSharingManager:
             try:
                 safe_node = sanitize_node_url_part(node_id)
                 resp = await client.post(
-                    f"http://{safe_node}:11445/api/kv/lookup",
+                    f"http://{safe_node}:11458/api/kv/lookup",
                     json={
                         "model_name": model_name,
                         "prompt_hash": prompt_hash,
@@ -231,7 +231,7 @@ class KVSharingManager:
             client = await self._get_http_client(30.0)
             safe_source = sanitize_node_url_part(source_node)
             resp = await client.post(
-                f"http://{safe_source}:11445/api/kv/transfer",
+                f"http://{safe_source}:11458/api/kv/transfer",
                 json={
                     "cache_id": cache_id,
                     "target_node": target_node,
@@ -285,7 +285,7 @@ class KVSharingManager:
                 try:
                     safe_node = sanitize_node_url_part(node_id)
                     resp = await client.post(
-                        f"http://{safe_node}:11445/api/kv/warm",
+                        f"http://{safe_node}:11458/api/kv/warm",
                         json={
                             "model_name": model_name,
                             "prompt": prompt,
