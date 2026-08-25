@@ -24,11 +24,6 @@ from typing import Any
 
 import httpx
 
-from fusion_multi_node.master.cloud_fallback import (
-    CloudConfig,
-    CloudFallbackClient,
-    CloudProvider,
-)
 from fusion_multi_node.master.election import ElectionCandidate, MasterElection
 from fusion_multi_node.master.load_metrics import (
     LoadMetrics,
@@ -222,8 +217,6 @@ class ClusterMaster:
         # M3-03 选举
         self._election: MasterElection | None = None
         self._is_leader = True
-        # M4-05 云端回退
-        self._cloud_client: CloudFallbackClient | None = None
         # P1 派发: Master→Agent /api/execute 投递。惰性复用 httpx + 集群 token
         # (与 master_server cancel 通知同 token, agent BearerAuthMiddleware 校验)。
         self._dispatch_token: str | None = None
@@ -650,8 +643,6 @@ class ClusterMaster:
 
         if len(nodes) < (len(task.model_shards) or 1):
             logger.error(f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)}")
-            if self._cloud_client:
-                logger.info(f"M4-05 尝试云端回退: {task.name}")
             return False
 
         async with self._nodes_lock:
@@ -687,13 +678,6 @@ class ClusterMaster:
     def _enqueue_retry(self, task: ClusterTask) -> None:
         retry_count = getattr(task, "_retry_count", 0)
         if retry_count >= self._max_retry_attempts:
-            if self._cloud_client and task.model_name:
-                task._cloud_fallback_pending = True
-                task.status = TaskStatus.PENDING
-                task.assigned_nodes = []
-                self._pending_retry.append(task)
-                logger.info(f"任务重试超限，转云端回退: {task.name} ({task.task_id})")
-                return
             task.status = TaskStatus.FAILED
             task.error = f"重试次数超限 ({self._max_retry_attempts})"
             logger.error(f"任务重试放弃: {task.name} ({task.task_id})")
@@ -1244,51 +1228,6 @@ class ClusterMaster:
         self._is_leader = False
         logger.warning("本节点从 Leader 降级")
 
-    # ── M4-05 云端回退 (合规边界外, 默认禁用) ──
-    # 注意: 本项目定位"100%本地/离线", setup_cloud_fallback 不被 start() 调用。
-    # _cloud_client=None 时 fallback_to_cloud 直接返回 None。该能力计划迁移至
-    # fusion-gateway (上游 issue 跟踪)。AR审计 P1 合规边界。
-
-    def setup_cloud_fallback(
-        self,
-        provider: str = "openai",
-        api_key: str = "",
-        base_url: str = "",
-        max_cost_per_day: float = 10.0,
-        model: str = "",
-    ) -> None:
-        logger.warning(
-            "M4-05 云端回退违反'100%%本地/离线'定位, 默认禁用; 计划迁移至 fusion-gateway (AR审计 P1)"
-        )
-        try:
-            cloud_provider = CloudProvider(provider)
-        except ValueError:
-            cloud_provider = CloudProvider.OPENAI
-        config = CloudConfig(
-            provider=cloud_provider,
-            api_key=api_key,
-            base_url=base_url,
-            max_cost_per_day=max_cost_per_day,
-            default_model=model or "gpt-4o-mini",
-        )
-        self._cloud_client = CloudFallbackClient(config)
-        logger.info(f"M4-05 云端回退已配置: provider={provider} model={model}")
-
-    async def fallback_to_cloud(self, task: ClusterTask, prompt: str) -> str | None:
-        if not self._cloud_client:
-            logger.warning("云端回退未配置")
-            return None
-        try:
-            result = await self._cloud_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=self._cloud_client._config.default_model,
-            )
-            logger.info(f"M4-05 云端回退成功: {task.name} ({task.task_id})")
-            return result
-        except Exception as e:
-            logger.error(f"M4-05 云端回退失败: {task.name} - {e}")
-            return None
-
     # ── 生命周期 ──
 
     async def start(
@@ -1432,18 +1371,6 @@ class ClusterMaster:
                 retry_tasks = self._pending_retry[:]
                 self._pending_retry.clear()
                 for task in retry_tasks:
-                    if getattr(task, "_cloud_fallback_pending", False):
-                        prompt = f"任务 {task.name} (model={task.model_name})"
-                        result = await self.fallback_to_cloud(task, prompt)
-                        if result:
-                            task.status = TaskStatus.COMPLETED
-                            task.completed_at = time.time()
-                            task.error = ""
-                            logger.info(f"云端回退完成: {task.name}")
-                        else:
-                            task.status = TaskStatus.FAILED
-                            task.error = "云端回退失败"
-                        continue
                     ok = await self.assign_task(task)
                     if not ok:
                         self._enqueue_retry(task)
