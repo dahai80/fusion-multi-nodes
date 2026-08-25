@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `_persist_loop`: 15s 周期快照兜底; `start()` 调 `_restore_tasks()` 恢复, `stop()` 最终落盘
   - `_restore_tasks`: RUNNING/MIGRATED → PENDING 重派 (崩溃前派发中任务须重新调度)
   - `tests/test_task_persistence.py` (10 用例): 恢复语义 / 终态不存 / 原子写 / 损坏文件 / 全链路 start→stop→restore
+- **H2 launchd 进程守护 — 崩溃自愈闭环** (#69)
+  - `deploy/com.dahai80.fusion-multi-node.plist`: launchd 模板 (KeepAlive 崩溃重启 + ThrottleInterval 10s 节流 + RunAtLoad), 占位符渲染 (venv/host/port/logdir)
+  - `start.sh install-launchd` / `uninstall-launchd`: 渲染 plist → `~/Library/LaunchAgents` → launchctl load/unload; 检测 nohup 进程先停转交 launchd (避双实例)
+  - 崩溃 → launchd 重启 → H3 `_restore_tasks` 恢复 = 不丢任务 (进程层 + 数据层双保障)
+  - `docs/HA-CRASH-RECOVERY.md`: 崩溃自愈链路图 + 两层保障 + 局限说明
 
 ### Changed
 

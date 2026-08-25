@@ -226,7 +226,11 @@ master.unban_node("node_1")                            # 手动解封
 >
 > **H3 任务持久化 (v0.8.2, 已接):** 即使单 Master 无完整 HA, RUNNING/PENDING 任务会原子落盘
 > (`~/.fusion/multi-node/tasks.json`), Master 进程崩溃后重启 `start()` 自动 `_restore_tasks`
-> 恢复 (RUNNING→PENDING 重派), 不丢任务。崩溃自愈依赖进程守护 (launchd/supervisor, 待 H2 落地)。
+> 恢复 (RUNNING→PENDING 重派), 不丢任务。
+>
+> **H2 崩溃自愈 (v0.8.2, 已接):** launchd 进程守护 — `./start.sh install-launchd` 渲染
+> `deploy/com.dahai80.fusion-multi-node.plist` (KeepAlive 崩溃 10s 节流自动重启) → launchctl load。
+> 崩溃 → launchd 重启 → H3 恢复任务 = 自愈闭环, 不丢任务。详见 `docs/HA-CRASH-RECOVERY.md`。
 
 ```python
 from fusion_multi_node.master import ClusterMaster
