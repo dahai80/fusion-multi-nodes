@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
 
 from fusion_multi_node.master import (
     ClusterMaster,
@@ -515,6 +516,13 @@ class MasterServer:
             ok = await self.master.assign_task(task)
             if not ok:
                 raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
+            # P1-H: 任务可能入优先级队列 (节点不足/配额满) → PENDING 状态返回 202。
+            if task.status == TaskStatus.PENDING and task.task_id in {
+                t.task_id for t in self.master._pending_queue
+            }:
+                resp = _task_to_resp(task)
+                resp["queued"] = True
+                return JSONResponse(status_code=202, content=resp)
             return _task_to_resp(task)
 
         @app.get("/api/tasks")
