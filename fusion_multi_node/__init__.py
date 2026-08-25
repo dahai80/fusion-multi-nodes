@@ -15,5 +15,5 @@ and storage volumes.
   复用, cluster_sync 被 master_server (LAN 模型清单同步) 复用 — 保留至迁移落地。
 """
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"
 __app_name__ = "Fusion-Multi-Node"

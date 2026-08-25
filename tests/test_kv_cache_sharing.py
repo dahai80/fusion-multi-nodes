@@ -221,12 +221,16 @@ class TestKVSharingManagerTransfer:
     @pytest.mark.asyncio
     async def test_transfer_from_remote_success(self):
         m = KVSharingManager(enable_compression=False)
+        # 推模型: 源节点回传 {entry: 序列化 KVCacheEntry}, 本节点反序列化 + store_local。
+        entry = _make_entry(cache_id="c1")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
+        mock_resp.json.return_value = {"entry": m._serialize_entry(entry)}
         mock_ac_class = _make_mock_client(mock_resp)
         with patch("httpx.AsyncClient", mock_ac_class):
             result = await m.transfer_from_remote("c1", "node_1", "node_2")
         assert result is True
+        assert m.lookup_local_by_id("c1") is not None
 
     @pytest.mark.asyncio
     async def test_transfer_from_remote_http_fail(self):

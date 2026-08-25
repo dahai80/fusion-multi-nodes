@@ -182,6 +182,18 @@ class KVSharingManager:
         self._local_cache.move_to_end(entry.cache_id)
         return entry
 
+    def lookup_local_by_id(self, cache_id: str) -> KVCacheEntry | None:
+        """按 cache_id 查本地 KV 缓存 (跨节点传输用)。"""
+        entry = self._local_cache.get(cache_id)
+        if entry is None:
+            return None
+        if entry.is_expired:
+            self._local_cache.pop(entry.cache_id, None)
+            self._local_size_bytes -= entry.total_size_bytes
+            self._lookup_index.pop((entry.model_name, entry.prompt_hash), None)
+            return None
+        return entry
+
     def lookup_prefix(self, model_name: str, prefix: str) -> list[KVCacheEntry]:
         """按前缀匹配查询 KV 缓存（用于缓存复用）。"""
         matches = []
@@ -239,7 +251,12 @@ class KVSharingManager:
         source_node: str,
         target_node: str,
     ) -> bool:
-        """跨节点传输 KV 缓存。"""
+        """从 source_node 拉取 KV 缓存并本地存储 (target = 本节点)。
+
+        推模型: POST source_node /api/kv/transfer → 源节点回传序列化 entry →
+        本节点 store_local。源节点路由只查本地回传, 不再二次回调 (避免递归)。
+        source_node 须为纯主机名 (路由器拼 :11458), 非 host:port。
+        """
         try:
             client = await self._get_http_client(30.0)
             safe_source = sanitize_node_url_part(source_node)
@@ -253,7 +270,17 @@ class KVSharingManager:
                 },
                 headers=self._auth_headers(),
             )
-            return resp.status_code == 200
+            if resp.status_code != 200:
+                logger.warning(f"KV 传输失败 {source_node} → {target_node}: HTTP {resp.status_code}")
+                return False
+            data = resp.json()
+            entry = self._deserialize_entry(data["entry"])
+            stored = self.store_local(entry)
+            if not stored:
+                logger.warning(f"KV 传输 store_local 失败 {source_node} → {target_node}: cache_id={cache_id}")
+                return False
+            logger.info(f"KV 传输成功 {source_node} → {target_node}: cache_id={cache_id}")
+            return True
         except Exception as e:
             logger.error(f"KV 传输失败 {source_node} → {target_node}: {e}")
             return False
@@ -338,6 +365,24 @@ class KVSharingManager:
             "remote_indexed_nodes": len(self._remote_cache_index),
             "warm_cache_entries": len(self._warm_cache),
             "compression_enabled": self.enable_compression,
+        }
+
+    def _serialize_entry(self, entry: KVCacheEntry) -> dict:
+        """序列化 KV 缓存条目供跨节点传输。"""
+        return {
+            "cache_id": entry.cache_id,
+            "model_name": entry.model_name,
+            "prompt_hash": entry.prompt_hash,
+            "prompt_prefix": entry.prompt_prefix,
+            "total_tokens": entry.total_tokens,
+            "total_size_bytes": entry.total_size_bytes,
+            "created_at": entry.created_at,
+            "ttl_seconds": entry.ttl_seconds,
+            "access_count": entry.access_count,
+            "shards": [
+                {k: getattr(s, k) for k in ALLOWED_SHARD_KEYS if hasattr(s, k)}
+                for s in entry.shards
+            ],
         }
 
     def _deserialize_entry(self, data: dict) -> KVCacheEntry:

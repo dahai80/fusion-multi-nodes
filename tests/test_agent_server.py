@@ -214,7 +214,9 @@ class TestKVLookupEndpoint:
 class TestKVTransferEndpoint:
     @pytest.mark.asyncio
     async def test_kv_transfer_success(self, client, mock_kv_manager):
-        mock_kv_manager.transfer_from_remote.return_value = True
+        # 推模型: 路由查本地 lookup_local_by_id → _serialize_entry 回传。
+        mock_kv_manager.lookup_local_by_id.return_value = MagicMock(cache_id="kv1")
+        mock_kv_manager._serialize_entry.return_value = {"cache_id": "kv1"}
         resp = await client.post(
             "/api/kv/transfer",
             json={
@@ -226,23 +228,26 @@ class TestKVTransferEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
+        assert data["entry"]["cache_id"] == "kv1"
 
     @pytest.mark.asyncio
-    async def test_kv_transfer_failure(self, client, mock_kv_manager):
-        mock_kv_manager.transfer_from_remote.return_value = False
+    async def test_kv_transfer_not_found(self, client, mock_kv_manager):
+        # 本地无此 cache_id → 404 (非静默 200)。
+        mock_kv_manager.lookup_local_by_id.return_value = None
         resp = await client.post(
             "/api/kv/transfer",
             json={
-                "cache_id": "kv1",
+                "cache_id": "kv-missing",
                 "target_node": "node_2",
             },
             headers=AUTH_HEADERS,
         )
-        assert resp.status_code == 500
+        assert resp.status_code == 404
 
     @pytest.mark.asyncio
     async def test_kv_transfer_with_custom_port(self, client, mock_kv_manager):
-        mock_kv_manager.transfer_from_remote.return_value = True
+        mock_kv_manager.lookup_local_by_id.return_value = MagicMock(cache_id="kv1")
+        mock_kv_manager._serialize_entry.return_value = {"cache_id": "kv1"}
         resp = await client.post(
             "/api/kv/transfer",
             json={
