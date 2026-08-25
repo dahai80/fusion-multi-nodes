@@ -205,7 +205,7 @@ class AgentConfig:
     # P2: agent server 绑定地址 — 多机部署需绑定可路由 IP/0.0.0.0, 否则 Master 无法回连 /api/execute。
     # 默认 127.0.0.1 (单机/测试); 多机经 CLI --host 或 start.sh AGENT_HOST 覆盖。
     agent_host: str = "127.0.0.1"
-    agent_port: int = 11445
+    agent_port: int = 11458
     fusion_desk_port: int = 9000
     fusion_mlx_port: int = 11432
     # P3: fusion-mlx /distributed/* 鉴权 api_key (与集群 cluster_token 不同源)。

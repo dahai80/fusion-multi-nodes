@@ -253,7 +253,7 @@ class MasterServer:
                     node_id=node_id,
                     hostname=req.get("hostname", ""),
                     ip_address=req.get("ip_address", ""),
-                    port=req.get("port", 11445),
+                    port=req.get("port", 11458),
                     status=NodeStatus.ONLINE,
                     last_heartbeat=time.time(),
                 )
@@ -263,7 +263,7 @@ class MasterServer:
                     node_id=node_id,
                     hostname=req.get("hostname", ""),
                     ip_address=req.get("ip_address", ""),
-                    port=req.get("port", 11445),
+                    port=req.get("port", 11458),
                 )
                 result["status"] = "ok"
                 result["auto_approved"] = False

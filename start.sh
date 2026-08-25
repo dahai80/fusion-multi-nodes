@@ -1,14 +1,14 @@
 #!/bin/bash
 # fusion-multi-node lifecycle manager (start|stop|restart|status)
-# 默认启动集群 Master (127.0.0.1:11452)；ROLE=agent 启动 Worker Agent (11445)。
-# Port 11452 对齐 fusion-studio multiNodePort；11445 为 Node Agent 端口。
+# 默认启动集群 Master (127.0.0.1:11452)；ROLE=agent 启动 Worker Agent (11458)。
+# Port 11452 对齐 fusion-studio multiNodePort；11458 为 Node Agent 端口。
 # Callers: fusion-studio UpstreamServiceManager (manual start; optional service).
 # Affected API: start.sh start|stop|restart|status; status exits 0 if running, 1 if not.
 # Data schemas: PID file .fusion-multi-node.{master,agent}.pid; logs/{stdout,stderr}_{master,agent}.log。
 # Env:
 #   ROLE (master|agent, default master)
 #   FUSION_MULTINODE_HOST / FUSION_MULTINODE_PORT (master)
-#   FUSION_AGENT_HOST / FUSION_AGENT_PORT (agent, default 127.0.0.1/11445)
+#   FUSION_AGENT_HOST / FUSION_AGENT_PORT (agent, default 127.0.0.1/11458)
 #   FUSION_MASTER_HOST / FUSION_MASTER_PORT (agent 回连 master, default 127.0.0.1/11452)
 
 set -euo pipefail
@@ -22,7 +22,7 @@ HOST="${FUSION_MULTINODE_HOST:-127.0.0.1}"
 PORT="${FUSION_MULTINODE_PORT:-11452}"
 # Agent 角色 env
 AGENT_HOST="${FUSION_AGENT_HOST:-127.0.0.1}"
-AGENT_PORT="${FUSION_AGENT_PORT:-11445}"
+AGENT_PORT="${FUSION_AGENT_PORT:-11458}"
 MASTER_HOST="${FUSION_MASTER_HOST:-127.0.0.1}"
 MASTER_PORT="${FUSION_MASTER_PORT:-11452}"
 PID_FILE="${SCRIPT_DIR}/.fusion-multi-node.${ROLE}.pid"

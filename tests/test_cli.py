@@ -44,7 +44,7 @@ def master_with_nodes():
             node_id=f"n{i}",
             hostname=f"mac{i}",
             ip_address=f"10.0.0.{i}",
-            port=11445,
+            port=11458,
             status=NodeStatus.ONLINE,
             last_heartbeat=time.time(),
             available_memory_gb=50.0 - i * 10,
@@ -524,7 +524,7 @@ class TestClusterApprovalCLI:
                             "node_id": "p1",
                             "hostname": "mac1",
                             "ip_address": "10.0.0.1",
-                            "port": 11445,
+                            "port": 11458,
                             "requested_at": 1.0,
                         },
                     ]

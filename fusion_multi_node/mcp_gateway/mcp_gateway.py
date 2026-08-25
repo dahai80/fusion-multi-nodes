@@ -201,7 +201,7 @@ class MCPClusterGateway:
             )
             return resp.json()
         else:
-            node_port = 11445
+            node_port = 11458
             safe_node = sanitize_node_url_part(node_id)
             resp = await client.post(
                 f"http://{safe_node}:{node_port}/api/mcp/execute",

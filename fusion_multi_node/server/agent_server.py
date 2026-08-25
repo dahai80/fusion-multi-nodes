@@ -148,7 +148,7 @@ class KGLookupRequest(BaseModel):
 class KVTransferRequest(BaseModel):
     cache_id: str
     target_node: str
-    target_port: int = 11445
+    target_port: int = 11458
 
 
 class KVWarmRequest(BaseModel):
@@ -309,7 +309,7 @@ class AgentServer:
             info = self.agent.collect_hardware_info()
             return info
 
-    async def start(self, host: str = "127.0.0.1", port: int = 11445) -> None:
+    async def start(self, host: str = "127.0.0.1", port: int = 11458) -> None:
         import uvicorn
 
         self._host = host

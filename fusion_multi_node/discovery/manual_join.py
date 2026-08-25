@@ -69,7 +69,7 @@ class ManualJoinClient:
         master_port: int = 11452,
         hostname: str = "",
         ip_address: str = "",
-        agent_port: int = 11445,
+        agent_port: int = 11458,
         capabilities: list[str] | None = None,
     ) -> JoinResponse:
         """通过 IP 直连方式加入集群。"""

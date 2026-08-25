@@ -189,7 +189,7 @@ class TestMDNSDiscoveryFindMaster:
         agent_info = DiscoveryInfo(
             name="agent1",
             host="10.0.0.2",
-            port=11445,
+            port=11458,
             properties={"role": "agent"},
         )
         with patch.object(d, "browse", return_value=[agent_info]):

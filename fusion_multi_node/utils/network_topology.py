@@ -298,7 +298,7 @@ class NetworkTopologyDetector:
             try:
                 start = time.time()
                 _reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(peer_ip, 11445),
+                    asyncio.open_connection(peer_ip, 11458),
                     timeout=2.0,
                 )
                 writer.close()
