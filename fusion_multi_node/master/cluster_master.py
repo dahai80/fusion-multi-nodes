@@ -11,12 +11,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -230,6 +233,11 @@ class ClusterMaster:
         # report_fault 窗口内达阈值自动 ban; register_node 拒绝 ban 内节点。
         self._banned_nodes: dict[str, float] = {}
         self._fault_counts: dict[str, list[float]] = defaultdict(list)
+        # H3 任务持久化: 非终态任务落盘 + 启动恢复, Master 崩溃不丢 RUNNING/PENDING。
+        # 原子写 (tmp + os.replace), 与 config.py 同范式。终态任务 (COMPLETED/FAILED/
+        # CANCELLED/TIMEOUT) 不持久化 — 一次性结果, 恢复时按 RUNNING 重新派发。
+        self._task_store_path = Path.home() / ".fusion" / "multi-node" / "tasks.json"
+        self._persist_task: asyncio.Task | None = None
 
     # ── 节点管理 ──
 
@@ -299,6 +307,94 @@ class ClusterMaster:
         if removed:
             logger.info(f"节点手动解封: {node_id}")
         return removed
+
+    # ── H3 任务持久化 + 启动恢复 ──
+
+    _PERSIST_SKIP_FIELDS = {"spec"}  # spec 由 model_* 字段重建, 不直接序列化
+
+    def _task_to_dict(self, task: ClusterTask) -> dict[str, Any]:
+        d = asdict(task)
+        for f in self._PERSIST_SKIP_FIELDS:
+            d.pop(f, None)
+        d["mode"] = task.mode.value
+        d["status"] = task.status.value
+        return d
+
+    def _task_from_dict(self, d: dict[str, Any]) -> ClusterTask:
+        # RUNNING 恢复为 PENDING 重派 (派发中的任务崩溃后须重新调度)
+        st = d.get("status", "pending")
+        if st in ("running", "migrated"):
+            st = "pending"
+        return ClusterTask(
+            task_id=d["task_id"],
+            name=d.get("name", ""),
+            mode=ParallelMode(d.get("mode", "pipeline")),
+            model_name=d.get("model_name", ""),
+            model_id=d.get("model_id"),
+            model_shards=d.get("model_shards", []),
+            assigned_nodes=d.get("assigned_nodes", []),
+            status=TaskStatus(st),
+            created_at=d.get("created_at", 0.0),
+            started_at=d.get("started_at", 0.0),
+            timeout_seconds=d.get("timeout_seconds", 300.0),
+            error=d.get("error", ""),
+            user=d.get("user", ""),
+            required_capability=d.get("required_capability", ""),
+            preferred_node_id=d.get("preferred_node_id", ""),
+            priority=d.get("priority", 0),
+            degraded_from_model=d.get("degraded_from_model", ""),
+            degradation_count=d.get("degradation_count", 0),
+            max_degradations=d.get("max_degradations", 2),
+            sub_tasks=d.get("sub_tasks", []),
+            cancel_reason=d.get("cancel_reason", ""),
+            task_type=d.get("task_type", "inference"),
+            params=d.get("params", {}),
+            result=d.get("result", {}),
+        )
+
+    def _persist_tasks_locked(self) -> None:
+        """已持 _tasks_lock 下落盘非终态任务。终态 (COMPLETED/FAILED/CANCELLED/TIMEOUT) 不存。"""
+        _TERMINAL = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMEOUT}
+        try:
+            pending = [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
+            self._task_store_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._task_store_path.with_suffix(self._task_store_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump({"tasks": pending, "saved_at": time.time()}, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._task_store_path)
+            logger.debug(f"H3 任务持久化: {len(pending)} 非终态任务落盘")
+        except Exception as e:
+            logger.error(f"H3 任务持久化失败: {e}")
+
+    async def _persist_tasks(self) -> None:
+        """加锁落盘 (状态写点调用)。"""
+        async with self._tasks_lock:
+            self._persist_tasks_locked()
+
+    async def _restore_tasks(self) -> int:
+        """启动恢复: 读盘 → 重建非终态任务 (RUNNING/MIGRATED → PENDING 重派)。返回恢复数。"""
+        if not self._task_store_path.exists():
+            return 0
+        try:
+            data = json.loads(self._task_store_path.read_text())
+        except Exception as e:
+            logger.error(f"H3 任务恢复读盘失败: {e}")
+            return 0
+        tasks = data.get("tasks", [])
+        restored = 0
+        async with self._tasks_lock:
+            for d in tasks:
+                try:
+                    task = self._task_from_dict(d)
+                    self.tasks[task.task_id] = task
+                    restored += 1
+                except Exception as e:
+                    logger.warning(f"H3 任务恢复跳过 {d.get('task_id', '?')}: {e}")
+        if restored:
+            logger.warning(f"H3 启动恢复 {restored} 任务 (崩溃前未完成, 已置 PENDING 待重派)")
+        return restored
 
     async def update_heartbeat(
         self,
@@ -579,6 +675,7 @@ class ClusterMaster:
                 task.status = TaskStatus.RUNNING
                 task.started_at = time.time()
                 self.tasks[task.task_id] = task
+                self._persist_tasks_locked()  # H3 即时落盘
 
                 for node in confirmed:
                     node.active_tasks += 1
@@ -820,6 +917,7 @@ class ClusterMaster:
                     node = self.nodes.get(nid)
                     if node:
                         node.active_tasks = max(0, node.active_tasks - 1)
+                self._persist_tasks_locked()  # H3 终态落盘 (清掉该任务)
                 logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
 
     async def _snapshot_nodes(self, node_ids: list[str]) -> dict[str, NodeInfo]:
@@ -892,6 +990,7 @@ class ClusterMaster:
 
                 task.status = TaskStatus.CANCELLED
                 task.error = task.cancel_reason
+                self._persist_tasks_locked()  # H3 终态落盘
 
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
         return True
@@ -1208,8 +1307,12 @@ class ClusterMaster:
         logger.info(f"Cluster Master 启动: {self.host}:{self.port}")
         logger.info(f"节点发现端口: {self.discovery_port}")
 
+        # H3 启动恢复: 重建崩溃前未完成任务 (RUNNING→PENDING 重派)
+        await self._restore_tasks()
+
         self._health_task = asyncio.create_task(self._health_check_loop())
         self._retry_task = asyncio.create_task(self._retry_loop())
+        self._persist_task = asyncio.create_task(self._persist_loop())
 
         # P4 HA 选举接线 — config 门控, 单 Master 默认不启用
         if ha_config and ha_config.get("enabled") and ha_config.get("node_id") and ha_config.get("peers"):
@@ -1238,13 +1341,15 @@ class ClusterMaster:
     async def stop(self) -> None:
         """停止集群主节点。"""
         self._running = False
-        for task in (self._health_task, self._retry_task):
+        for task in (self._health_task, self._retry_task, self._persist_task):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+        # H3 停机前最终落盘 (保留未完成任务供下次启动恢复)
+        await self._persist_tasks()
         # P1 派发: 取消在途派发任务 + 关闭 http 客户端
         for dtask in list(self._dispatch_tasks.values()):
             if not dtask.done():
@@ -1307,6 +1412,15 @@ class ClusterMaster:
         if hasattr(self, "_mdns") and self._mdns:
             self._mdns.unregister()
             self._mdns = None
+
+    async def _persist_loop(self) -> None:
+        """H3 周期快照兜底 (15s) — 关键状态写点已即时落盘, 此处防漏写。"""
+        try:
+            while self._running:
+                await asyncio.sleep(15)
+                await self._persist_tasks()
+        except asyncio.CancelledError:
+            pass
 
     async def _retry_loop(self) -> None:
         """重试队列处理循环。"""
