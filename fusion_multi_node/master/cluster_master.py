@@ -522,6 +522,9 @@ class ClusterMaster:
         """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。"""
         candidates = await self.get_online_nodes()
 
+        # S1 熔断: 跳过 ban 期内节点 (派发失败累积达阈值自动 ban, 不再被选中)
+        candidates = [n for n in candidates if not self.is_node_banned(n.node_id)]
+
         # M3-05 capability 过滤
         if required_capability:
             candidates = [n for n in candidates if required_capability in n.tags]
@@ -842,43 +845,49 @@ class ClusterMaster:
         node = nodes_snap.get(node_id)
         if not node:
             raise RuntimeError(f"节点 {node_id} 不存在或已离线")
-        # SSRF 守卫: agent ip 走 is_safe_peer_host (与 master_server/agent 一致)
-        if not is_safe_peer_host(node.ip_address):
-            raise RuntimeError(f"节点 {node_id} ip {node.ip_address} 非安全对端, 拒绝派发")
-        params = dict(task.params)
-        if pipeline_step_params is not None:
-            # P3 真实张量 PIPELINE — 走 /distributed/* 层前向链
-            task_type = "pipeline_step"
-            extra = {k: v for k, v in pipeline_step_params.items() if v is not None}
-            payload = {
-                "task_type": task_type,
-                "model_name": task.model_name,
-                "extra": extra,
-            }
-        else:
-            # 常规推理/Embedding 派发
-            payload = {
-                "task_type": task.task_type,
-                "model_name": task.model_name,
-                "prompt": params.get("prompt", ""),
-                "messages": params.get("messages", []),
-                "max_tokens": params.get("max_tokens", 2048),
-                "temperature": params.get("temperature", 0.7),
-                "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
-            }
-        url = build_safe_url("http", node.ip_address, node.port, "/api/execute")
-        headers = {"Authorization": f"Bearer {token}"}
-        resp = await client.post(url, json=payload, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        if data.get("status") != "ok":
-            raise RuntimeError(f"agent {node_id} 返回非 ok: {str(data)[:200]}")
-        agent_result = data.get("result", {})
-        # 注入 node_id 供上层聚合
-        if isinstance(agent_result, dict):
-            agent_result.setdefault("node_id", node_id)
-        return agent_result
+        # S1 熔断: 派发失败 (SSRF 拒绝 / HTTP 非 200 / agent 返回非 ok) 累计报告故障,
+        # 窗口内达 _FAULT_THRESHOLD (3) 自动 ban, select_nodes 跳过 ban 节点不再派发。
+        try:
+            # SSRF 守卫: agent ip 走 is_safe_peer_host (与 master_server/agent 一致)
+            if not is_safe_peer_host(node.ip_address):
+                raise RuntimeError(f"节点 {node_id} ip {node.ip_address} 非安全对端, 拒绝派发")
+            params = dict(task.params)
+            if pipeline_step_params is not None:
+                # P3 真实张量 PIPELINE — 走 /distributed/* 层前向链
+                task_type = "pipeline_step"
+                extra = {k: v for k, v in pipeline_step_params.items() if v is not None}
+                payload = {
+                    "task_type": task_type,
+                    "model_name": task.model_name,
+                    "extra": extra,
+                }
+            else:
+                # 常规推理/Embedding 派发
+                payload = {
+                    "task_type": task.task_type,
+                    "model_name": task.model_name,
+                    "prompt": params.get("prompt", ""),
+                    "messages": params.get("messages", []),
+                    "max_tokens": params.get("max_tokens", 2048),
+                    "temperature": params.get("temperature", 0.7),
+                    "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
+                }
+            url = build_safe_url("http", node.ip_address, node.port, "/api/execute")
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            if data.get("status") != "ok":
+                raise RuntimeError(f"agent {node_id} 返回非 ok: {str(data)[:200]}")
+            agent_result = data.get("result", {})
+            # 注入 node_id 供上层聚合
+            if isinstance(agent_result, dict):
+                agent_result.setdefault("node_id", node_id)
+            return agent_result
+        except Exception as e:
+            await self.report_fault(node_id, fault_type="dispatch_failed", message=str(e)[:200])
+            raise
 
     async def _finalize_task(
         self, task: ClusterTask, success: bool, error: str, result: dict[str, Any] | None = None

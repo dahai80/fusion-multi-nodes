@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-872%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-878%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -195,7 +195,7 @@ await master.degrade_task("task_1")  # 70b→32b→13b→8b→3b→1b
 master.complete_task("task_1")
 ```
 
-**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, cloud fallback on retry exhaustion.
+**Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, task-level circuit breaker (S1 dispatch-fault auto-ban).
 
 #### 节点注册幂等 + 故障黑名单 (F-A12 / F-A13, #20)
 
@@ -215,6 +215,22 @@ await master.report_fault("node_1", "oom", "again")  # 第 3 次触发 ban
 assert master.is_node_banned("node_1")
 assert await master.register_node(node) is False       # ban 期拒绝
 master.unban_node("node_1")                            # 手动解封
+```
+
+#### 任务级熔断器 (S1, #70) — 派发失败自动 ban
+
+- **派发失败报故障**: `_dispatch_to_node` 失败 (SSRF 拒绝 / agent HTTP 非 200 / agent 返回非 ok)
+  → 自动调 `report_fault(node_id, "dispatch_failed")`, 计入 F-A13 故障窗口。
+- **调度跳过 ban 节点**: `select_nodes` 候选过滤跳过 ban 期内节点 — 原仅 `register_node`
+  拦截, 调度路径漏拦, 故障节点会被反复派发; S1 补齐调度侧拦截。
+- 连续派发失败达 `_FAULT_THRESHOLD` (3) 自动 ban, ban 期内不再被选中; 到期/解封后恢复可选。
+
+```python
+# 派发失败 3 次 → 节点自动 ban, select_nodes 不再选它
+for i in range(master._FAULT_THRESHOLD):
+    await master._dispatch_task(task_failing_on_node_1)
+assert master.is_node_banned("node_1")
+assert await master.select_nodes(ParallelMode.DATA, count=1) == []  # 全 ban 返回空
 ```
 
 ### Master Election (`fusion_multi_node.master.election`) — P4 已接 start(), 默认关闭
@@ -747,7 +763,19 @@ pytest tests/test_new_features.py -v
 - [x] P2: CLI --transport fmp wiring (FMPServer + FMPConnectionManager)
 - [x] 805 tests, 0 ruff errors
 
+### v0.8.2 ✅ — 生产就绪硬阻断 + 软债 (2026-08-25)
+- [x] H3 Master 任务持久化 + 崩溃启动恢复 (原子落盘, RUNNING→PENDING 重派)
+- [x] H2 launchd 进程守护 — 崩溃自愈闭环 (KeepAlive 重启 + H3 恢复)
+- [x] H4 cloud_fallback 调度路径切断 (100% 本地合规); 功能归属债待迁移 fusion-gateway/fusion-cowork
+- [x] H1 PIPELINE 无 token 输出 — 上游 fusion-mlx #630 (decode/lm_head 端点, 本仓不可修)
+- [x] S1 任务级熔断器 — 派发失败报故障 + select_nodes 跳过 ban 节点
+- [x] 878 tests, 0 ruff errors
+
 ### Future
+- [ ] S2 生产监控指标端点 /api/v1/metrics (Prometheus)
+- [ ] S3 负载/压测基线测试 (派发吞吐 / 尾延迟 / 无丢失)
+- [ ] S4 真实模型集成测试覆盖 (DATA 并行 E2E + KV 共享 E2E)
+- [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Plugin ecosystem cluster registration
 - [ ] Cluster monitoring dashboard (fusion-studio)
