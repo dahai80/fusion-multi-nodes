@@ -198,6 +198,7 @@ class TestMasterServerTaskManagement:
 
     @pytest.mark.asyncio
     async def test_submit_task_no_nodes(self, client):
+        # P1-H: 无节点 → 入队, 返回 202 (queued=True), 非 503。
         resp = await client.post(
             "/api/tasks/submit",
             json={
@@ -206,7 +207,8 @@ class TestMasterServerTaskManagement:
             },
             headers=AUTH_HEADERS,
         )
-        assert resp.status_code == 503
+        assert resp.status_code == 202
+        assert resp.json().get("queued") is True
 
     @pytest.mark.asyncio
     async def test_list_tasks(self, client, master_server):

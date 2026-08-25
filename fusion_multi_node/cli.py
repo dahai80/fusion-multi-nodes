@@ -298,6 +298,8 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
             host=_config.get("cluster.master_host", "127.0.0.1"),
             port=_config.get("cluster.master_port", 11452),
         )
+        # P1-H 注入租户并发配额 (DEFAULT_CONFIG scheduling.tenant_max_concurrent)。
+        _master.configure_scheduling(_config.get("scheduling.tenant_max_concurrent", 4))
         await _master.start()
 
         if transport == "fmp":

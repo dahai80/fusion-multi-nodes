@@ -55,6 +55,14 @@ def _validate_str(value: Any) -> str:
     return value
 
 
+def _validate_nonneg_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigValidationError(f"须为整数, 得到 {type(value).__name__}: {value!r}")
+    if value < 0:
+        raise ConfigValidationError(f"须为非负整数, 得到 {value!r}")
+    return value
+
+
 _FIELD_VALIDATORS: dict[str, Any] = {
     "cluster.master_port": _validate_port,
     "cluster.discovery_port": _validate_port,
@@ -69,6 +77,7 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "parallel.data_parallel_timeout": _validate_positive_float,
     "parallel.caveman_compress": _validate_bool,
     "parallel.communication": _validate_str,
+    "scheduling.tenant_max_concurrent": _validate_nonneg_int,
     "mlx.fusion_mlx_port": _validate_port,
     "mlx.fusion_kb_port": _validate_port,
     "mlx.fusion_desk_port": _validate_port,
@@ -115,6 +124,11 @@ class ClusterConfig:
             "data_parallel_timeout": 120.0,
             "caveman_compress": True,
             "communication": "auto",
+        },
+        # P1-H 多租户调度 — 每租户最大并发运行任务数 (超额入优先级队列, 非拒绝)。
+        # 0 = 不限。高优先级任务 (priority 数值大) 排队时优先获得空闲节点。
+        "scheduling": {
+            "tenant_max_concurrent": 4,
         },
         "mlx": {
             "fusion_mlx_port": 11432,

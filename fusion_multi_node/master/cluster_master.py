@@ -221,6 +221,11 @@ class ClusterMaster:
         self._max_retry_attempts = 1
         self._max_completed_tasks = 1000
         self._max_kv_cache = 500
+        # P1-H 优先级队列 + 租户配额: assign_task 节点不足或租户超配额时入队 (非 503),
+        # 任务完成/节点上线时 _drain_pending_locked 按优先级降序派发。
+        # tenant_max_concurrent=0 不限; 默认 4 (DEFAULT_CONFIG scheduling)。
+        self._pending_queue: list[ClusterTask] = []
+        self._tenant_max_concurrent = 4
         # M3-03 选举
         self._election: MasterElection | None = None
         self._is_leader = True
@@ -270,7 +275,9 @@ class ClusterMaster:
             self.nodes[info.node_id] = info
             # M4-01 同步负载指标到 LoadRouter
             self._sync_node_metrics(info)
-            return True
+        # P1-H: 新节点上线 → 排空待派发队列 (优先级高的先得空闲节点)。
+        await self._drain_pending_locked()
+        return True
 
     async def unregister_node(self, node_id: str, reason: str = "") -> None:
         """注销节点 (F-A13: reason="banned" 写入黑名单 _BAN_DURATION_S)。"""
@@ -609,6 +616,61 @@ class ClusterMaster:
             candidates.sort(key=lambda n: (n.active_tasks, -n.score))
         return candidates[:count]
 
+    # ── P1-H 优先级队列 + 租户配额 ──
+
+    def _running_count_for_user(self, user: str) -> int:
+        """当前该租户 RUNNING 任务数 (锁内调用, 直接读 self.tasks)。"""
+        if not user:
+            user = ""
+        return sum(
+            1
+            for t in self.tasks.values()
+            if t.status == TaskStatus.RUNNING and (t.user or "") == user
+        )
+
+    def configure_scheduling(self, tenant_max_concurrent: int) -> None:
+        """P1-H: 设置租户并发配额 (0=不限)。供 CLI 从 ClusterConfig 注入。"""
+        self._tenant_max_concurrent = max(0, int(tenant_max_concurrent))
+        logger.info(f"P1-H 租户并发配额: {self._tenant_max_concurrent} (0=不限)")
+
+    def _enqueue_pending(self, task: ClusterTask) -> None:
+        """入优先级队列 — 按 priority 降序插入保持队列有序 (稳定排序)。
+
+        同时登记到 self.tasks — 队列任务须可被 cancel_task/list_tasks/H3 持久化找到
+        (PENDING 属非终态, _persist_tasks_locked 会落盘)。
+        """
+        task.status = TaskStatus.PENDING
+        task.assigned_nodes = []
+        self.tasks[task.task_id] = task
+        idx = len(self._pending_queue)
+        for i, t in enumerate(self._pending_queue):
+            if task.priority > t.priority:
+                idx = i
+                break
+        self._pending_queue.insert(idx, task)
+        logger.info(
+            f"P1-H 任务入队: {task.name} ({task.task_id}) user={task.user} "
+            f"priority={task.priority} 队列长度={len(self._pending_queue)}"
+        )
+
+    async def _drain_pending_locked(self) -> None:
+        """派发队列中可调度的任务 — 节点空闲/配额释放后调用。
+
+        须持 _tasks_lock (调用方负责)。逐个取出队首任务重试 assign_task;
+        assign_task 内部会再取锁 — 此处先释放再重入避免双重加锁。
+        """
+        if not self._pending_queue:
+            return
+        # 快照队列, 释放锁后逐个派发 (assign_task 自取锁)。
+        queued = self._pending_queue[:]
+        self._pending_queue.clear()
+        logger.info(f"P1-H 排空队列: {len(queued)} 个待派发任务")
+        for task in queued:
+            ok = await self.assign_task(task)
+            if not ok:
+                # 仍派不出去 (节点不足/配额满) → 重新入队, 保持优先级序。
+                self._enqueue_pending(task)
+
     async def complete_task(self, task_id: str, error: str = "") -> None:
         """完成任务。"""
         async with self._nodes_lock:
@@ -624,6 +686,8 @@ class ClusterMaster:
                     node = self.nodes.get(nid)
                     if node:
                         node.active_tasks = max(0, node.active_tasks - 1)
+        # P1-H: 任务完成释放配额/节点 → 排空待派发队列 (高优先级先得)。
+        await self._drain_pending_locked()
 
     async def assign_task(self, task: ClusterTask) -> bool:
         """分配任务到节点 — 幂等: 已 RUNNING 的任务直接返回 True。
@@ -641,6 +705,16 @@ class ClusterMaster:
             if existing and existing.status == TaskStatus.RUNNING:
                 logger.debug(f"任务已分配，跳过: {task.task_id}")
                 return True
+            # P1-H 租户配额: 该租户 RUNNING 任务达上限 → 入优先级队列 (非 503)。
+            # 0 = 不限。队列内任务重派时 _drain_pending_locked 已持有判断, 此处仅首入口拦截。
+            if self._tenant_max_concurrent > 0:
+                running = self._running_count_for_user(task.user)
+                if running >= self._tenant_max_concurrent:
+                    if task.task_id in {t.task_id for t in self._pending_queue}:
+                        logger.debug(f"P1-H 任务已在队列, 跳过重复入队: {task.task_id}")
+                        return True
+                    self._enqueue_pending(task)
+                    return True
 
         required_mem = self._estimate_memory(task)
 
@@ -697,8 +771,15 @@ class ClusterMaster:
                 self.load_router.set_strategy(original_strategy)
 
         if len(nodes) < (len(task.model_shards) or 1):
-            logger.error(f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)}")
-            return False
+            # P1-H: 节点不足不再直接 503 → 入优先级队列, 节点空闲时排空派发。
+            logger.warning(
+                f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)} → 入队等待"
+            )
+            async with self._tasks_lock:
+                if task.task_id in {t.task_id for t in self._pending_queue}:
+                    return True
+                self._enqueue_pending(task)
+            return True
 
         async with self._nodes_lock:
             async with self._tasks_lock:
@@ -732,8 +813,10 @@ class ClusterMaster:
                         )
                         confirmed.extend(extra)
                 if len(confirmed) < need:
-                    logger.warning(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)}")
-                    return False
+                    # P1-H: 并发抢占后仍不足 → 入优先级队列 (锁内, _enqueue_pending 无锁需求)。
+                    logger.warning(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)} → 入队等待")
+                    self._enqueue_pending(task)
+                    return True
                 task.assigned_nodes = [n.node_id for n in confirmed]
                 task.status = TaskStatus.RUNNING
                 task.started_at = time.time()
@@ -1013,6 +1096,7 @@ class ClusterMaster:
     # M5-04 任务全生命周期取消
     async def cancel_task(self, task_id: str, reason: str = "", cancel_sub_tasks: bool = True) -> bool:
         """取消任务及其子任务。"""
+        cancelled_sub = []
         async with self._nodes_lock:
             async with self._tasks_lock:
                 task = self.tasks.get(task_id)
@@ -1029,9 +1113,10 @@ class ClusterMaster:
                     if node:
                         node.active_tasks = max(0, node.active_tasks - 1)
                 task.assigned_nodes = []
+                # P1-H: 从优先级队列移除 (若在队)。
+                self._pending_queue = [t for t in self._pending_queue if t.task_id != task_id]
 
                 # 递归取消子任务（支持多层）
-                cancelled_sub = []
                 if cancel_sub_tasks and task.sub_tasks:
                     cancel_stack = list(task.sub_tasks)
                     while cancel_stack:
@@ -1047,6 +1132,9 @@ class ClusterMaster:
                             sub.cancel_reason = f"父任务取消: {task_id}"
                             sub.error = sub.cancel_reason
                             cancelled_sub.append(sub_id)
+                            self._pending_queue = [
+                                t for t in self._pending_queue if t.task_id != sub_id
+                            ]
                             if sub.sub_tasks:
                                 cancel_stack.extend(sub.sub_tasks)
 
@@ -1055,6 +1143,8 @@ class ClusterMaster:
                 self._persist_tasks_locked()  # H3 终态落盘
 
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
+        # P1-H: 取消释放节点/配额 → 排空队列。
+        await self._drain_pending_locked()
         return True
 
     # M4-04 任务自动降级
@@ -1437,7 +1527,17 @@ class ClusterMaster:
         logger.info(f"节点发现端口: {self.discovery_port}")
 
         # H3 启动恢复: 重建崩溃前未完成任务 (RUNNING→PENDING 重派)
-        await self._restore_tasks()
+        restored = await self._restore_tasks()
+        # P1-H: 恢复的 PENDING 任务入优先级队列排空派发 (无节点则留在队列等注册)。
+        if restored:
+            async with self._tasks_lock:
+                for task in list(self.tasks.values()):
+                    if (
+                        task.status == TaskStatus.PENDING
+                        and task.task_id not in {t.task_id for t in self._pending_queue}
+                    ):
+                        self._enqueue_pending(task)
+            await self._drain_pending_locked()
 
         self._health_task = asyncio.create_task(self._health_check_loop())
         self._retry_task = asyncio.create_task(self._retry_loop())

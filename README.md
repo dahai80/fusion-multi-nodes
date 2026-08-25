@@ -441,6 +441,29 @@ node_cert, node_key = mtls.provision_node("worker-1", "worker", ca_cert, ca_key,
 - 强制模式缺 `X-Node-Id` → 403; 角色无权 → 403
 - 兼容模式 (mTLS 关) 无 header → 放行 (现有 http 测试/CLI 不带头)
 
+#### 多租户配额 + 优先级队列 (#81)
+
+P1-H 多租户调度: 全局默认每租户最大并发运行任务数, 超额入优先级队列 (非拒绝); 高优先级任务排队时优先获得空闲节点 (非抢占, 不杀运行中任务)。
+
+```python
+from fusion_multi_node.master import ClusterMaster
+
+master = ClusterMaster()
+master.configure_scheduling(tenant_max_concurrent=4)  # 0 = 不限配额 (节点容量仍限)
+
+# 超配额任务自动入队, assign_task 返回 True (非拒绝)
+await master.assign_task(task)
+# 队列按 priority 降序, 节点上线 / 任务完成 / 取消占槽任务 → 排空队首
+```
+
+- 配额全局默认: 配置键 `scheduling.tenant_max_concurrent` (默认 4, 0=不限), CLI 启动自动加载
+- 超额入队: 租户运行任务达配额 → 新任务 `TaskStatus.PENDING` 入队, `assign_task` 返 True
+- 无节点入队: `select_nodes` 无可用节点 → 入队 (不再返 503), 节点上线排空
+- 优先级: `ClusterTask.priority` (TaskPriority: LOW=0/NORMAL=1/HIGH=2/CRITICAL=3), 队列降序排
+- 排空触发: `complete_task` / `register_node` / `cancel_task` (取消占槽任务释放并发槽)
+- HTTP: `POST /api/tasks/submit` 入队返回 `202 {"queued": true}` (派发成功仍返 200)
+- 取消: `cancel_task` 递归移除队列中主/子任务; 队列任务注册于 `master.tasks` 可查/可取消
+
 ### 6. Observability (`fusion_multi_node.observability`)
 
 Metrics, logs, alerts, log store with export, intelligent fault diagnosis.
@@ -862,6 +885,7 @@ pytest tests/test_pipeline_e2e.py -v
 - **Node approval** — New nodes require approval or pattern-based auto-approval
 - **Master/Worker isolation** — Role-based permission, API path access control
 - **mTLS node auth** — Private CA + per-node leaf cert, env-gated mutual TLS (#80)
+- **Multi-tenant quota + priority queue** — Per-tenant concurrent cap, over-quota enqueue, priority-ordered dispatch (#81)
 - **Worker sandbox** — CPU/memory/disk limits, path & network whitelisting
 - **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards)
 - **AES-GCM encryption** — FMP protocol encrypted communication

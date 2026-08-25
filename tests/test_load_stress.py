@@ -113,6 +113,8 @@ async def stress_cluster(monkeypatch):
 
     routing_transport = PortRoutingTransport(port_to_app)
     master = ClusterMaster(heartbeat_timeout=60.0)
+    # P1-H: 压测测调度吞吐非租户配额 → 关闭配额 (0=不限), 否则单租户被限 4 并发。
+    master.configure_scheduling(0)
     master._dispatch_token = TEST_TOKEN
 
     async def _fake_dispatch_http():

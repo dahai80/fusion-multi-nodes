@@ -185,10 +185,13 @@ class TestClusterMaster:
 
     @pytest.mark.asyncio
     async def test_assign_task_no_nodes(self):
+        # P1-H: 无可用节点 → 入优先级队列 (非 503), 返回 True, PENDING 待节点上线。
         master = ClusterMaster()
         task = ClusterTask(task_id="t1", name="infer", mode=ParallelMode.PIPELINE)
         ok = await master.assign_task(task)
-        assert ok is False
+        assert ok is True
+        assert task.status == TaskStatus.PENDING
+        assert task.task_id in {t.task_id for t in master._pending_queue}
 
     @pytest.mark.asyncio
     async def test_assign_task_toctou_backfill(self):
