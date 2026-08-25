@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 并发 40 任务无丢失 (lost=0/failed=0/backend_calls=40), 派发吞吐 > 20 task/s
   - 派发延迟尾部分布 (p95 < 1.0s, p99 < 2.0s); DATA 并行两节点 20 任务吞吐 > 10 task/s
   - 压测放开 agent 限流 (默认 30 req/min → 100000) + 节点 max_tasks=200 (测调度吞吐非容量上限)
+- **S4 真实模型集成测试覆盖** (#73) — DATA 并行 E2E 真推理 + KV 共享 E2E 真 ASGI 路由链
+  - `tests/test_data_parallelism_e2e.py` (1 用例): skip-gate `_mlx_alive() and _model_available()` (查 `/v1/models` 列表含模型 id), fusion-mlx 停则跳过; 2 节点 DATA 并行真推理 (`mlx-community-Llama-3.2-1B-Instruct-4bit`), 断 COMPLETED / node_count==2 / 两节点各返非空 content+usage
+  - `tests/test_kv_sharing_e2e.py` (4 用例): 合成 KVCacheEntry 验跨节点 HTTP 路由链 (非模型张量, 无 skip-gate) — 同节点 store→lookup round-trip / 未命中 404 / warm 跨节点推送 / stats 路由; `PortRoutingTransport` 按 URL 端口路由到 ASGI (无真 TCP), manager `_get_http_client` monkeypatch 重写 `:11458` 端口
+  - 覆盖原 17/24 单元 mock 文件未触达的 agent_server KV 路由端到端
 
 ### Changed
 
@@ -53,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - CLAUDE.md: cluster_sync "not wired into lifecycle" 实为已接 master_server start()/stop() — 更正; cloud_fallback 标注 v0.8.2 切断现状
+- **FusionMLXBackend `/v1/*` 漏带鉴权头** (#73, S4 E2E 暴露) — `chat`/`embed` POST `/v1/chat/completions`、`/v1/embeddings` 未带 `Authorization`。fusion-mlx 启用 api_key 时 `/v1/*` 同样受保护 (与 `/distributed/*` 同源), 漏带一律 401。补 `headers=self._dist_headers()`。生产缺陷: 任何启用 auth 的 fusion-mlx 推理直接 401
+- **KVSharingManager 跨节点 HTTP 漏带鉴权头** (#73, S4 E2E 暴露) — `lookup_remote`/`transfer_from_remote`/`warm_cache` POST 对端 agent `/api/kv/*` 未带 `Authorization`。对端 `BearerAuthMiddleware` 默认鉴权, 缺 token 全部 401。`KVSharingManager` 加 `cluster_token` 参数 + `_auth_headers()`, `AgentServer.__init__` 透传 `shared_token`。生产缺陷: 跨节点 KV 共享在鉴权 agent 上全部 401
+- **KVWarmRequest 契约错配 + kv_warm 路由递归** (#73, S4 E2E 暴露) — schema 要求 `prompts: list[str]` (复数必填) 但 `warm_cache` 发 `{model_name, prompt, prompt_hash}` (单数) → 422; 且 `/api/kv/warm` 路由回调 `self.kv_manager.warm_cache` (二次跨节点远推 → 递归)。改 schema 为 `{model_name, prompt, prompt_hash, total_tokens, total_size_bytes}`, 路由只本地 `store_local` (跨节点分发归 `warm_cache`)
 
 ## [0.8.1] - 2026-08-25
 

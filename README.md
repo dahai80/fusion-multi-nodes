@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-885%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-888%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -599,7 +599,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (805 tests)
+# Run all tests (888 tests)
 pytest tests/ -v
 
 # With coverage
@@ -610,6 +610,26 @@ pytest tests/test_cluster_master.py -v
 pytest tests/test_protocol.py -v
 pytest tests/test_new_features.py -v
 ```
+
+### 真实模型 E2E (需 fusion-mlx 运行)
+
+```bash
+~/claude-home/fusion-mlx/start.sh start        # 启动推理引擎 (端口 11434)
+
+# DATA 并行 2 节点真推理 (skip-gate: fusion-mlx alive + 模型在 /v1/models 列表)
+pytest tests/test_data_parallelism_e2e.py -v
+
+# 跨节点 KV 缓存共享 (合成数据, 无需模型, 无 skip-gate)
+pytest tests/test_kv_sharing_e2e.py -v
+
+# Pipeline 并行层切分真推理
+pytest tests/test_pipeline_e2e.py -v
+
+~/claude-home/fusion-mlx/start.sh stop         # 用完关闭
+```
+
+> 默认模型 `mlx-community-Llama-3.2-1B-Instruct-4bit`, api_key 走配置 `mlx.fusion_mlx_api_key`。
+> fusion-mlx 停时 E2E 自动跳过 (skip-gate), 不阻塞 CI 全绿。
 
 ---
 
@@ -787,10 +807,10 @@ pytest tests/test_new_features.py -v
 - [x] S1 任务级熔断器 — 派发失败报故障 + select_nodes 跳过 ban 节点
 - [x] S2 生产监控指标端点 /api/v1/metrics (Prometheus exposition)
 - [x] S3 负载/压测基线测试 (调度层吞吐 / 尾延迟 / 无丢失)
-- [x] 885 tests, 0 ruff errors
+- [x] S4 真实模型集成测试覆盖 (DATA 并行 E2E 真推理 + KV 共享 E2E 真 ASGI 路由链; 附修 3 生产 bug: FusionMLXBackend `/v1/*` 漏鉴权 / KVSharingManager 跨节点 HTTP 漏鉴权 / KVWarmRequest 契约错配)
+- [x] 888 tests, 0 ruff errors
 
 ### Future
-- [ ] S4 真实模型集成测试覆盖 (DATA 并行 E2E + KV 共享 E2E)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Distributed MLX operator bridge (mlx.distributed API)
 - [ ] Plugin ecosystem cluster registration

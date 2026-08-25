@@ -153,9 +153,11 @@ class KVTransferRequest(BaseModel):
 
 class KVWarmRequest(BaseModel):
     model_name: str
-    prompts: list[str]
-    # 目标节点列表; 不提供则仅本节点预存 (无远端推送)。
-    nodes: list[str] = []
+    prompt: str
+    prompt_hash: str
+    # token_count/size 仅记录用, 缺则估 0。
+    total_tokens: int = 0
+    total_size_bytes: int = 0
 
 
 class TaskCancelRequest(BaseModel):
@@ -181,9 +183,16 @@ class AgentServer:
         shared_token: str | None = None,
     ):
         self.agent = agent or NodeAgent()
-        self.kv_manager = kv_manager or KVSharingManager()
-        self.app = FastAPI(title="Fusion Multi-Node Agent", version=_VERSION)
         self._shared_token = shared_token or load_or_create_token()
+        # KVSharingManager 跨节点 HTTP 调用需过对端 Bearer 鉴权 — 透传集群共享 token。
+        # 注入者自带 manager 时补齐 token (缺则 401)。
+        if kv_manager is not None:
+            self.kv_manager = kv_manager
+            if not getattr(kv_manager, "_cluster_token", ""):
+                kv_manager._cluster_token = self._shared_token
+        else:
+            self.kv_manager = KVSharingManager(cluster_token=self._shared_token)
+        self.app = FastAPI(title="Fusion Multi-Node Agent", version=_VERSION)
         self._rate_limiter = InMemoryRateLimiter()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
         self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
@@ -286,17 +295,39 @@ class AgentServer:
 
         @app.post("/api/kv/warm")
         async def kv_warm(req: KVWarmRequest):
-            # E7: nodes 由调用方提供 (Master/CLI 持有在线节点表)。
-            # Agent 不知集群拓扑, 不可硬编码 []; 空 nodes = 仅本节点预存, 远端无推送。
-            if not req.nodes:
-                logger.warning("kv_warm: 未提供目标节点, 仅本节点预存, 无远端推送")
-            result = await self.kv_manager.warm_cache(
-                req.model_name,
-                req.prompts,
-                nodes=req.nodes,
+            # Worker 端本地预存 — Master/调度器经 KVSharingManager.warm_cache 跨节点分发,
+            # 各 Worker 收到此请求只本地 store_local (不再二次远推, 否则递归)。
+            # 契约对齐 manager.warm_cache 发送体: {model_name, prompt, prompt_hash}。
+            import time
+
+            from fusion_multi_node.distributed_mlx.kv_cache_sharing import (
+                KVCacheEntry,
+                KVShard,
             )
-            warmed = result.get("success", 0)
-            return {"status": "ok", "warmed": warmed, "success": warmed, "failed": result.get("failed", 0)}
+
+            entry = KVCacheEntry(
+                cache_id=f"warm-{req.prompt_hash}",
+                model_name=req.model_name,
+                prompt_hash=req.prompt_hash,
+                prompt_prefix=req.prompt[:100],
+                total_tokens=req.total_tokens,
+                total_size_bytes=req.total_size_bytes,
+                created_at=time.time(),
+                ttl_seconds=3600.0,
+                shards=[
+                    KVShard(
+                        shard_id=f"ws-{req.prompt_hash}",
+                        model_name=req.model_name,
+                        layer_index=0,
+                        node_id=self.agent.config.node_id,
+                        token_count=req.total_tokens,
+                        size_bytes=req.total_size_bytes,
+                        created_at=time.time(),
+                    )
+                ],
+            )
+            stored = self.kv_manager.store_local(entry)
+            return {"status": "ok" if stored else "skip", "warmed": 1 if stored else 0}
 
         @app.get("/api/kv/stats")
         async def kv_stats():

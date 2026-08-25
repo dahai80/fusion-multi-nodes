@@ -166,7 +166,11 @@ class FusionMLXBackend(InferenceBackend):
             **kwargs,
         }
         client = await self._get_client()
-        resp = await client.post(f"{self._base_url}/v1/chat/completions", json=payload)
+        # /v1/* 同样受 fusion-mlx api_key 保护 (Bearer), 与 /distributed/* 同源。
+        # 原实现漏带 Authorization → 任何启用 auth 的 fusion-mlx 推理一律 401。
+        resp = await client.post(
+            f"{self._base_url}/v1/chat/completions", json=payload, headers=self._dist_headers()
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -178,7 +182,9 @@ class FusionMLXBackend(InferenceBackend):
     ) -> dict[str, Any]:
         payload = {"model": model, "input": input_text, **kwargs}
         client = await self._get_client()
-        resp = await client.post(f"{self._base_url}/v1/embeddings", json=payload)
+        resp = await client.post(
+            f"{self._base_url}/v1/embeddings", json=payload, headers=self._dist_headers()
+        )
         resp.raise_for_status()
         return resp.json()
 

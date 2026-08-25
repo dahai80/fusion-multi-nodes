@@ -62,7 +62,7 @@ def mock_kv_manager():
     }
     mgr.lookup_local.return_value = None
     mgr.transfer_from_remote = AsyncMock(return_value=True)
-    mgr.warm_cache = AsyncMock(return_value={"success": 0, "failed": 0})
+    mgr.store_local.return_value = True
     return mgr
 
 
@@ -258,50 +258,70 @@ class TestKVTransferEndpoint:
 class TestKVWarmEndpoint:
     @pytest.mark.asyncio
     async def test_kv_warm(self, client, mock_kv_manager):
-        mock_kv_manager.warm_cache.return_value = {"success": 3, "failed": 0}
+        # S4: kv_warm 改本地 store_local 契约 (不再跨节点二次远推, 避递归)。
+        # manager.warm_cache 负责跨节点分发, 各 Worker 收此请求只本地预存。
+        mock_kv_manager.store_local.return_value = True
         resp = await client.post(
             "/api/kv/warm",
             json={
                 "model_name": "llama-3b",
-                "prompts": ["hello", "world", "test"],
+                "prompt": "hello world",
+                "prompt_hash": "abc123",
+                "total_tokens": 16,
+                "total_size_bytes": 1024,
             },
             headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert data["warmed"] == 3
+        assert data["warmed"] == 1
+        mock_kv_manager.store_local.assert_called_once()
+        entry = mock_kv_manager.store_local.call_args[0][0]
+        assert entry.model_name == "llama-3b"
+        assert entry.prompt_hash == "abc123"
+        assert entry.total_tokens == 16
 
     @pytest.mark.asyncio
     async def test_kv_warm_no_results(self, client, mock_kv_manager):
-        mock_kv_manager.warm_cache.return_value = {}
+        # store_local 拒存 (如超容量) → warmed==0, status==skip。
+        mock_kv_manager.store_local.return_value = False
         resp = await client.post(
             "/api/kv/warm",
             json={
                 "model_name": "llama-3b",
-                "prompts": ["hello"],
+                "prompt": "hello",
+                "prompt_hash": "xyz",
             },
             headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200
         data = resp.json()
+        assert data["status"] == "skip"
         assert data["warmed"] == 0
 
     @pytest.mark.asyncio
-    async def test_kv_warm_passes_nodes_through(self, client, mock_kv_manager):
-        # E7: nodes 必须透传给 warm_cache, 不可硬编码 []。
-        mock_kv_manager.warm_cache.return_value = {"success": 2, "failed": 0}
+    async def test_kv_warm_builds_entry_from_request(self, client, mock_kv_manager):
+        # E7: 请求字段须正确映射到 KVCacheEntry (model_name/prompt_hash/node_id/size)。
+        # 旧契约断 warm_cache.nodes 透传 — 新契约无 nodes, 改断 store_local 入参正确性。
+        mock_kv_manager.store_local.return_value = True
         await client.post(
             "/api/kv/warm",
             json={
                 "model_name": "llama-3b",
-                "prompts": ["hi"],
-                "nodes": ["node_a", "node_b"],
+                "prompt": "warm me",
+                "prompt_hash": "deadbeef",
+                "total_tokens": 32,
+                "total_size_bytes": 2048,
             },
             headers=AUTH_HEADERS,
         )
-        mock_kv_manager.warm_cache.assert_awaited_once()
-        assert mock_kv_manager.warm_cache.call_args.kwargs["nodes"] == ["node_a", "node_b"]
+        entry = mock_kv_manager.store_local.call_args[0][0]
+        assert entry.cache_id == "warm-deadbeef"
+        assert entry.prompt_prefix == "warm me"
+        assert entry.total_size_bytes == 2048
+        assert len(entry.shards) == 1
+        assert entry.shards[0].node_id == "test_node"
 
 
 class TestKVStatsEndpoint:
