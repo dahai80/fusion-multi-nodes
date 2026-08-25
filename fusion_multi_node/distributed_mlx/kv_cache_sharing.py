@@ -20,6 +20,8 @@ from typing import Any
 import httpx
 
 from fusion_multi_node.protocol import KVCacheSyncMessage
+from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
+from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.utils.auth import sanitize_node_url_part
 
 logger = logging.getLogger(__name__)
@@ -126,7 +128,7 @@ class KVSharingManager:
 
     async def _get_http_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=timeout)
+            self._http_client = httpx.AsyncClient(timeout=timeout, **mtls_client_kwargs())
         return self._http_client
 
     def _auth_headers(self) -> dict[str, str]:
@@ -214,7 +216,7 @@ class KVSharingManager:
             try:
                 safe_node = sanitize_node_url_part(node_id)
                 resp = await client.post(
-                    f"http://{safe_node}:11458/api/kv/lookup",
+                    f"{mtls_scheme()}://{safe_node}:11458/api/kv/lookup",
                     json={
                         "model_name": model_name,
                         "prompt_hash": prompt_hash,
@@ -242,7 +244,7 @@ class KVSharingManager:
             client = await self._get_http_client(30.0)
             safe_source = sanitize_node_url_part(source_node)
             resp = await client.post(
-                f"http://{safe_source}:11458/api/kv/transfer",
+                f"{mtls_scheme()}://{safe_source}:11458/api/kv/transfer",
                 json={
                     "cache_id": cache_id,
                     "target_node": target_node,
@@ -297,7 +299,7 @@ class KVSharingManager:
                 try:
                     safe_node = sanitize_node_url_part(node_id)
                     resp = await client.post(
-                        f"http://{safe_node}:11458/api/kv/warm",
+                        f"{mtls_scheme()}://{safe_node}:11458/api/kv/warm",
                         json={
                             "model_name": model_name,
                             "prompt": prompt,

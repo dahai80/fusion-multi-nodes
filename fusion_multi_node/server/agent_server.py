@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from fusion_multi_node.agent import NodeAgent
 from fusion_multi_node.distributed_mlx import KVSharingManager
+from fusion_multi_node.security.permission import NodeRole, PermissionManager
 from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,18 @@ class AgentServer:
         self._rate_limiter = InMemoryRateLimiter()
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
         self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
+        # P1-G 细粒度权限 — 本 agent 维护调用方角色表。默认 master 为 MASTER 角色
+        # (master 派发任务/取消到本节点须放行)。worker 节点角色由 register_caller 注入。
+        # 仅 mTLS 开启时强制校验 (传输已证调用方=集群节点); 关时 X-Node-Id 缺失→放行 (兼容现有测试)。
+        self._permission_manager = PermissionManager()
+        self._permission_manager.assign_role("master", NodeRole.MASTER, "system")
+        self._permission_enforce = False
+        try:
+            from fusion_multi_node.security.mtls import is_enabled
+
+            self._permission_enforce = is_enabled()
+        except Exception:
+            self._permission_enforce = False
         self._uvicorn_server: Any | None = None
         self._started_at: float = 0.0
         # 本节点对外可寻址地址 — transfer_from_remote 据此回连本机拉缓存。
@@ -206,6 +219,29 @@ class AgentServer:
     def _setup_routes(self):
         app = self.app
 
+        async def _check_permission(request: Request, path: str, method: str = "POST") -> None:
+            """细粒度权限校验 — 从 X-Node-Id/X-Node-Role header 取调用方身份。
+
+            强制模式 (mTLS 开): 缺 X-Node-Id → 403; 角色无权 → 403。
+            兼容模式 (mTLS 关): 缺 header → 放行 (现有 http 测试/CLI 无 header);
+              有 header 则按角色校验 (master 派发带 X-Node-Id=master)。
+            """
+            if not self._permission_enforce:
+                node_id = request.headers.get("X-Node-Id", "")
+                if not node_id:
+                    return
+            else:
+                node_id = request.headers.get("X-Node-Id", "")
+                if not node_id:
+                    raise HTTPException(status_code=403, detail="缺少 X-Node-Id 身份头")
+            role_hdr = request.headers.get("X-Node-Role", "")
+            if role_hdr and self._permission_manager.get_role(node_id) is None:
+                role = NodeRole.MASTER if role_hdr == "master" else NodeRole.WORKER
+                self._permission_manager.assign_role(node_id, role, "header")
+            if not self._permission_manager.check_path_access(node_id, path, method):
+                logger.warning(f"权限拒绝: node={node_id} path={path} method={method}")
+                raise HTTPException(status_code=403, detail=f"无权访问 {path}")
+
         @app.get("/api/health")
         @app.get("/health")
         async def health():
@@ -215,6 +251,7 @@ class AgentServer:
 
         @app.post("/api/execute")
         async def execute_task(req: ExecuteRequest, request: Request):
+            await _check_permission(request, "/api/execute", "POST")
             if req.task_type not in ALLOWED_TASK_TYPES:
                 raise HTTPException(status_code=400, detail=f"不合法的任务类型: {req.task_type}")
             filtered_extra = {k: v for k, v in req.extra.items() if k in ALLOWED_EXTRA_KEYS}
@@ -247,7 +284,9 @@ class AgentServer:
                 raise HTTPException(status_code=500, detail="内部错误")
 
         @app.post("/api/tasks/cancel")
-        async def cancel_task(req: TaskCancelRequest):
+        async def cancel_task(req: TaskCancelRequest, request: Request):
+            # master 取消通知 → 本节点; worker 节点不应直接取消它节点任务
+            await _check_permission(request, "/api/tasks/cancel", "POST")
             # 真取消: 中止运行中推理协程, 非假动作
             ok = await self.agent.cancel_task(req.task_id)
             if not ok:
@@ -340,14 +379,22 @@ class AgentServer:
             info = self.agent.collect_hardware_info()
             return info
 
-    async def start(self, host: str = "127.0.0.1", port: int = 11458) -> None:
+    async def start(self, host: str = "127.0.0.1", port: int = 11458, ssl_context=None) -> None:
         import uvicorn
 
         self._host = host
-        config = uvicorn.Config(self.app, host=host, port=port, log_level="warning")
+        ssl_kwargs = {}
+        if ssl_context is None:
+            from fusion_multi_node.security.mtls import server_ssl_kwargs
+
+            ssl_kwargs = server_ssl_kwargs()
+        elif isinstance(ssl_context, dict):
+            ssl_kwargs = ssl_context
+        config = uvicorn.Config(self.app, host=host, port=port, log_level="warning", **ssl_kwargs)
         self._uvicorn_server = uvicorn.Server(config)
         self._started_at = time.time()
-        logger.info(f"Agent 服务启动: {host}:{port}")
+        scheme = "https" if ssl_kwargs else "http"
+        logger.info(f"Agent 服务启动: {scheme}://{host}:{port}")
         await self._uvicorn_server.serve()
 
     async def stop(self) -> None:
