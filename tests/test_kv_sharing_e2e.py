@@ -166,9 +166,12 @@ class TestKVSharingE2E:
             )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["cache_id"] == "c-aaa"
-        assert data["total_tokens"] == 64
-        assert len(data["shards"]) == 1
+        # 契约: {"found": True, "entry": {序列化 KVCacheEntry}}。
+        assert data["found"] is True
+        entry = data["entry"]
+        assert entry["cache_id"] == "c-aaa"
+        assert entry["total_tokens"] == 64
+        assert len(entry["shards"]) == 1
         logger.info("S4 KV E2E 同节点 store→lookup 通过")
 
     async def test_kv_lookup_missing_returns_404(self, kv_cluster):
@@ -182,6 +185,27 @@ class TestKVSharingE2E:
                 headers=AUTH_HEADERS,
             )
         assert resp.status_code == 404
+
+    async def test_kv_lookup_remote_cross_node_contract(self, kv_cluster):
+        """跨节点 lookup_remote 真链路 — store 在 node-a, node-b 经 HTTP 查回。
+
+        验 lookup_remote 解码契约: route 返 {"found":True,"entry":{...}} → manager
+        _deserialize_entry → 返回 (entry, node_id)。旧 route 返扁平 dict 无 "found"/"entry"
+        键 → lookup_remote 永远 None (静默失效); 单元 mock 捏造该形状掩盖此 bug。
+        此 E2E 用真 route (非 mock) 锁契约, 防 "假信心测试" 复发。
+        """
+        server_a = kv_cluster["server_a"]
+        server_b = kv_cluster["server_b"]
+        server_a.kv_manager.store_local(_make_entry(cache_id="c-remote"))
+
+        result = await server_b.kv_manager.lookup_remote(
+            model_name="llama-1b", prompt_hash="hash-e2e", nodes=["agent-a"]
+        )
+        assert result is not None, "lookup_remote 永远 None — route 契约失配"
+        entry, node_id = result
+        assert entry.cache_id == "c-remote"
+        assert node_id == "agent-a"
+        logger.info("S4 KV E2E 跨节点 lookup_remote 契约通过 (route→found/entry→decode)")
 
     async def test_kv_warm_pushes_to_remote_node(self, kv_cluster):
         """预热推送: node-a warm_cache → 经路由 HTTP POST node-b /api/kv/warm。

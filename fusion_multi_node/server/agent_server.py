@@ -297,26 +297,12 @@ class AgentServer:
 
         @app.post("/api/kv/lookup")
         async def kv_lookup(req: KGLookupRequest):
+            # 契约对齐 lookup_remote: 回 {"found": True, "entry": 序列化 KVCacheEntry}。
+            # 旧扁平 dict 无 "found"/"entry" 键 → lookup_remote 永远返回 None (跨节点复用静默失效)。
             entry = self.kv_manager.lookup_local(req.model_name, req.prompt_hash)
             if not entry:
                 raise HTTPException(status_code=404, detail="KV 缓存未找到")
-            return {
-                "cache_id": entry.cache_id,
-                "model_name": entry.model_name,
-                "prompt_hash": entry.prompt_hash,
-                "total_tokens": entry.total_tokens,
-                "total_size_bytes": entry.total_size_bytes,
-                "shards": [
-                    {
-                        "shard_id": s.shard_id,
-                        "layer_index": s.layer_index,
-                        "node_id": s.node_id,
-                        "token_count": s.token_count,
-                        "size_bytes": s.size_bytes,
-                    }
-                    for s in entry.shards
-                ],
-            }
+            return {"found": True, "entry": self.kv_manager._serialize_entry(entry)}
 
         @app.post("/api/kv/transfer")
         async def kv_transfer(req: KVTransferRequest):
