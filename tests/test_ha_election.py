@@ -14,8 +14,15 @@ import time
 import pytest
 from httpx import ASGITransport, AsyncBaseTransport, AsyncClient, Request, Response
 
-from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode, TaskStatus
-from fusion_multi_node.master.cluster_master import VoteRequest
+from fusion_multi_node.master import (
+    ClusterMaster,
+    ClusterTask,
+    NodeInfo,
+    NodeStatus,
+    ParallelMode,
+    TaskStatus,
+)
+from fusion_multi_node.master.cluster_master import KVCacheEntry, VoteRequest
 from fusion_multi_node.server.master_server import MasterServer
 
 TEST_TOKEN = "test-ha-token"
@@ -321,6 +328,155 @@ class TestSingleMasterUnaffected:
             assert resp.status_code == 200
             assert resp.json()["merged"] == 1
         assert "t-ep" in m.tasks
+        await m.stop()
+
+
+class TestHAStateSync:
+    """GAP-1 (Phase C): leader 全状态同步 (nodes/kv/banned) 到 standby, failover 即调度。"""
+
+    @pytest.mark.asyncio
+    async def test_leader_state_sync_reaches_standby(self, ha_pair):
+        """leader 推 nodes/kv/banned → standby 合并, 持有完整拓扑。"""
+        m1 = ha_pair["m1"]
+        m2 = ha_pair["m2"]
+        m1._is_leader = True
+        m2._is_leader = False
+        # m1 注册一个节点
+        await _register_node(m1, "n-sync")
+        # m1 注册一个 KV 缓存
+        await m1.register_kv_cache(
+            KVCacheEntry(
+                cache_id="kv-1",
+                model_name="qwen-1b",
+                node_id="n-sync",
+                created_at=time.time(),
+                size_mb=128.0,
+            )
+        )
+        # m1 ban 一个节点
+        await m1.unregister_node("n-bad", reason="banned")
+
+        # 触发 leader 全状态同步
+        await m1._sync_state_to_standbys()
+
+        # standby (m2) 应持有完整拓扑
+        assert "n-sync" in m2.nodes
+        assert m2.nodes["n-sync"].hostname == "mac1"
+        assert m2.nodes["n-sync"].total_memory_gb == 64.0
+        assert "kv-1" in m2.kv_cache
+        assert m2.kv_cache["kv-1"].model_name == "qwen-1b"
+        assert m2.is_node_banned("n-bad")
+
+    @pytest.mark.asyncio
+    async def test_receive_synced_state_idempotent(self, tmp_path):
+        """receive_synced_state 幂等: 重复推送同状态不重复增长。"""
+        m = _make_master(tmp_path)
+        state = {
+            "nodes": [
+                {
+                    "node_id": "n-idem",
+                    "hostname": "mac1",
+                    "ip_address": "10.0.0.1",
+                    "port": 11458,
+                    "status": "online",
+                    "total_memory_gb": 64.0,
+                    "available_memory_gb": 48.0,
+                }
+            ],
+            "kv_cache": [
+                {
+                    "cache_id": "kv-idem",
+                    "model_name": "qwen-1b",
+                    "node_id": "n-idem",
+                    "created_at": time.time(),
+                    "size_mb": 64.0,
+                }
+            ],
+            "banned_nodes": {"n-bad": time.time() + 300},
+        }
+        c1 = await m.receive_synced_state(state)
+        assert c1["nodes"] == 1
+        assert c1["kv"] == 1
+        assert c1["banned"] == 1
+        c2 = await m.receive_synced_state(state)
+        # 节点/KV 按 key 覆盖仍计 1; ban 取较晚时间, 相等不更新 → 0
+        assert c2["nodes"] == 1
+        assert c2["kv"] == 1
+        assert c2["banned"] == 0
+        assert len(m.nodes) == 1
+        assert len(m.kv_cache) == 1
+        await m.stop()
+
+    @pytest.mark.asyncio
+    async def test_state_sync_preserves_standby_topology_on_failover(self, ha_pair):
+        """failover 场景: standby 收到状态后, promote 为 leader 可立即调度 (有节点)。"""
+        m1 = ha_pair["m1"]
+        m2 = ha_pair["m2"]
+        m1._is_leader = True
+        m2._is_leader = False
+        await _register_node(m1, "n-fo")
+        await m1._sync_state_to_standbys()
+
+        # 模拟 m1 宕机, m2 提升为 leader
+        m2._is_leader = True
+        # m2 现在持有从 m1 同步来的节点, 可调度
+        online = await m2.get_online_nodes()
+        assert any(n.node_id == "n-fo" for n in online)
+        # m2 作为新 leader 可派发任务到同步来的节点
+        task = _task("t-fo")
+        task.preferred_node_id = "n-fo"
+        ok = await m2.assign_task(task)
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_state_sync_endpoint_round_trip(self, ha_pair):
+        """/api/ha/sync-state 端点接收并合并全状态。"""
+        s2 = ha_pair["s2"]
+        m2 = ha_pair["m2"]
+        m2._is_leader = False
+        transport = ASGITransport(app=s2.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/ha/sync-state",
+                json={
+                    "nodes": [
+                        {
+                            "node_id": "n-ep",
+                            "hostname": "mac-ep",
+                            "ip_address": "10.0.0.9",
+                            "port": 11458,
+                            "status": "online",
+                        }
+                    ],
+                    "kv_cache": [],
+                    "banned_nodes": {},
+                },
+                headers=AUTH_HEADERS,
+            )
+            assert resp.status_code == 200
+            assert resp.json()["counts"]["nodes"] == 1
+        assert "n-ep" in m2.nodes
+
+    @pytest.mark.asyncio
+    async def test_single_master_state_sync_no_targets(self, tmp_path):
+        """单 Master 模式 _build_state_sync_targets 返回空 (无选举)。"""
+        m = _make_master(tmp_path)
+        targets = await m._build_state_sync_targets()
+        assert targets == []
+        await m.stop()
+
+    @pytest.mark.asyncio
+    async def test_state_sync_bad_node_status_falls_back(self, tmp_path):
+        """非法 status 字符串回退 OFFLINE, 不抛异常。"""
+        m = _make_master(tmp_path)
+        state = {
+            "nodes": [{"node_id": "n-x", "status": "totally-bogus"}],
+            "kv_cache": [],
+            "banned_nodes": {},
+        }
+        counts = await m.receive_synced_state(state)
+        assert counts["nodes"] == 1
+        assert m.nodes["n-x"].status == NodeStatus.OFFLINE
         await m.stop()
 
 

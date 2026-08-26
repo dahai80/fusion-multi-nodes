@@ -1211,6 +1211,14 @@ class MasterServer:
             merged = await self.master.receive_synced_tasks(tasks)
             return {"status": "ok", "merged": merged}
 
+        # GAP-1 (Phase C): leader 推送全状态 (nodes/kv/banned) 到 standby — always-on failover。
+        @app.post("/api/ha/sync-state")
+        async def ha_sync_state(req: dict):
+            if not isinstance(req, dict):
+                raise HTTPException(status_code=400, detail="sync-state payload 必须为对象")
+            counts = await self.master.receive_synced_state(req)
+            return {"status": "ok", "counts": counts}
+
         # C1: Leader→Follower 心跳 — 维持 leader 权威, 防 follower 超时误判重选。
         @app.post("/api/ha/heartbeat")
         async def ha_heartbeat(req: dict):

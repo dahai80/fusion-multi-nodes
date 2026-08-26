@@ -6,8 +6,10 @@ cluster observability, task auto-degradation, security sandbox, autoscaler,
 and storage volumes.
 
 注意 (AR审计 2026-08-24, P0 整改 2026-08-26 更新):
-- MasterElection (P4 HA 已接): leader 选举 + term/voted_for 持久化 + leader 心跳广播 +
-  任务快照推 standby。`start(ha_config=...)` 启动多 Master HA。**已接线, 非原型。**
+- MasterElection (P4 HA 已接 + GAP-1 全状态同步): leader 选举 + term/voted_for 持久化 +
+  leader 心跳广播 + 任务快照推 standby + **全状态同步** (nodes/kv_cache/banned_nodes)。
+  `start(ha_config=...)` 启动多 Master HA; 2+ Master 显式配置获 always-on (standby 持完整拓扑,
+  failover 即调度, 空窗 ≤ 选举超时)。**已接线, 非原型。**
 - StandbyMaster: **未接线死代码** (独立类, 与已接线的 MasterElection 分离)。现网单 Master
   模式 (`_election is None`) 无 HA; 多 Master 须显式配 ha_config 启动。
 - cloud fallback: 违"100%本地/离线"定位 — v0.8.2 起 ClusterMaster 调度路径已切断
@@ -22,5 +24,5 @@ and storage volumes.
   多节点客户端存根已接 + 真 E2E 验证通过; 张量级 KV 跨节点传输 (sync_kv_cache) 仍 no-op (P3-28 长期, issue #33)。
 """
 
-__version__ = "0.10.0rc1"
+__version__ = "0.10.0"
 __app_name__ = "Fusion-Multi-Node"
