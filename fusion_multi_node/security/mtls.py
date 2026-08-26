@@ -42,6 +42,34 @@ def _env_path(name: str) -> str | None:
     return v if v else None
 
 
+def certs_available() -> bool:
+    """mTLS 开启时三证书路径是否齐全 (CA + 本节点 cert + key)。
+
+    GAP-2 修复 (复审计 2026-08-26): 旧实现证书不全时静默回退明文 (fail-open),
+    默认部署零节点身份校验。现改 fail-closed — 开启但证书不全直接 raise, 不回退明文。
+    """
+    if not _ENABLED:
+        return True
+    ca = _env_path("FUSION_MTLS_CA_CERT")
+    cert = _env_path("FUSION_MTLS_NODE_CERT")
+    key = _env_path("FUSION_MTLS_NODE_KEY")
+    return bool(ca and cert and key)
+
+
+def _require_certs() -> tuple[str, str, str]:
+    """mTLS 开启时取证书路径, 不全则 raise (fail-closed, 不回退明文)。"""
+    ca = _env_path("FUSION_MTLS_CA_CERT")
+    cert = _env_path("FUSION_MTLS_NODE_CERT")
+    key = _env_path("FUSION_MTLS_NODE_KEY")
+    if not (ca and cert and key):
+        raise RuntimeError(
+            "mTLS 已开启 (FUSION_MTLS_ENABLED=1) 但证书路径不全 "
+            "(FUSION_MTLS_CA_CERT/NODE_CERT/NODE_KEY); fail-closed 拒绝回退明文。"
+            " 设全三路径或关闭 FUSION_MTLS_ENABLED。"
+        )
+    return ca, cert, key
+
+
 def _build_ssl_context(verify_ca: str | None, cert: str | None, key: str | None) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER if verify_ca else ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -54,12 +82,7 @@ def _build_ssl_context(verify_ca: str | None, cert: str | None, key: str | None)
 def server_ssl_context() -> ssl.SSLContext | None:
     if not _ENABLED:
         return None
-    ca = _env_path("FUSION_MTLS_CA_CERT")
-    cert = _env_path("FUSION_MTLS_NODE_CERT")
-    key = _env_path("FUSION_MTLS_NODE_KEY")
-    if not (ca and cert and key):
-        logger.warning("mTLS 开启但证书路径不全, 回退明文 (FUSION_MTLS_CA_CERT/NODE_CERT/NODE_KEY)")
-        return None
+    ca, cert, key = _require_certs()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
@@ -73,12 +96,7 @@ def server_ssl_context() -> ssl.SSLContext | None:
 def client_ssl_context() -> ssl.SSLContext | None:
     if not _ENABLED:
         return None
-    ca = _env_path("FUSION_MTLS_CA_CERT")
-    cert = _env_path("FUSION_MTLS_NODE_CERT")
-    key = _env_path("FUSION_MTLS_NODE_KEY")
-    if not (ca and cert and key):
-        logger.warning("mTLS 开启但证书路径不全, 回退明文")
-        return None
+    ca, cert, key = _require_certs()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
@@ -94,7 +112,7 @@ def client_kwargs() -> dict:
     """httpx.AsyncClient mTLS 参数 — 关时返回空 dict (调用方 **展开, 不改默认行为)。
 
     httpx verify 接受 ssl.SSLContext: 既校验对端证书链, 又用本 ctx 内 loaded cert_chain
-    作客户端证书。故 verify=ctx 一参数同时满足双向认证。
+    作客户端证书。故 verify=ctx 一参数同时满足双向认证。开启但证书不全 → raise (fail-closed)。
     """
     ctx = client_ssl_context()
     if ctx is None:
@@ -107,16 +125,11 @@ def server_ssl_kwargs() -> dict:
 
     uvicorn.Config 不接受 ssl_context 对象, 取个体化 ssl_* 参数:
     ssl_certfile/ssl_keyfile (本节点叶证书), ssl_ca_certs (集群 CA),
-    ssl_cert_reqs=CERT_REQUIRED (要求客户端证书)。
+    ssl_cert_reqs=CERT_REQUIRED (要求客户端证书)。开启但证书不全 → raise (fail-closed)。
     """
     if not _ENABLED:
         return {}
-    ca = _env_path("FUSION_MTLS_CA_CERT")
-    cert = _env_path("FUSION_MTLS_NODE_CERT")
-    key = _env_path("FUSION_MTLS_NODE_KEY")
-    if not (ca and cert and key):
-        logger.warning("mTLS 开启但证书路径不全, 回退明文")
-        return {}
+    ca, cert, key = _require_certs()
     return {
         "ssl_certfile": cert,
         "ssl_keyfile": key,

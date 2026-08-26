@@ -22,5 +22,5 @@ and storage volumes.
   多节点客户端存根已接 + 真 E2E 验证通过; 张量级 KV 跨节点传输 (sync_kv_cache) 仍 no-op (P3-28 长期, issue #33)。
 """
 
-__version__ = "0.8.9"
+__version__ = "0.9.0"
 __app_name__ = "Fusion-Multi-Node"

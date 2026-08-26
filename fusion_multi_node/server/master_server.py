@@ -208,7 +208,12 @@ class MasterServer:
         self._shared_token = shared_token or load_or_create_token()
         # P2-20 (审计 §6.8): 持有 ClusterConfig 供 /api/v1/config/reload 热重载。
         self._cluster_config = config
-        self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
+        # GAP-8: 审计日志 — 记节点注册/审批/鉴权失败/权限拒绝/任务提交取消等安全动作, 追加写 JSONL。
+        # 须在 BearerAuthMiddleware 之前实例化 — 中间件经 audit_logger 参数引用。
+        from fusion_multi_node.security.audit_log import get_audit_logger
+
+        self._audit = get_audit_logger()
+        self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token, audit_logger=self._audit)
         # P2-22 (审计 §3.8): Master 无限流 → /api/nodes/register /api/join /api/ha/vote
         # /api/tasks/submit 无节流 → DoS + 审批队列 (max_pending=100) 耗尽。加全局限流。
         # 阈值高于 agent (集群内部流量: heartbeat 10s×N 节点 + 派发), 120 req/60s/IP。
@@ -378,6 +383,15 @@ class MasterServer:
                 logger.info(f"节点 {req.node_id} {detail}")
             role = self._permission_manager.get_role(req.node_id)
             if role is not None and not await _check_permission(req.node_id, "/api/nodes/register", "POST"):
+                self._audit.log(
+                    actor=req.node_id,
+                    action="permission_deny",
+                    path="/api/nodes/register",
+                    method="POST",
+                    node_id=req.node_id,
+                    result="denied",
+                    detail="权限不足: node register",
+                )
                 raise HTTPException(status_code=403, detail="权限不足: node register")
             if self._approval_manager:
                 approval = self._approval_manager.request_join(
@@ -400,6 +414,15 @@ class MasterServer:
                 )
                 if approval.status.value != "approved":
                     logger.warning(f"节点注册被拒绝: {req.node_id} (未审批)")
+                    self._audit.log(
+                        actor=req.node_id,
+                        action="register",
+                        path="/api/nodes/register",
+                        method="POST",
+                        node_id=req.node_id,
+                        result="denied",
+                        detail=f"未通过审批, 当前状态: {approval.status.value}",
+                    )
                     raise HTTPException(
                         status_code=403,
                         detail=f"节点 {req.node_id} 未通过审批，当前状态: {approval.status.value}",
@@ -429,9 +452,27 @@ class MasterServer:
             )
             allowed = await self.master.register_node(node)
             if not allowed:
+                self._audit.log(
+                    actor=req.node_id,
+                    action="register",
+                    path="/api/nodes/register",
+                    method="POST",
+                    node_id=req.node_id,
+                    result="denied",
+                    detail="处于 ban 期, 拒绝注册",
+                )
                 raise HTTPException(status_code=403, detail=f"节点 {req.node_id} 处于 ban 期, 拒绝注册")
             self._permission_manager.assign_role(req.node_id, assigned_role, "register")
             logger.info(f"节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={assigned_role.value}")
+            self._audit.log(
+                actor=req.node_id,
+                action="register",
+                path="/api/nodes/register",
+                method="POST",
+                node_id=req.node_id,
+                result="ok",
+                detail=f"role={assigned_role.value} from {req.ip_address}:{req.port}",
+            )
             return {"status": "ok", "node_id": req.node_id}
 
         @app.post("/api/nodes/approve")
@@ -446,6 +487,15 @@ class MasterServer:
             if not ok:
                 raise HTTPException(status_code=404, detail=f"无待审批请求: {node_id}")
             logger.info(f"节点审批通过: {node_id} (by {approved_by})")
+            self._audit.log(
+                actor=approved_by,
+                action="approve",
+                path="/api/nodes/approve",
+                method="POST",
+                node_id=node_id,
+                result="ok",
+                detail=f"审批通过 by {approved_by}",
+            )
             # 审批通过即注册入集群 — 否则 agent 只发心跳找不到节点, 永不上线。
             # approval_manager._approved 缓存了 join 时上报的 hostname/ip/port + metadata
             # (memory/max_tasks/cpu/...); 注册 NodeInfo 从 metadata 还原, 否则 0 内存 → 派发失败。
@@ -490,6 +540,15 @@ class MasterServer:
             if not ok:
                 raise HTTPException(status_code=404, detail=f"无待审批请求: {node_id}")
             logger.info(f"节点审批拒绝: {node_id} (reason={reason})")
+            self._audit.log(
+                actor="master",
+                action="reject",
+                path="/api/nodes/reject",
+                method="POST",
+                node_id=node_id,
+                result="ok",
+                detail=f"审批拒绝 reason={reason}",
+            )
             return {"status": "ok", "node_id": node_id, "rejected": True}
 
         @app.get("/api/nodes/pending")
@@ -582,6 +641,14 @@ class MasterServer:
         @app.post("/api/tasks/submit")
         async def submit_task(req: TaskSubmitRequest):
             if not await _check_permission("master", "/api/tasks/submit", "POST"):
+                self._audit.log(
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/tasks/submit",
+                    method="POST",
+                    result="denied",
+                    detail="权限不足: task submit",
+                )
                 raise HTTPException(status_code=403, detail="权限不足: task submit")
             # HA standby 守卫: 选举已配置且非 leader → 拒绝提交
             if self.master._election is not None and not self.master._is_leader:
@@ -606,6 +673,15 @@ class MasterServer:
                     "max_tokens": req.max_tokens,
                     "temperature": req.temperature,
                 },
+            )
+            self._audit.log(
+                actor=req.user or "unknown",
+                action="task_submit",
+                path="/api/tasks/submit",
+                method="POST",
+                node_id="",
+                result="ok",
+                detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
             )
             ok = await self.master.assign_task(task)
             if not ok:
@@ -670,6 +746,14 @@ class MasterServer:
         @app.post("/api/tasks/{task_id}/cancel")
         async def cancel_task(task_id: str, req: TaskCancelRequest):
             if not await _check_permission("master", "/api/tasks/cancel", "POST"):
+                self._audit.log(
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/tasks/cancel",
+                    method="POST",
+                    result="denied",
+                    detail="权限不足: task cancel",
+                )
                 raise HTTPException(status_code=403, detail="权限不足: task cancel")
             task = await self.master.get_task(task_id)
             if not task:
@@ -685,6 +769,15 @@ class MasterServer:
             ok = await self.master.cancel_task(task_id, reason=req.reason, cancel_sub_tasks=True)
             if not ok:
                 raise HTTPException(status_code=400, detail=f"任务 {task_id} 取消失败")
+            self._audit.log(
+                actor="master",
+                action="task_cancel",
+                path="/api/tasks/cancel",
+                method="POST",
+                node_id="",
+                result="ok",
+                detail=f"task_id={task_id} reason={req.reason}",
+            )
             # R4: 传播取消到运行中节点 (真中止, 非假动作)。
             # 去重 (子任务 assigned_nodes 可能重叠), 单 AsyncClient 复用 + asyncio.gather 并发通知。
             unique_nodes = list(dict.fromkeys(affected_nodes))

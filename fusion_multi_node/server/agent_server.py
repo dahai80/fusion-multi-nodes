@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import defaultdict
 from typing import Any
@@ -198,20 +199,30 @@ class AgentServer:
             self.kv_manager = KVSharingManager(cluster_token=self._shared_token)
         self.app = FastAPI(title="Fusion Multi-Node Agent", version=_VERSION)
         self._rate_limiter = InMemoryRateLimiter()
-        self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
+        # GAP-8: 审计日志 — 记鉴权失败/权限拒绝等安全动作, 追加写 JSONL。
+        # 须在 BearerAuthMiddleware 之前实例化 — 中间件经 audit_logger 参数引用。
+        from fusion_multi_node.security.audit_log import get_audit_logger
+
+        self._audit = get_audit_logger()
+        self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token, audit_logger=self._audit)
         self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
         # P1-G 细粒度权限 — 本 agent 维护调用方角色表。默认 master 为 MASTER 角色
         # (master 派发任务/取消到本节点须放行)。worker 节点角色由 register_caller 注入。
-        # 仅 mTLS 开启时强制校验 (传输已证调用方=集群节点); 关时 X-Node-Id 缺失→放行 (兼容现有测试)。
+        # GAP-8 (复审计 2026-08-26): 强制校验默认开 (FUSION_PERMISSION_ENFORCE 默认 "1"),
+        # 不再仅随 mTLS。强制模式缺 X-Node-Id → 403 (生产零信任: 身份不可缺)。
+        # 测试隔离: conftest.py autouse fixture 设 FUSION_PERMISSION_ENFORCE=0 回退兼容模式
+        # (现有 http 测试/CLI 无 X-Node-Id 须放行)。mTLS 开 → 亦强制 (传输已证调用方=集群节点)。
         self._permission_manager = PermissionManager()
         self._permission_manager.assign_role("master", NodeRole.MASTER, "system")
-        self._permission_enforce = False
+        enforce_env = os.environ.get("FUSION_PERMISSION_ENFORCE", "1").strip().lower()
+        self._permission_enforce = enforce_env in ("1", "true", "yes", "on")
         try:
             from fusion_multi_node.security.mtls import is_enabled
 
-            self._permission_enforce = is_enabled()
+            if is_enabled():
+                self._permission_enforce = True
         except Exception:
-            self._permission_enforce = False
+            pass
         self._uvicorn_server: Any | None = None
         self._started_at: float = 0.0
         # 本节点对外可寻址地址 — transfer_from_remote 据此回连本机拉缓存。
@@ -225,8 +236,8 @@ class AgentServer:
         async def _check_permission(request: Request, path: str, method: str = "POST") -> None:
             """细粒度权限校验 — 从 X-Node-Id/X-Node-Role header 取调用方身份。
 
-            强制模式 (mTLS 开): 缺 X-Node-Id → 403; 角色无权 → 403。
-            兼容模式 (mTLS 关): 缺 header → 放行 (现有 http 测试/CLI 无 header);
+            强制模式 (默认 / mTLS 开): 缺 X-Node-Id → 403; 角色无权 → 403。
+            兼容模式 (FUSION_PERMISSION_ENFORCE=0): 缺 header → 放行 (现有 http 测试/CLI 无 header);
               有 header 则按角色校验 (master 派发带 X-Node-Id=master)。
             """
             if not self._permission_enforce:
@@ -236,6 +247,14 @@ class AgentServer:
             else:
                 node_id = request.headers.get("X-Node-Id", "")
                 if not node_id:
+                    self._audit.log(
+                        actor="unknown",
+                        action="permission_deny",
+                        path=path,
+                        method=method,
+                        result="denied",
+                        detail="缺少 X-Node-Id 身份头",
+                    )
                     raise HTTPException(status_code=403, detail="缺少 X-Node-Id 身份头")
             role_hdr = request.headers.get("X-Node-Role", "")
             if role_hdr and self._permission_manager.get_role(node_id) is None:
@@ -243,6 +262,15 @@ class AgentServer:
                 self._permission_manager.assign_role(node_id, role, "header")
             if not self._permission_manager.check_path_access(node_id, path, method):
                 logger.warning(f"权限拒绝: node={node_id} path={path} method={method}")
+                self._audit.log(
+                    actor=node_id,
+                    action="permission_deny",
+                    path=path,
+                    method=method,
+                    node_id=node_id,
+                    result="denied",
+                    detail=f"无权访问 {path}",
+                )
                 raise HTTPException(status_code=403, detail=f"无权访问 {path}")
 
         @app.get("/api/health")
