@@ -158,6 +158,11 @@ class TestNodeAgent:
         assert config.master_host == "192.168.1.1"
 
     def test_collect_hardware(self):
+        # Apple Silicon 硬件采集断言 — 仅 darwin/arm64 可验, Linux CI 跳过。
+        import sys
+
+        if sys.platform != "darwin":
+            pytest.skip("硬件采集断言仅适用 Apple Silicon (darwin)")
         agent = NodeAgent()
         info = agent.collect_hardware_info()
         assert info["arch"] == "arm64"
