@@ -5,24 +5,23 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1083%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1085%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.1 (2026-08-26) — GAP-6 限流适配补齐**
+> **📦 v0.10.2 (2026-08-26) — GAP-5 死代码清理/标注**
 >
-> 上游 fusion-mlx #635 已修 (PR #637, `--rate-limit 0` 真正关闭限流)。本版补客户端 429 退避重试
-> (`agent/rate_pacer.py`) + master 限流归类修正 (限流=瞬时失败可重试, 不 ban 健康节点)。详见 [CHANGELOG](docs/CHANGELOG.md)。
+> autoscaler 未接线路由改显式 503 not-wired (非歧义 `enabled:False`); StandbyMaster 死代码删除 (零实例化, HA 路径唯一为 MasterElection)。详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 已完成 (Phase A-D): issues/PR 处理 → RC → GAP-1 always-on → GAP-6 限流适配。
-> 仍待补齐 (Phase E/F):
-> - **死代码 + KV no-op 披露** (GAP-5/7): autoscaler/mcp_gateway/cloud_fallback/StandbyMaster 未接线死代码; sync_kv_cache 仅元数据 (张量 KV 上游阻塞)
-> - **多租户/远程 SaaS 阻塞** (GAP-8): 单一共享 Bearer token 无 per-user RBAC。须多用户鉴权 (Phase F)。当前仅适用可信单团队 LAN
+> 已完成 (Phase A-E): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码。
+> 仍待补齐 (Phase F):
+> - **多租户/远程 SaaS 阻塞** (GAP-8): 单一共享 Bearer token 无 per-user RBAC。须多用户鉴权 + token 轮转。当前仅适用可信单团队 LAN
+> - **KV no-op** (GAP-7): sync_kv_cache 仅元数据 (张量 KV 上游阻塞, issue #33)
 
 ---
 
@@ -866,6 +865,11 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 ---
 
 ## 🛣️ Roadmap
+
+### v0.10.2 ✅ — GAP-5 死代码清理/标注 (2026-08-26)
+- [x] **autoscaler 路由显式 not-wired** (GAP-5) — `GET/PUT /api/v1/autoscaler/config` 由歧义 `{"enabled":False}` 改 503 + detail 明示未接线; 模块保留待迁移
+- [x] **StandbyMaster 死代码删除** (GAP-5) — 零实例化/零 import/零测试/零引用, 独立于已接线的 MasterElection; HA 路径唯一化为 MasterElection
+- [x] 2 个 autoscaler not-wired 测试; 1085 tests, 0 ruff errors
 
 ### v0.10.1 ✅ — GAP-6 限流适配 (2026-08-26)
 - [x] **客户端限流适配** (GAP-6) — `agent/rate_pacer.py` 拦截 fusion-mlx 429: 读 `Retry-After`, 指数退避重试 (3 次, 10s 预算, 确定性无 jitter), 耗尽抛 `RateLimitExhausted`

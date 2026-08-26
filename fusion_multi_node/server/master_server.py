@@ -75,6 +75,7 @@ def _check_protocol_compat(agent_version: str) -> tuple[bool, str]:
         )
     return True, f"协议版本兼容: agent {agent_version} >= {MIN_COMPAT_PROTOCOL_VERSION}"
 
+
 try:
     from importlib.metadata import version as _pkg_version
 
@@ -304,9 +305,7 @@ class MasterServer:
                     if not is_safe_path_segment(model_name):
                         raise HTTPException(status_code=400, detail=f"非法 model_name: {model_name!r}")
                     client = httpx.AsyncClient(timeout=30.0, **mtls_client_kwargs())
-                    url = build_safe_url(
-                        mtls_scheme(), source_host, source_port, f"/api/models/{model_name}/manifest"
-                    )
+                    url = build_safe_url(mtls_scheme(), source_host, source_port, f"/api/models/{model_name}/manifest")
                     resp = await client.get(url)
                     remote_manifest = ModelManifest.from_dict(resp.json())
                     await client.aclose()
@@ -691,9 +690,7 @@ class MasterServer:
             if not ok:
                 raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
             # P1-H: 任务可能入优先级队列 (节点不足/配额满) → PENDING 状态返回 202。
-            if task.status == TaskStatus.PENDING and task.task_id in {
-                t.task_id for t in self.master._pending_queue
-            }:
+            if task.status == TaskStatus.PENDING and task.task_id in {t.task_id for t in self.master._pending_queue}:
                 resp = _task_to_resp(task)
                 resp["queued"] = True
                 return JSONResponse(status_code=202, content=resp)
@@ -814,7 +811,6 @@ class MasterServer:
             import asyncio
 
             import httpx
-
 
             notified = []
             if targets:
@@ -1039,11 +1035,20 @@ class MasterServer:
             }
 
         # M10-04 Autoscaler 配置热更新
+        # GAP-5 (审计 §7): autoscaler 模块未接线 (零实例化, _autoscaler 恒 None)。
+        # 旧 GET 返回 {"enabled": False} — 歧义 ("禁用" vs "未实现")。改为显式 503 +
+        # 明示未接线, 避免误读为已接但关闭。模块保留待迁移 (非生产路径)。
         @app.get("/api/v1/autoscaler/config")
         async def get_autoscaler_config():
             autoscaler = getattr(self.master, "_autoscaler", None)
             if not autoscaler:
-                return {"enabled": False}
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Autoscaler 未接线 (not-wired): 模块存在但未实例化, 不构成调度路径。"
+                        "详见 CLAUDE.md GAP-5 / 迁移计划。"
+                    ),
+                )
             cfg = autoscaler.config
             return {
                 "enabled": True,
@@ -1067,7 +1072,10 @@ class MasterServer:
 
             autoscaler = getattr(self.master, "_autoscaler", None)
             if not autoscaler:
-                raise HTTPException(status_code=404, detail="Autoscaler 未启用")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Autoscaler 未接线 (not-wired): 模块存在但未实例化。详见 CLAUDE.md GAP-5。",
+                )
             if "policy" in req:
                 try:
                     policy = ScalePolicy(req["policy"])

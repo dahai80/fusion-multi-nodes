@@ -10,7 +10,7 @@ and storage volumes.
   leader 心跳广播 + 任务快照推 standby + **全状态同步** (nodes/kv_cache/banned_nodes)。
   `start(ha_config=...)` 启动多 Master HA; 2+ Master 显式配置获 always-on (standby 持完整拓扑,
   failover 即调度, 空窗 ≤ 选举超时)。**已接线, 非原型。**
-- StandbyMaster: **未接线死代码** (独立类, 与已接线的 MasterElection 分离)。现网单 Master
+- StandbyMaster: **v0.10.2 已删** (零实例化死代码, 独立于已接线的 MasterElection)。现网单 Master
   模式 (`_election is None`) 无 HA; 多 Master 须显式配 ha_config 启动。
 - cloud fallback: 违"100%本地/离线"定位 — v0.8.2 起 ClusterMaster 调度路径已切断
   (setup_cloud_fallback/fallback_to_cloud/_retry_loop 云端分支全部移除)。
@@ -24,5 +24,5 @@ and storage volumes.
   多节点客户端存根已接 + 真 E2E 验证通过; 张量级 KV 跨节点传输 (sync_kv_cache) 仍 no-op (P3-28 长期, issue #33)。
 """
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 __app_name__ = "Fusion-Multi-Node"

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-08-26 — GAP-5 dead-code remediation
+
+> **死代码清理/标注**: autoscaler 未接线路由由歧义 `{"enabled":False}` 改为显式 503 not-wired;
+> StandbyMaster 死代码删除 (零实例化, 独立于已接线的 MasterElection)。模块保留待迁移。
+
+### Changed
+
+- **autoscaler 路由显式 not-wired** (`server/master_server.py`) — GAP-5 审计 §7
+  - 旧 `GET /api/v1/autoscaler/config` 返回 `{"enabled": False}` — 歧义 ("禁用" vs "未实现")
+  - 改为 503 + detail 明示未接线 (`Autoscaler 未接线 (not-wired): 模块存在但未实例化`)
+  - `PUT /api/v1/autoscaler/config` 同步由 404 改 503 not-wired
+  - 模块 (`autoscaler/`) 保留待迁移 (非生产路径, 非云合规债)
+
+### Removed
+
+- **StandbyMaster 死代码** (`master/cluster_master.py`) — GAP-5 审计 §7
+  - 零生产实例化, 零 import (除 `master/__init__.py` re-export), 零测试, 零 CLI/server 引用
+  - 独立于已接线的 `MasterElection` (P4 HA + GAP-1 全状态同步的实际路径)
+  - 删除 class + `master/__init__.py` re-export; `__init__.py` 模块 docstring 更新
+  - 现 HA 路径唯一: `MasterElection` (单 Master `_election is None` 无 HA; 多 Master `ha_config` 显式启动)
+
+### Fixed
+
+- **autoscaler 路由歧义** (GAP-5 审计 §7) — `enabled:False` 改显式 503 not-wired, 避免误读为已接但关闭
+
+### Tests
+
+- `tests/test_master_server.py::TestMasterServerAutoscalerNotWired` (2 用例): GET/PUT 未接线 → 503 + detail 含 not-wired
+- 1085 tests (was 1083), 0 ruff errors
+
 ## [0.10.1] - 2026-08-26 — GAP-6 throughput cap + client-side pacing
 
 > **限流适配补齐**: 上游 fusion-mlx #635 已修 (PR #637, `--rate-limit 0` 真正关闭限流, 默认关);
@@ -361,6 +391,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** — 15+ commands across 7 groups
 - 585 tests, 96.1% code coverage
 
+[0.10.2]: https://github.com/dahai80/fusion-multi-node/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/dahai80/fusion-multi-node/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.10.0-rc.1...v0.10.0
 [0.9.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.9...v0.9.0
