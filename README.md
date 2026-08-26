@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.7-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.9-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-946%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1036%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
