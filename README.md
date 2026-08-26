@@ -5,19 +5,21 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.0rc1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1061%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1067%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.0-rc.1 (Release Candidate) — 2026-08-26**
+> **📦 v0.10.0 (2026-08-26) — GAP-1 always-on SLA 补齐**
 >
-> 单租户 LAN 场景**可带条件商用** (披露复审计 §8 条件 2/4/5 已补齐, 详见 [CHANGELOG](docs/CHANGELOG.md)):
-> - **always-on SLA 阻塞** (GAP-1): 默认单 Master, Master 宕机集群不可用; HA 选举 opt-in, standby 仅同步任务。须 HA 默认开 + 全状态同步 (Phase C)
+> 多 Master HA 全状态同步落地 — standby 持有 nodes/kv_cache/banned_nodes 完整拓扑, leader 宕机后立即接管调度,
+> always-on 空窗 ≤ 选举超时 (~10s)。HA 仍 opt-in (单 Master 部署不变), 2+ Master 显式配置即获 always-on。详见 [CHANGELOG](docs/CHANGELOG.md)。
+>
+> 仍待补齐 (Phase D/E/F):
 > - **吞吐上限声明** (GAP-6): 上游 fusion-mlx 60rpm 限流, 单节点推理吞吐受限; 多节点线性扩展
 > - **死代码 + KV no-op 披露** (GAP-5/7): autoscaler/mcp_gateway/cloud_fallback/StandbyMaster 未接线死代码; sync_kv_cache 仅元数据 (张量 KV 上游阻塞)
 > - **多租户/远程 SaaS 阻塞** (GAP-8): 单一共享 Bearer token 无 per-user RBAC。须多用户鉴权 (Phase F)。当前仅适用可信单团队 LAN
@@ -864,6 +866,12 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 ---
 
 ## 🛣️ Roadmap
+
+### v0.10.0 ✅ — GAP-1 always-on SLA (2026-08-26)
+- [x] **HA 全状态同步** (GAP-1) — leader 周期推 nodes/kv_cache/banned_nodes 到 standby; standby 持完整拓扑, failover 即调度 (always-on 空窗 ≤ 选举超时 ~10s)。HA 仍 opt-in, 2+ Master 显式配置获 always-on, 单 Master 部署不变
+- [x] `/api/ha/sync-state` 端点 + `receive_synced_state` 幂等合并 (锁序 nodes→kv 不嵌套); `_state_sync_loop` (5s) 接 `start()`/`stop()` 生命周期
+- [x] 6 个 HA 状态同步测试 (拓扑同步 / 幂等 / failover 立即调度 / 端点 round-trip / 单 Master 无目标 / 非法 status 回退)
+- [x] 1067 tests, 0 ruff errors
 
 ### v0.10.0-rc.1 🔶 — Release Candidate (2026-08-26)
 - [x] #31 重试节点规避 — `exclude_nodes` 硬黑名单 (select_nodes 过滤 + assign_task 透传 + 补选遵守, 打破重试回坏节点死循环)

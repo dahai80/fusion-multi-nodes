@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-26 — GAP-1 always-on SLA
+
+> **企业级 HA 补齐**: 多 Master 全状态同步落地, standby 持有完整集群拓扑, leader 宕机后立即接管调度。
+> HA 仍 opt-in (单 Master 部署不变), 2+ Master 显式配置即获 always-on (空窗 ≤ 选举超时 ~10s)。
+
+### Added
+
+- **GAP-1 HA 全状态同步** (`master/cluster_master.py` / `server/master_server.py`) — 补齐 always-on SLA
+  - 原 HA (v0.8.3) 仅同步 tasks; Master 宕机后 standby 缺 nodes/kv/banned → 须等节点重注册才能调度, 不满足 always-on
+  - 扩展同步范围: leader 周期推 **nodes + kv_cache + banned_nodes** 到 standby, standby `receive_synced_state` 幂等合并
+  - `_node_to_dict`/`_node_from_dict` (NodeInfo 序列化, status 枚举 ↔ 字符串) + `_kv_to_dict`/`_kv_from_dict`
+  - `_build_state_sync_targets` (自带 nodes→kv 两锁分别快照, 不嵌套) + `_push_sync_state_to_standbys` (锁外异步 best-effort)
+  - `_state_sync_loop` (5s 周期) 接 `start(ha_config=)` 启动 / `stop()` 取消, 仅 leader 推送
+  - 新端点 `POST /api/ha/sync-state` — standby 接收全状态, 返回 `{"status":"ok","counts":{"nodes":N,"kv":K,"banned":B}}`
+  - **锁序**: nodes→kv (声明顺序), `receive_synced_state` 两域分别持锁不嵌套 (与 `find_kv_cache` P1-12 一致)
+  - **ban 合并**: 取较晚解封时间 (leader/standby 任意一方 ban 更权威); 过期 ban 不合并
+  - **HA 仍 opt-in**: 单 Master (`_election is None`) 不启动同步循环, `_build_state_sync_targets` 返回空, 行为不变
+  - **failover 语义**: standby promote 为 leader 后已持同步来的 nodes/kv/banned, `assign_task` 立即可派发, 无空窗
+  - `tests/test_ha_election.py::TestHAStateSync` (6 用例): 拓扑同步到达 / 幂等合并 / failover 立即调度 / 端点 round-trip / 单 Master 无目标 / 非法 status 回退 OFFLINE
+  - `docs/HA-CRASH-RECOVERY.md` 补 "多 Master HA + 全状态同步" 章节 (同步内容表 / 启用配置 / 故障转移链路)
+
+### Changed
+
+- `pyproject.toml` / `__init__.py`: 0.10.0rc1 → 0.10.0 (GAP-1 always-on = minor)
+- `__init__.py` 模块文档: MasterElection 描述补 "GAP-1 全状态同步 + always-on"
+
 ## [0.10.0-rc.1] - 2026-08-26 — Release Candidate
 
 > ⚠️ **RC 版本**: 企业生产商用前置披露补齐 + #31 重试节点规避。复审计 §8 发布条件 2/4/5 落地 (条件 1 CI 已于 v0.9.0 落地, 条件 3 mTLS 强制已落地 v0.9.0)。**非 GA** — GAP-1/6/5 企业残留 gap 仍未补齐 (见下 Phase C/D/E 计划)。
@@ -302,6 +328,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** — 15+ commands across 7 groups
 - 585 tests, 96.1% code coverage
 
+[0.10.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.10.0-rc.1...v0.10.0
 [0.9.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.9...v0.9.0
 [0.8.2]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.0...v0.8.1

@@ -258,6 +258,9 @@ class ClusterMaster:
         # C2: 选举状态持久化路径 (term/voted_for), 与 tasks.json 同目录。
         self._election_state_path = Path.home() / ".fusion" / "multi-node" / "election_state.json"
         self._persist_task: asyncio.Task | None = None
+        # GAP-1 (Phase C): 全状态同步循环 — leader 周期推 nodes/kv/banned 到 standby,
+        # standby 持有完整集群拓扑, failover 后可立即调度 (always-on)。
+        self._state_sync_task: asyncio.Task | None = None
         # P0-8: 全集群可观测 — 接 health_check_loop 周期采集节点指标 + 告警规则,
         # /api/v1/observability/* 路由经 master._observability 读 (原恒 None → 503)。
         # 全内存 deque (maxlen 10000), 重启即失 (P1 KV 持久化同类债)。
@@ -1751,6 +1754,232 @@ class ClusterMaster:
             except Exception as e:
                 logger.debug(f"HA 同步推送 {peer_id} 异常: {e}")
 
+    # ── GAP-1 (Phase C): HA 全状态同步 — standby 持有完整集群拓扑, failover 即可调度 ──
+    # 原 HA 仅同步 tasks; Master 宕机后 standby 缺 nodes/kv/banned → 重新注册才能调度,
+    # 不满足 always-on。扩展: leader 周期推 nodes/kv_cache/banned_set/fault_counts,
+    # standby receive_synced_state 幂等合并。HA 仍 opt-in (单 Master 部署不受影响)。
+
+    def _node_to_dict(self, n: NodeInfo) -> dict[str, Any]:
+        """NodeInfo 序列化 (status 枚举 → value 字符串, 与 _node_to_resp 一致)。"""
+        return {
+            "node_id": n.node_id,
+            "hostname": n.hostname,
+            "ip_address": n.ip_address,
+            "port": n.port,
+            "arch": n.arch,
+            "total_memory_gb": n.total_memory_gb,
+            "available_memory_gb": n.available_memory_gb,
+            "cpu_cores": n.cpu_cores,
+            "mlx_version": n.mlx_version,
+            "gpu_cores": n.gpu_cores,
+            "device_model": n.device_model,
+            "uma_size_gb": n.uma_size_gb,
+            "role": n.role,
+            "status": n.status.value,
+            "last_heartbeat": n.last_heartbeat,
+            "tags": list(n.tags),
+            "active_tasks": n.active_tasks,
+            "max_tasks": n.max_tasks,
+            "network_rtt_ms": n.network_rtt_ms,
+        }
+
+    def _node_from_dict(self, d: dict[str, Any]) -> NodeInfo:
+        """NodeInfo 反序列化 (status 字符串 → NodeStatus 枚举)。"""
+        try:
+            status = NodeStatus(d.get("status", "offline"))
+        except ValueError:
+            status = NodeStatus.OFFLINE
+        return NodeInfo(
+            node_id=str(d.get("node_id", "")),
+            hostname=str(d.get("hostname", "")),
+            ip_address=str(d.get("ip_address", "")),
+            port=int(d.get("port", 0)),
+            arch=str(d.get("arch", "arm64")),
+            total_memory_gb=float(d.get("total_memory_gb", 0.0)),
+            available_memory_gb=float(d.get("available_memory_gb", 0.0)),
+            cpu_cores=int(d.get("cpu_cores", 0)),
+            mlx_version=str(d.get("mlx_version", "")),
+            gpu_cores=int(d.get("gpu_cores", 0)),
+            device_model=str(d.get("device_model", "")),
+            uma_size_gb=float(d.get("uma_size_gb", 0.0)),
+            role=str(d.get("role", "worker")),
+            status=status,
+            last_heartbeat=float(d.get("last_heartbeat", 0.0)),
+            tags=list(d.get("tags", [])),
+            active_tasks=int(d.get("active_tasks", 0)),
+            max_tasks=int(d.get("max_tasks", 4)),
+            network_rtt_ms=float(d.get("network_rtt_ms", 0.0)),
+        )
+
+    def _kv_to_dict(self, e: KVCacheEntry) -> dict[str, Any]:
+        return {
+            "cache_id": e.cache_id,
+            "model_name": e.model_name,
+            "node_id": e.node_id,
+            "created_at": e.created_at,
+            "size_mb": e.size_mb,
+            "ttl_seconds": e.ttl_seconds,
+            "access_count": e.access_count,
+        }
+
+    def _kv_from_dict(self, d: dict[str, Any]) -> KVCacheEntry:
+        return KVCacheEntry(
+            cache_id=str(d.get("cache_id", "")),
+            model_name=str(d.get("model_name", "")),
+            node_id=str(d.get("node_id", "")),
+            created_at=float(d.get("created_at", 0.0)),
+            size_mb=float(d.get("size_mb", 0.0)),
+            ttl_seconds=float(d.get("ttl_seconds", 3600.0)),
+            access_count=int(d.get("access_count", 0)),
+        )
+
+    async def receive_synced_state(self, state: dict[str, Any]) -> dict[str, int]:
+        """Standby 接收 leader 推送的集群状态 (nodes/kv/banned), 幂等合并。
+
+        锁序 nodes→kv (声明顺序), 两域分别持锁不嵌套。
+        返回 {"nodes": N, "kv": K, "banned": B} 合并计数。
+        """
+        counts = {"nodes": 0, "kv": 0, "banned": 0}
+        nodes_data = state.get("nodes", [])
+        kv_data = state.get("kv_cache", [])
+        banned_data = state.get("banned_nodes", {})
+
+        # nodes 域: 合并节点表 + banned + fault_counts (同受 _nodes_lock)。
+        async with self._nodes_lock:
+            for d in nodes_data:
+                try:
+                    info = self._node_from_dict(d)
+                    if not info.node_id:
+                        continue
+                    # standby 不覆盖本机 master 节点自身记录的活跃运行态
+                    # (leader 推来的 active_tasks 可能略滞后, 但 failover 后以 leader 快照为准)
+                    self.nodes[info.node_id] = info
+                    self._sync_node_metrics(info)
+                    counts["nodes"] += 1
+                except Exception as e:
+                    logger.warning(f"HA 状态同步跳过节点 {d.get('node_id', '?')}: {e}")
+            if isinstance(banned_data, dict):
+                now = time.time()
+                # 合并 ban: 取较晚解封时间 (leader 与 standby 任意一方 ban 更权威)
+                for nid, unban_at_raw in banned_data.items():
+                    try:
+                        unban_at = float(unban_at_raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if unban_at <= now:
+                        continue
+                    cur = self._banned_nodes.get(nid)
+                    if cur is None or unban_at > cur:
+                        self._banned_nodes[nid] = unban_at
+                        counts["banned"] += 1
+
+        # kv 域: 合并 KV 缓存 (按 cache_id 覆盖, 不超 _max_kv_cache 上限则保留)。
+        async with self._kv_lock:
+            for d in kv_data:
+                try:
+                    entry = self._kv_from_dict(d)
+                    if not entry.cache_id:
+                        continue
+                    self.kv_cache[entry.cache_id] = entry
+                    counts["kv"] += 1
+                except Exception as e:
+                    logger.warning(f"HA 状态同步跳过 KV {d.get('cache_id', '?')}: {e}")
+            # 惰性裁剪超限 (与 register_kv_cache 一致)
+            while len(self.kv_cache) > self._max_kv_cache:
+                oldest = min(self.kv_cache.items(), key=lambda x: x[1].created_at)
+                del self.kv_cache[oldest[0]]
+
+        if any(counts.values()):
+            logger.info(
+                f"HA 状态同步接收: nodes={counts['nodes']} kv={counts['kv']} banned={counts['banned']}"
+            )
+        return counts
+
+    async def _build_state_sync_targets(self) -> list[tuple[str, str, int, dict[str, Any]]]:
+        """构建全状态推送 payload + 对端列表 (自带 nodes→kv 两锁分别快照, 不嵌套)。
+
+        仅 leader 调用。返回 [(node_id, ip, port, payload), ...]。
+        """
+        if not self._election or not self._is_leader:
+            return []
+        now = time.time()
+        # nodes 域快照 (含 banned — 同受 _nodes_lock)
+        nodes_list: list[dict[str, Any]] = []
+        banned_snapshot: dict[str, float] = {}
+        async with self._nodes_lock:
+            nodes_list = [self._node_to_dict(n) for n in self.nodes.values()]
+            banned_snapshot = {
+                nid: unban_at for nid, unban_at in self._banned_nodes.items() if unban_at > now
+            }
+        # kv 域快照
+        kv_list: list[dict[str, Any]] = []
+        async with self._kv_lock:
+            kv_list = [self._kv_to_dict(e) for e in self.kv_cache.values()]
+        payload = {
+            "nodes": nodes_list,
+            "kv_cache": kv_list,
+            "banned_nodes": banned_snapshot,
+            "saved_at": now,
+        }
+        targets: list[tuple[str, str, int, dict[str, Any]]] = []
+        for peer_id in self._election._known_nodes:
+            if peer_id == self._election.node_id:
+                continue
+            cand = self._election.get_candidate(peer_id)
+            if not cand or not cand.ip_address or not cand.port:
+                continue
+            if not is_safe_peer_host(cand.ip_address):
+                continue
+            targets.append((peer_id, cand.ip_address, cand.port, payload))
+        return targets
+
+    async def _push_sync_state_to_standbys(
+        self, targets: list[tuple[str, str, int, dict[str, Any]]]
+    ) -> None:
+        """锁外异步推送全状态到各 standby (best-effort)。"""
+        if not targets:
+            return
+        token = self._get_dispatch_token()
+        try:
+            client = await self._get_dispatch_http()
+        except Exception as e:
+            logger.warning(f"HA 状态同步获取 HTTP 客户端失败: {e}")
+            return
+        for peer_id, ip, port, payload in targets:
+            try:
+                url = build_safe_url(mtls_scheme(), ip, port, "/api/ha/sync-state")
+                resp = await client.post(
+                    url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0
+                )
+                if resp.status_code != 200:
+                    logger.debug(f"HA 状态同步推送 {peer_id} HTTP {resp.status_code}")
+                else:
+                    logger.debug(
+                        f"HA 状态同步推送 {peer_id} ok "
+                        f"(nodes={len(payload['nodes'])} kv={len(payload['kv_cache'])})"
+                    )
+            except Exception as e:
+                logger.debug(f"HA 状态同步推送 {peer_id} 异常: {e}")
+
+    async def _sync_state_to_standbys(self) -> None:
+        """leader 周期推全状态到 standby (由 _state_sync_loop 调)。"""
+        targets = await self._build_state_sync_targets()
+        if targets:
+            await self._push_sync_state_to_standbys(targets)
+
+    async def _state_sync_loop(self) -> None:
+        """GAP-1: 周期全状态同步 (5s) — leader 推 nodes/kv/banned 到 standby, best-effort。"""
+        try:
+            while self._running:
+                await asyncio.sleep(5)
+                if self._election and self._is_leader:
+                    try:
+                        await self._sync_state_to_standbys()
+                    except Exception as e:
+                        logger.warning(f"HA 状态同步循环异常: {e}")
+        except asyncio.CancelledError:
+            pass
+
     def _on_elected_leader(self) -> None:
         self._is_leader = True
         logger.info("本节点被选举为 Leader")
@@ -1831,7 +2060,9 @@ class ClusterMaster:
             )
             if self._election:
                 await self._election.start()
-                logger.info("P4 HA 选举已启动 (HTTP 拉票 + 任务同步已接线)")
+                # GAP-1 (Phase C): 启动全状态同步循环 — standby 持有完整拓扑, failover 即调度。
+                self._state_sync_task = asyncio.create_task(self._state_sync_loop())
+                logger.info("P4 HA 选举已启动 (HTTP 拉票 + 任务同步 + 全状态同步已接线)")
         else:
             logger.info("P4 HA 未启用 — 单 Master 模式 (默认)")
 
@@ -1847,7 +2078,12 @@ class ClusterMaster:
     async def stop(self) -> None:
         """停止集群主节点。"""
         self._running = False
-        for task in (self._health_task, self._retry_task, self._persist_task):
+        for task in (
+            self._health_task,
+            self._retry_task,
+            self._persist_task,
+            self._state_sync_task,
+        ):
             if task and not task.done():
                 task.cancel()
                 try:

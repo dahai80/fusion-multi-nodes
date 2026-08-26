@@ -1,11 +1,14 @@
-# HA 与崩溃恢复 (H2)
+# HA 与崩溃恢复 (H2 + GAP-1)
 
 > fusion-multi-node **默认单 Master** 模式 (`_election is None`, `_is_leader=True`)。多 Master
-> HA 选举 (`MasterElection`/`setup_election`) **已接线** (P4 + P0-1): leader 心跳广播 + term/voted_for
-> 持久化 + 任务快照推 standby, 经 `start(ha_config={"enabled":True,...})` 显式启用; `StandbyMaster`
+> HA 选举 (`MasterElection`/`setup_election`) **已接线** (P4 + P0-1 + GAP-1): leader 心跳广播 +
+> term/voted_for 持久化 + 任务快照推 standby + **全状态同步** (nodes/kv_cache/banned_nodes),
+> 经 `start(ha_config={"enabled":True,...})` 显式启用; `StandbyMaster`
 > 仍为未接线死代码 (独立类, 与已接线的 `MasterElection` 分离)。默认部署不启用 HA。
-> 本文档描述 **务实 HA 路线**: 单 Master + launchd 进程守护 + H3 任务持久化 = 崩溃自愈, 不丢任务。
-> 多 Master HA 为技术预览, 非生产 SLA 承诺。
+> 本文档描述 **两条 HA 路线**:
+> - **单 Master + launchd 进程守护 + H3 任务持久化** = 本机崩溃自愈, 不丢任务 (默认)。
+> - **多 Master HA + 全状态同步** (GAP-1, v0.10.0) = 跨机故障转移, standby 持完整拓扑,
+>   leader 宕机 standby 立即接管调度, 满足 always-on SLA (显式启用, 2+ Master 部署)。
 
 ## 崩溃自愈链路
 
@@ -68,8 +71,63 @@ tail -f logs/stdout_master.launchd.log       # launchd 托管日志 (区别于 n
 - 终态任务 (COMPLETED/FAILED/CANCELLED/TIMEOUT) 不落盘, 节省空间
 - 恢复语义: RUNNING/MIGRATED → PENDING (派发中任务崩溃后须重新调度); PENDING 保持 PENDING
 
+## 多 Master HA + 全状态同步 (GAP-1, v0.10.0)
+
+### 为什么需要全状态同步
+
+原 HA (v0.8.3) 仅同步 **任务** 到 standby。Master 宕机后 standby 缺 nodes/kv_cache/banned_nodes,
+节点须重新注册才能调度 → always-on SLA 不满足。GAP-1 扩展同步范围到完整集群拓扑:
+standby 持有 nodes + kv_cache + banned_nodes + fault_counts, leader 宕机后 standby promote
+为 leader 即可立即调度, 无须等节点重注册。
+
+### 同步内容
+
+| 状态 | 来源域 | 同步方式 |
+|------|--------|----------|
+| tasks (非终态) | `_tasks_lock` | `_persist_tasks` 触发推送 `/api/ha/sync-tasks` (即时) |
+| nodes | `_nodes_lock` | `_state_sync_loop` (5s 周期) 推送 `/api/ha/sync-state` |
+| kv_cache | `_kv_lock` | 同上 |
+| banned_nodes | `_nodes_lock` | 同上 (ban 解封时间, 取较晚) |
+
+- leader 周期 (5s) 推全状态到所有 standby, best-effort, 不阻塞派发。
+- standby `receive_synced_state` 幂等合并; 锁序 nodes→kv, 两域分别持锁不嵌套。
+- HA 仍 **opt-in**: 单 Master 部署 (`_election is None`) 不启动同步循环, 行为不变。
+
+### 启用 always-on (2+ Master 部署)
+
+```python
+await master.start(
+    ha_config={
+        "enabled": True,
+        "node_id": "master-1",
+        "priority": 10,                 # 高优先级 = 初始 leader
+        "peers": [
+            {"node_id": "master-2", "ip": "10.0.0.2", "port": 11452, "priority": 1},
+        ],
+    }
+)
+```
+
+- leader 宕机 → standby 超时 (election_timeout 5-10s) → 发起选举 → 获多数票 → promote。
+- promote 后 standby 已持完整拓扑 (nodes/kv/banned 来自周期同步), 立即派发, 无空窗。
+- `StandbyMaster` 类仍为死代码 (与已接线的 `MasterElection` 分离), 不参与本路径。
+
+### 故障转移链路
+
+```
+Leader Master 宕机 (整机/进程)
+  → standby 选举超时 (5-10s)
+  → 发起拉票 → 获多数票 → promote 为 Leader (_is_leader=True)
+  → standby 已持 nodes/kv/banned (周期同步)
+  → assign_task 立即可派发 (无须等节点重注册)
+  → always-on: 空窗 ≤ 选举超时 (~10s)
+```
+
 ## 局限
 
 - 单 Master = SPOF, launchd 守护仅保证 **本机** 崩溃自愈, 不防整机宕机/网络分区。
-- 多 Master HA (跨机故障转移) 已接线但为 **技术预览** (非生产 SLA 验证): `start(ha_config=)` 显式配 peers 启动选举, leader 心跳 + 任务快照推 standby。生产关键负载仍建议单 Master + launchd + 定期备份。
-- 本机崩溃自愈 (launchd + H3) 已覆盖主要故障模式; 跨机故障转移为可选增强。
+- 多 Master HA (跨机故障转移) 已接线 + 全状态同步 (GAP-1): `start(ha_config=)` 显式配 peers
+  启动选举, leader 心跳 + 任务快照 + **全状态** 推 standby。**always-on 空窗 ≤ 选举超时 (~10s)**。
+  仍为 opt-in, 默认单 Master 部署不启用。生产 always-on 须 2+ Master 显式配置。
+- 本机崩溃自愈 (launchd + H3) 已覆盖主要故障模式; 跨机故障转移为可选增强 (GAP-1 补齐)。
+- KV 跨节点张量复用仍 no-op (GAP-7, 上游 #33/#650), 全状态同步仅传 KV 元数据。
