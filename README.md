@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.6-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-888%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-943%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -722,6 +722,18 @@ FUSION_AUTO_APPROVE_PATTERNS="10.0.1." ./start.sh start
 ```
 
 > 生产仅对可信网段开放自动审批; 未配 env 则走手动审批门 (`fusion-multi-node cluster approve <node_id>`)。
+
+### Phase 4 故障注入 E2E (v0.8.6)
+
+调度器对真实故障的端到端自愈验证 (真 ASGI 路由, 非单元 mock; 推理用合成 FakeBackend, 不触 fusion-mlx):
+
+1. **agent 宕机 → 超时 → 重试 → 重派存活节点** — agent-a 移出路由 (模拟宕机, 派发 404), 任务超时 `check_timeouts` → `_enqueue_retry` (TIMEOUT→PENDING) → 排空重试队列 `assign_task` (select_nodes 跳过 ban 的 agent-a) → 落 agent-b → COMPLETED。锁全链路: 超时入队 + 重派存活 + 任务完成。
+
+2. **反复派发失败 → ban → 新任务路由存活节点** — agent-a 宕机, 连续派发 `_FAULT_THRESHOLD` 次均 404 → `report_fault` 窗口内达阈值自动 ban → 新任务 `select_nodes` 跳过 ban 节点 → 路由 agent-b → COMPLETED。集成级验证 (现有 `test_task_circuit_breaker` 为单元级)。
+
+3. **HA leader 故障 → standby 升 leader → 恢复派发 + 同步任务可读** — m1 (leader) 持有任务经 `_persist_tasks` → HTTP 推送到 m2 (standby) `receive_synced_tasks` 落盘; m1 降级 + m2 升 leader (`_on_demoted_from_leader`/`_on_elected_leader` 翻 `_is_leader`) → m2 `assign_task` 不再因 standby 守卫返回 False → 同步任务接管后不丢失。
+
+测试: `tests/test_fault_injection.py` (3 场景, PortRoutingTransport + 真 AgentServer `/api/execute` + FakeBackend)。全量 943 passed 1 skipped。
 
 ### KV 跨节点 lookup 契约修复 + 审批 CIDR 精确匹配 (v0.8.5)
 
