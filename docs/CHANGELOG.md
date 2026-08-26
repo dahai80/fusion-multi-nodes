@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-08-26 — GAP-6 throughput cap + client-side pacing
+
+> **限流适配补齐**: 上游 fusion-mlx #635 已修 (PR #637, `--rate-limit 0` 真正关闭限流, 默认关);
+> 本版补客户端 429 退避重试 + master 限流归类修正 — 健康节点被限流不再误 ban。
+
+### Added
+
+- **GAP-6 客户端限流适配** (`agent/rate_pacer.py`) — 补 fusion-mlx 429 限流处理
+  - `dispatch_with_pacing(send_request, pacer)`: 包 HTTP 发送, 429 时读 `Retry-After` 头, 指数退避 sleep, 在 `budget_seconds` 预算内重试; 非 429 (含 5xx/401) 原样返回不重试
+  - `PacerConfig` dataclass (确定性无 jitter, Rule 5): `max_retries=3`, `initial_backoff=0.5`, `max_backoff=5.0`, `budget_seconds=10.0`, `next_backoff(attempt)=min(initial*2^attempt, max)`
+  - `parse_retry_after(resp)`: 秒数 / HTTP-date / 缺失回落 1.0s / 非法回落 1.0s / 负数 clamp 0.0
+  - `RateLimitExhausted` 异常: 预算耗尽仍 429 → 上抛, 带 `last_status`/`retry_after`/`attempts`
+  - `FusionMLXBackend.__init__` 加 `pacer: PacerConfig | None` 参数; `chat()`/`embed()` 经 `dispatch_with_pacing` 包裹 (不再直接 `raise_for_status`)
+  - `_execute_inference`/`_execute_embedding` catch `RateLimitExhausted` → 返回 `{"error":..., "rate_limited": True, "node_id":...}` (标记限流瞬时失败)
+  - **缺陷链 (修前)**: 429 → `raise_for_status` 抛 `HTTPStatusError` → agent 包 `{"error":...}` → master `_dispatch_data` `"error" in r` → `logic_fail=True` + `report_fault("agent_internal_error")` → 3 故障/60s → **健康限流节点 ban 300s** (误判: 限流是瞬时, 非逻辑错误)
+  - `tests/test_rate_pacer.py` (14 用例): 退避确定性 / Retry-After 解析 / 429 重试到成功 / 429 耗尽抛 / budget 截断 / 5xx 不重试 / backend chat 429 退避到成功 / 耗尽抛 RateLimitExhausted
+
+### Changed
+
+- **master 限流归类修正** (`master/cluster_master.py` `_dispatch_data` / `_dispatch_pipeline`) — GAP-6
+  - `_dispatch_data` 新增分支 (置于 `"error" in r` 之前, 因 rate_limited dict 亦含 "error" key): `r.get("rate_limited")` → `transient_fail=True`, 不进 `logic_fail`, **不调 `report_fault`**, 不累加熔断器故障计数, 不 ban
+  - `_dispatch_pipeline` 同理: rate_limited → `_finalize_task(success=False, retryable=True)`; Exception 分支亦改 `retryable=True` (原不可重试)
+  - **效果**: 限流节点故障计数保持空, `is_node_banned` 恒 False, 健康节点限流不再拉黑
+  - `tests/test_dispatch_integration.py::TestRateLimitedDispatch` (2 用例): 单节点限流 → FAILED 不 ban + fault_counts 空; 一健康一限流 → PARTIAL + 限流节点不 ban
+
+### Fixed
+
+- **健康限流节点误 ban** (GAP-6 审计 §7) — 429 限流归类为 `transient_fail` (可重试) 而非 `logic_fail`, 跳过 `report_fault`, 不进熔断窗口
+
+### External
+
+- **上游 fusion-mlx #635 CLOSED** (2026-08-25, PR #637 `fix(auth): --api-key on --model-dir path + --rate-limit 0 disables limiter (#636, #635)`): `--rate-limit 0` 真正关闭 60rpm 限流器, 默认即关; 显式设上限值时仍返 429 → 由本版客户端退避吸收
+
 ## [0.10.0] - 2026-08-26 — GAP-1 always-on SLA
 
 > **企业级 HA 补齐**: 多 Master 全状态同步落地, standby 持有完整集群拓扑, leader 宕机后立即接管调度。
@@ -328,6 +361,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** — 15+ commands across 7 groups
 - 585 tests, 96.1% code coverage
 
+[0.10.1]: https://github.com/dahai80/fusion-multi-node/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.10.0-rc.1...v0.10.0
 [0.9.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.9...v0.9.0
 [0.8.2]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.1...v0.8.2
