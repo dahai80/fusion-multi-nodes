@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from fusion_multi_node import __version__ as _node_protocol_version
+from fusion_multi_node.agent.rate_pacer import PacerConfig, RateLimitExhausted, dispatch_with_pacing
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.utils.auth import is_safe_path_segment
@@ -76,6 +77,7 @@ class FusionMLXBackend(InferenceBackend):
         base_url: str = "http://localhost:11432",
         timeout: float = 120.0,
         api_key: str = "",
+        pacer: PacerConfig | None = None,
     ):
         env_url = os.environ.get("FUSION_MLX_URL")
         self._base_url = (env_url or base_url).rstrip("/")
@@ -83,6 +85,10 @@ class FusionMLXBackend(InferenceBackend):
         # 显式 api_key 优先 (确定性, Rule 5); 未显式传则回落 env。
         self._api_key = api_key or os.environ.get("FUSION_MLX_API_KEY", "")
         self._client: httpx.AsyncClient | None = None
+        # GAP-6 客户端限流: 429 退避重试。默认 PacerConfig (3 次, 指数退避, 10s 预算)。
+        # 上游 fusion-mlx --rate-limit 限流 (#635 已修: 0 默认关, 显式上限仍 429);
+        # 旧实现 429 一律 raise_for_status → 节点被误判逻辑错误 ban (GAP-6 审计 §7)。
+        self._pacer = pacer or PacerConfig()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -195,8 +201,11 @@ class FusionMLXBackend(InferenceBackend):
         client = await self._get_client()
         # /v1/* 同样受 fusion-mlx api_key 保护 (Bearer), 与 /distributed/* 同源。
         # 原实现漏带 Authorization → 任何启用 auth 的 fusion-mlx 推理一律 401。
-        resp = await client.post(
-            f"{self._base_url}/v1/chat/completions", json=payload, headers=self._dist_headers()
+        # GAP-6: 429 经 dispatch_with_pacing 退避重试, 不再直接 raise_for_status 误 ban。
+        url = f"{self._base_url}/v1/chat/completions"
+        resp = await dispatch_with_pacing(
+            lambda: client.post(url, json=payload, headers=self._dist_headers()),
+            self._pacer,
         )
         resp.raise_for_status()
         return resp.json()
@@ -209,8 +218,11 @@ class FusionMLXBackend(InferenceBackend):
     ) -> dict[str, Any]:
         payload = {"model": model, "input": input_text, **kwargs}
         client = await self._get_client()
-        resp = await client.post(
-            f"{self._base_url}/v1/embeddings", json=payload, headers=self._dist_headers()
+        # GAP-6: 429 退避重试 (同 chat)。
+        url = f"{self._base_url}/v1/embeddings"
+        resp = await dispatch_with_pacing(
+            lambda: client.post(url, json=payload, headers=self._dist_headers()),
+            self._pacer,
         )
         resp.raise_for_status()
         return resp.json()
@@ -674,12 +686,23 @@ class NodeAgent:
         if not messages and prompt:
             messages = [{"role": "user", "content": prompt}]
 
-        data = await self._backend.chat(
-            model=model,
-            messages=messages,
-            temperature=task.get("params", {}).get("temperature", 0.7),
-            max_tokens=task.get("params", {}).get("max_tokens", 4096),
-        )
+        # GAP-6: 429 限流耗尽重试预算 → 标 rate_limited, master 归类瞬时失败 (可重试),
+        # 不进 logic_fail (不 ban 健康节点)。其他异常照常上抛交 _run 包 error。
+        try:
+            data = await self._backend.chat(
+                model=model,
+                messages=messages,
+                temperature=task.get("params", {}).get("temperature", 0.7),
+                max_tokens=task.get("params", {}).get("max_tokens", 4096),
+            )
+        except RateLimitExhausted as e:
+            logger.warning(f"推理任务限流未恢复: {task.get('task_id', '')}: {e}")
+            return {
+                "task_id": task.get("task_id", ""),
+                "error": str(e),
+                "rate_limited": True,
+                "node_id": self.config.node_id,
+            }
 
         return {
             "task_id": task["task_id"],
@@ -697,7 +720,17 @@ class NodeAgent:
             logger.warning(f"Embedding 任务拒绝: 非法 model 段 {model!r}")
             return {"task_id": task.get("task_id", ""), "error": f"非法 model: {model!r}"}
 
-        data = await self._backend.embed(model=model, input_text=text)
+        # GAP-6: 429 限流耗尽 → rate_limited 信号 (同 inference)。
+        try:
+            data = await self._backend.embed(model=model, input_text=text)
+        except RateLimitExhausted as e:
+            logger.warning(f"Embedding 任务限流未恢复: {task.get('task_id', '')}: {e}")
+            return {
+                "task_id": task.get("task_id", ""),
+                "error": str(e),
+                "rate_limited": True,
+                "node_id": self.config.node_id,
+            }
 
         return {
             "task_id": task["task_id"],
@@ -746,9 +779,7 @@ class NodeAgent:
                 return {"error": f"不安全对端主机: {source_node!r}"}
             client = await self._get_http_client(300.0)
             source_port = task.get("source_port", 11452)
-            url = build_safe_url(
-                mtls_scheme(), source_node, source_port, f"/api/models/{model_name}/manifest"
-            )
+            url = build_safe_url(mtls_scheme(), source_node, source_port, f"/api/models/{model_name}/manifest")
             resp = await client.get(url)
             manifest = resp.json()
             synced_files = []

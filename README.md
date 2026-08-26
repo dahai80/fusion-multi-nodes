@@ -5,22 +5,22 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1067%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1083%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.0 (2026-08-26) — GAP-1 always-on SLA 补齐**
+> **📦 v0.10.1 (2026-08-26) — GAP-6 限流适配补齐**
 >
-> 多 Master HA 全状态同步落地 — standby 持有 nodes/kv_cache/banned_nodes 完整拓扑, leader 宕机后立即接管调度,
-> always-on 空窗 ≤ 选举超时 (~10s)。HA 仍 opt-in (单 Master 部署不变), 2+ Master 显式配置即获 always-on。详见 [CHANGELOG](docs/CHANGELOG.md)。
+> 上游 fusion-mlx #635 已修 (PR #637, `--rate-limit 0` 真正关闭限流)。本版补客户端 429 退避重试
+> (`agent/rate_pacer.py`) + master 限流归类修正 (限流=瞬时失败可重试, 不 ban 健康节点)。详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 仍待补齐 (Phase D/E/F):
-> - **吞吐上限声明** (GAP-6): 上游 fusion-mlx 60rpm 限流, 单节点推理吞吐受限; 多节点线性扩展
+> 已完成 (Phase A-D): issues/PR 处理 → RC → GAP-1 always-on → GAP-6 限流适配。
+> 仍待补齐 (Phase E/F):
 > - **死代码 + KV no-op 披露** (GAP-5/7): autoscaler/mcp_gateway/cloud_fallback/StandbyMaster 未接线死代码; sync_kv_cache 仅元数据 (张量 KV 上游阻塞)
 > - **多租户/远程 SaaS 阻塞** (GAP-8): 单一共享 Bearer token 无 per-user RBAC。须多用户鉴权 (Phase F)。当前仅适用可信单团队 LAN
 
@@ -866,6 +866,13 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 ---
 
 ## 🛣️ Roadmap
+
+### v0.10.1 ✅ — GAP-6 限流适配 (2026-08-26)
+- [x] **客户端限流适配** (GAP-6) — `agent/rate_pacer.py` 拦截 fusion-mlx 429: 读 `Retry-After`, 指数退避重试 (3 次, 10s 预算, 确定性无 jitter), 耗尽抛 `RateLimitExhausted`
+- [x] `FusionMLXBackend.chat`/`embed` 经 `dispatch_with_pacing` 包裹 (不再直接 `raise_for_status` 误判 429 为逻辑错误)
+- [x] master 限流归类修正 — `rate_limited` → 瞬时失败 (`transient_fail`, 可重试), 不进 `logic_fail`, **不调 `report_fault`, 不 ban 健康节点**
+- [x] 上游 fusion-mlx #635 CLOSED (PR #637, `--rate-limit 0` 真正关闭限流, 默认关); 显式上限 429 由退避吸收
+- [x] 16 个限流测试 (14 unit + 2 集成); 1083 tests, 0 ruff errors
 
 ### v0.10.0 ✅ — GAP-1 always-on SLA (2026-08-26)
 - [x] **HA 全状态同步** (GAP-1) — leader 周期推 nodes/kv_cache/banned_nodes 到 standby; standby 持完整拓扑, failover 即调度 (always-on 空窗 ≤ 选举超时 ~10s)。HA 仍 opt-in, 2+ Master 显式配置获 always-on, 单 Master 部署不变

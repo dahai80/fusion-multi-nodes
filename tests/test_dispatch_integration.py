@@ -22,6 +22,7 @@ from httpx import ASGITransport, AsyncBaseTransport, AsyncClient, Request, Respo
 
 from fusion_multi_node.agent import AgentConfig, NodeAgent
 from fusion_multi_node.agent.node_agent import InferenceBackend
+from fusion_multi_node.agent.rate_pacer import RateLimitExhausted
 from fusion_multi_node.master import ClusterMaster, ClusterTask, ParallelMode, TaskStatus
 from fusion_multi_node.server.agent_server import AgentServer
 from fusion_multi_node.server.master_server import MasterServer
@@ -77,8 +78,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -399,9 +399,7 @@ class TestPartialSuccess:
             await self._drain_dispatch(master)
             final = await master.get_task(task.task_id)
 
-        assert final.status == TaskStatus.PARTIAL, (
-            f"期望 PARTIAL 实得 {final.status}: {final.error}"
-        )
+        assert final.status == TaskStatus.PARTIAL, f"期望 PARTIAL 实得 {final.status}: {final.error}"
         # 保留成功节点的部分结果
         assert len(final.result["outputs"]) == 1
         assert final.result["outputs"][0]["content"] == "echo@agent-a:hello"
@@ -412,6 +410,197 @@ class TestPartialSuccess:
         # active_tasks 回降
         assert master.nodes["agent-a"].active_tasks == 0
         assert master.nodes["agent-b"].active_tasks == 0
+
+    async def _drain_dispatch(self, master: ClusterMaster, timeout_s: float = 5.0) -> None:
+        deadline_iters = int(timeout_s * 20)
+        for _ in range(deadline_iters):
+            pending = [t for t in master._dispatch_tasks.values() if not t.done()]
+            if not pending:
+                return
+            await asyncio.sleep(0.05)
+
+
+class RateLimitedBackend(InferenceBackend):
+    """假推理后端 — chat 永远抛 RateLimitExhausted, 模拟 fusion-mlx 429 限流耗尽。
+
+    NodeAgent._execute_inference 捕获后返 {"error":..., "rate_limited": True} →
+    master _dispatch_data 走 transient_fail 路径 (可重试, 不 ban 节点)。
+    与 FailingInferenceBackend (抛 RuntimeError → logic_fail → ban) 区分。
+    """
+
+    def __init__(self, node_id: str):
+        self._node_id = node_id
+        self.chat_calls: list[dict[str, Any]] = []
+
+    async def chat(self, model, messages, temperature=0.7, max_tokens=4096, **kwargs):
+        self.chat_calls.append({"model": model, "node_id": self._node_id})
+        raise RateLimitExhausted(last_status=429, retry_after=0.01, attempts=2)
+
+    async def embed(self, model, input_text, **kwargs):
+        raise RateLimitExhausted(last_status=429, retry_after=0.01, attempts=2)
+
+    async def health(self) -> bool:
+        return True
+
+
+class TestRateLimitedDispatch:
+    """GAP-6: 429 限流归类瞬时失败 (可重试), 非 logic_fail (不 ban 健康节点)。
+
+    旧缺陷: 429 → raise_for_status → {"error":...} 无 rate_limited 标记 →
+    master 归 logic_fail → report_fault 累计 → 熔断 ban 节点 300s (健康节点被限流却拉黑)。
+    """
+
+    @pytest.fixture
+    async def cluster_rl(self, monkeypatch):
+        # SSRF 测试放行 — 仅测试作用域
+        monkeypatch.setattr(
+            "fusion_multi_node.master.cluster_master.is_safe_peer_host",
+            lambda host: True,
+        )
+        monkeypatch.setattr(
+            "fusion_multi_node.master.cluster_master.build_safe_url",
+            lambda scheme, host, port, path: f"{scheme}://{host}:{port}{path}",
+        )
+
+        rl_backend = RateLimitedBackend("agent-rl")
+        agent = NodeAgent(
+            config=AgentConfig(node_id="agent-rl", cluster_token=TEST_TOKEN, agent_port=AGENT_PORT_A),
+            backend=rl_backend,
+        )
+        server = AgentServer(agent=agent, shared_token=TEST_TOKEN)
+
+        port_to_app = {AGENT_PORT_A: server.app}
+        routing_transport = PortRoutingTransport(port_to_app)
+
+        master = ClusterMaster(heartbeat_timeout=60.0)
+        master_server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        master_server._approval_manager = None
+
+        async def _fake_dispatch_http():
+            return AsyncClient(transport=routing_transport, timeout=10.0)
+
+        monkeypatch.setattr(master, "_get_dispatch_http", _fake_dispatch_http)
+        master._dispatch_token = TEST_TOKEN
+
+        try:
+            yield {
+                "master": master,
+                "rl_backend": rl_backend,
+                "master_server": master_server,
+                "routing_transport": routing_transport,
+            }
+        finally:
+            await master.stop()
+            await routing_transport.aclose()
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_classified_transient_not_banned(self, cluster_rl):
+        """单节点限流 → 末态 FAILED (重试超限), 但节点不进 ban 列表 (不计熔断)。"""
+        from fusion_multi_node.master.cluster_master import TaskStatus as _TS
+
+        master = cluster_rl["master"]
+        master_server = cluster_rl["master_server"]
+        transport = ASGITransport(app=master_server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await _register_node(client, "agent-rl", AGENT_PORT_A)
+            assert r.status_code == 200
+
+            task = ClusterTask(
+                task_id="task-rl",
+                name="rate-limit-test",
+                mode=ParallelMode.DATA,
+                model_name="qwen-3b",
+                task_type="inference",
+                params={"prompt": "hello", "messages": [], "max_tokens": 64, "temperature": 0.7},
+            )
+            ok = await master.assign_task(task)
+            assert ok
+
+            await self._drain_dispatch(master)
+            final = await master.get_task(task.task_id)
+
+        # 限流 = 瞬时可重试, 重试超限后 FAILED (无云端回退)
+        assert final.status in (_TS.FAILED, _TS.PENDING), (
+            f"期望 FAILED/PENDING(重试中) 实得 {final.status}: {final.error}"
+        )
+        # 关键断言: 限流不 ban 节点 — 节点不在 ban 列表, 状态非 FAULT 持久
+        assert not master.is_node_banned("agent-rl"), "限流节点不该被 ban"
+        # 限流未累加熔断故障计数 (rate_limited 路径不调 report_fault)
+        assert master._fault_counts.get("agent-rl", []) == []
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_partial_with_one_healthy(self, monkeypatch, tmp_path):
+        """DATA 并行: 一节点限流 + 一节点成功 → PARTIAL (非全 FAILED), 限流节点不 ban。"""
+        monkeypatch.setattr(
+            "fusion_multi_node.master.cluster_master.is_safe_peer_host",
+            lambda host: True,
+        )
+        monkeypatch.setattr(
+            "fusion_multi_node.master.cluster_master.build_safe_url",
+            lambda scheme, host, port, path: f"{scheme}://{host}:{port}{path}",
+        )
+
+        ok_backend = FakeInferenceBackend("agent-ok")
+        agent_ok = NodeAgent(
+            config=AgentConfig(node_id="agent-ok", cluster_token=TEST_TOKEN, agent_port=AGENT_PORT_A),
+            backend=ok_backend,
+        )
+        server_ok = AgentServer(agent=agent_ok, shared_token=TEST_TOKEN)
+
+        rl_backend = RateLimitedBackend("agent-rl")
+        agent_rl = NodeAgent(
+            config=AgentConfig(node_id="agent-rl", cluster_token=TEST_TOKEN, agent_port=AGENT_PORT_B),
+            backend=rl_backend,
+        )
+        server_rl = AgentServer(agent=agent_rl, shared_token=TEST_TOKEN)
+
+        port_to_app = {AGENT_PORT_A: server_ok.app, AGENT_PORT_B: server_rl.app}
+        routing_transport = PortRoutingTransport(port_to_app)
+
+        master = ClusterMaster(heartbeat_timeout=60.0)
+        master_server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        master_server._approval_manager = None
+
+        async def _fake_dispatch_http():
+            return AsyncClient(transport=routing_transport, timeout=10.0)
+
+        monkeypatch.setattr(master, "_get_dispatch_http", _fake_dispatch_http)
+        master._dispatch_token = TEST_TOKEN
+
+        try:
+            transport = ASGITransport(app=master_server.app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r1 = await _register_node(client, "agent-ok", AGENT_PORT_A)
+                r2 = await _register_node(client, "agent-rl", AGENT_PORT_B)
+                assert r1.status_code == 200 and r2.status_code == 200
+
+                task = ClusterTask(
+                    task_id="task-rl-partial",
+                    name="rl-partial",
+                    mode=ParallelMode.DATA,
+                    model_name="qwen-3b",
+                    model_shards=[{"id": "s0"}, {"id": "s1"}],
+                    task_type="inference",
+                    params={"prompt": "hi", "messages": [], "max_tokens": 64, "temperature": 0.7},
+                )
+                ok = await master.assign_task(task)
+                assert ok
+
+                for _ in range(100):
+                    pending = [t for t in master._dispatch_tasks.values() if not t.done()]
+                    if not pending:
+                        break
+                    await asyncio.sleep(0.05)
+                final = await master.get_task(task.task_id)
+
+            # 一成功一限流 → PARTIAL (保留成功节点 output)
+            assert final.status == TaskStatus.PARTIAL, f"期望 PARTIAL 实得 {final.status}: {final.error}"
+            assert len(final.result["outputs"]) == 1
+            assert not master.is_node_banned("agent-rl"), "限流节点不该被 ban"
+            assert master._fault_counts.get("agent-rl", []) == []
+        finally:
+            await master.stop()
+            await routing_transport.aclose()
 
     async def _drain_dispatch(self, master: ClusterMaster, timeout_s: float = 5.0) -> None:
         deadline_iters = int(timeout_s * 20)

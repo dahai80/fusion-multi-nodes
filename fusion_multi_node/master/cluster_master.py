@@ -519,15 +519,11 @@ class ClusterMaster:
             self._fault_counts[node_id] = [t for t in counts if now - t <= self._FAULT_WINDOW_S]
             windowed = self._fault_counts[node_id]
             logger.warning(
-                f"节点故障: {node_id} [{fault_type}] {message} "
-                f"(窗口内 {len(windowed)}/{self._FAULT_THRESHOLD})"
+                f"节点故障: {node_id} [{fault_type}] {message} (窗口内 {len(windowed)}/{self._FAULT_THRESHOLD})"
             )
             if len(windowed) >= self._FAULT_THRESHOLD:
                 self._banned_nodes[node_id] = now + self._BAN_DURATION_S
-                logger.warning(
-                    f"节点故障达阈值自动 ban: {node_id} "
-                    f"({self._BAN_DURATION_S:.0f}s) [{fault_type}]"
-                )
+                logger.warning(f"节点故障达阈值自动 ban: {node_id} ({self._BAN_DURATION_S:.0f}s) [{fault_type}]")
             return True
 
     async def get_online_nodes(self) -> list[NodeInfo]:
@@ -704,11 +700,7 @@ class ClusterMaster:
         """当前该租户 RUNNING 任务数 (锁内调用, 直接读 self.tasks)。"""
         if not user:
             user = ""
-        return sum(
-            1
-            for t in self.tasks.values()
-            if t.status == TaskStatus.RUNNING and (t.user or "") == user
-        )
+        return sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING and (t.user or "") == user)
 
     def configure_scheduling(self, tenant_max_concurrent: int) -> None:
         """P1-H: 设置租户并发配额 (0=不限)。供 CLI 从 ClusterConfig 注入。"""
@@ -810,9 +802,7 @@ class ClusterMaster:
                 async with self._nodes_lock:
                     node = self.nodes.get(preferred)
                     available_ok = bool(
-                        node
-                        and node.status == NodeStatus.ONLINE
-                        and node.available_memory_gb >= required_mem
+                        node and node.status == NodeStatus.ONLINE and node.available_memory_gb >= required_mem
                     )
                 if available_ok:
                     async with self._nodes_lock:
@@ -858,9 +848,7 @@ class ClusterMaster:
 
         if len(nodes) < (len(task.model_shards) or 1):
             # P1-H: 节点不足不再直接 503 → 入优先级队列, 节点空闲时排空派发。
-            logger.warning(
-                f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)} → 入队等待"
-            )
+            logger.warning(f"可用节点不足: 需要 {len(task.model_shards) or 1}, 可用 {len(nodes)} → 入队等待")
             async with self._tasks_lock:
                 if task.task_id in {t.task_id for t in self._pending_queue}:
                     return True
@@ -1009,6 +997,12 @@ class ClusterMaster:
                 # 传输级失败 — _dispatch_to_node 已 report_fault (raise 前调), 此处只聚合
                 errors.append(f"{nid}: {type(r).__name__}: {r}")
                 transient_fail = True
+            elif isinstance(r, dict) and r.get("rate_limited"):
+                # GAP-6: fusion-mlx 429 限流 (客户端退避预算耗尽) = 瞬时失败, 可重试;
+                # 不进 logic_fail (不 ban 健康节点), 不累加熔断器故障计数。
+                errors.append(f"{nid}: 限流 (rate_limited): {r.get('error', '')}")
+                transient_fail = True
+                logger.info(f"节点 {nid} 限流瞬时失败 (可重试, 不计熔断): {r.get('error', '')[:120]}")
             elif isinstance(r, dict) and "error" in r:
                 # C9: agent 内部错误 (OOM/坏模型) 返 200+ok+error — 对熔断器可见
                 errors.append(f"{nid}: {r['error']}")
@@ -1081,27 +1075,31 @@ class ClusterMaster:
                 "hidden_states": hidden_states,
                 "input_ids": input_ids if idx == 0 else None,
             }
-            r = await self._dispatch_to_node(
-                client, task, nid, nodes_snap, token, pipeline_step_params=step_params
-            )
+            r = await self._dispatch_to_node(client, task, nid, nodes_snap, token, pipeline_step_params=step_params)
             if isinstance(r, Exception):
-                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} 失败: {r}")
+                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} 失败: {r}", retryable=True)
+                return
+            if isinstance(r, dict) and r.get("rate_limited"):
+                # GAP-6: 流水线段限流 = 瞬时可重试, 不 ban 节点。
+                await self._finalize_task(
+                    task, success=False, error=f"流水线步骤 {nid} 限流: {r.get('error', '')}", retryable=True
+                )
                 return
             if isinstance(r, dict) and "error" in r:
                 await self._finalize_task(task, success=False, error=f"流水线步骤 {nid}: {r['error']}")
                 return
             if not isinstance(r, dict) or "hidden_states" not in r:
-                await self._finalize_task(
-                    task, success=False, error=f"流水线步骤 {nid} 未返回 hidden_states"
-                )
+                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} 未返回 hidden_states")
                 return
             hidden_states = r["hidden_states"]
-            steps.append({
-                "node_id": nid,
-                "shard_id": r.get("shard_id", ""),
-                "shape": r.get("shape"),
-                "dtype": r.get("dtype"),
-            })
+            steps.append(
+                {
+                    "node_id": nid,
+                    "shard_id": r.get("shard_id", ""),
+                    "shape": r.get("shape"),
+                    "dtype": r.get("dtype"),
+                }
+            )
             logger.info(f"P3 流水线段 {idx} ({nid}) 完成: shape={r.get('shape')} dtype={r.get('dtype')}")
         await self._finalize_task(
             task,
@@ -1324,9 +1322,7 @@ class ClusterMaster:
                             sub.cancel_reason = f"父任务取消: {task_id}"
                             sub.error = sub.cancel_reason
                             cancelled_sub.append(sub_id)
-                            self._pending_queue = [
-                                t for t in self._pending_queue if t.task_id != sub_id
-                            ]
+                            self._pending_queue = [t for t in self._pending_queue if t.task_id != sub_id]
                             if sub.sub_tasks:
                                 cancel_stack.extend(sub.sub_tasks)
 
@@ -1411,6 +1407,7 @@ class ClusterMaster:
         name_lower = (model_name or "").lower()
         if not name_lower:
             return None
+
         # 按数值降序: "70b"->70, "0.5b"->0.5
         def _num(key: str) -> float:
             return float(key[:-1]) if key.endswith("b") else 0.0
@@ -1744,9 +1741,7 @@ class ClusterMaster:
         for peer_id, ip, port, payload in targets:
             try:
                 url = build_safe_url(mtls_scheme(), ip, port, "/api/ha/sync-tasks")
-                resp = await client.post(
-                    url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0
-                )
+                resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0)
                 if resp.status_code != 200:
                     logger.debug(f"HA 同步推送 {peer_id} HTTP {resp.status_code}")
                 else:
@@ -1890,9 +1885,7 @@ class ClusterMaster:
                 del self.kv_cache[oldest[0]]
 
         if any(counts.values()):
-            logger.info(
-                f"HA 状态同步接收: nodes={counts['nodes']} kv={counts['kv']} banned={counts['banned']}"
-            )
+            logger.info(f"HA 状态同步接收: nodes={counts['nodes']} kv={counts['kv']} banned={counts['banned']}")
         return counts
 
     async def _build_state_sync_targets(self) -> list[tuple[str, str, int, dict[str, Any]]]:
@@ -1908,9 +1901,7 @@ class ClusterMaster:
         banned_snapshot: dict[str, float] = {}
         async with self._nodes_lock:
             nodes_list = [self._node_to_dict(n) for n in self.nodes.values()]
-            banned_snapshot = {
-                nid: unban_at for nid, unban_at in self._banned_nodes.items() if unban_at > now
-            }
+            banned_snapshot = {nid: unban_at for nid, unban_at in self._banned_nodes.items() if unban_at > now}
         # kv 域快照
         kv_list: list[dict[str, Any]] = []
         async with self._kv_lock:
@@ -1933,9 +1924,7 @@ class ClusterMaster:
             targets.append((peer_id, cand.ip_address, cand.port, payload))
         return targets
 
-    async def _push_sync_state_to_standbys(
-        self, targets: list[tuple[str, str, int, dict[str, Any]]]
-    ) -> None:
+    async def _push_sync_state_to_standbys(self, targets: list[tuple[str, str, int, dict[str, Any]]]) -> None:
         """锁外异步推送全状态到各 standby (best-effort)。"""
         if not targets:
             return
@@ -1948,15 +1937,12 @@ class ClusterMaster:
         for peer_id, ip, port, payload in targets:
             try:
                 url = build_safe_url(mtls_scheme(), ip, port, "/api/ha/sync-state")
-                resp = await client.post(
-                    url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0
-                )
+                resp = await client.post(url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=5.0)
                 if resp.status_code != 200:
                     logger.debug(f"HA 状态同步推送 {peer_id} HTTP {resp.status_code}")
                 else:
                     logger.debug(
-                        f"HA 状态同步推送 {peer_id} ok "
-                        f"(nodes={len(payload['nodes'])} kv={len(payload['kv_cache'])})"
+                        f"HA 状态同步推送 {peer_id} ok (nodes={len(payload['nodes'])} kv={len(payload['kv_cache'])})"
                     )
             except Exception as e:
                 logger.debug(f"HA 状态同步推送 {peer_id} 异常: {e}")
@@ -2017,10 +2003,9 @@ class ClusterMaster:
         if restored:
             async with self._tasks_lock:
                 for task in list(self.tasks.values()):
-                    if (
-                        task.status == TaskStatus.PENDING
-                        and task.task_id not in {t.task_id for t in self._pending_queue}
-                    ):
+                    if task.status == TaskStatus.PENDING and task.task_id not in {
+                        t.task_id for t in self._pending_queue
+                    }:
                         self._enqueue_pending(task)
             await self._drain_pending_locked()
 
@@ -2347,9 +2332,7 @@ class ClusterMaster:
             completed_tasks = sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
             # P3-29: PARTIAL 单独计数, 不并入 failed (有部分结果, 非全失败)
             partial_tasks = sum(1 for t in self.tasks.values() if t.status == TaskStatus.PARTIAL)
-            failed_tasks = sum(
-                1 for t in self.tasks.values() if t.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT)
-            )
+            failed_tasks = sum(1 for t in self.tasks.values() if t.status in (TaskStatus.FAILED, TaskStatus.TIMEOUT))
         async with self._kv_lock:
             kv_cache_entries = len(self.kv_cache)
         stats = {
