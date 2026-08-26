@@ -258,9 +258,10 @@ class BearerAuthMiddleware:
         "/favicon.ico",
     }
 
-    def __init__(self, app, shared_token: str):
+    def __init__(self, app, shared_token: str, audit_logger=None):
         self.app = app
         self._expected = shared_token
+        self._audit = audit_logger
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -281,6 +282,19 @@ class BearerAuthMiddleware:
 
         if not auth_header.startswith(b"Bearer "):
             logger.warning(f"认证失败: 缺少 Bearer token ({path})")
+            if self._audit is not None:
+                client_ip = ""
+                client = scope.get("client")
+                if client:
+                    client_ip = client[0]
+                self._audit.log(
+                    actor=client_ip or "unknown",
+                    action="auth_fail",
+                    path=path,
+                    method=scope.get("method", ""),
+                    result="denied",
+                    detail="缺少 Bearer token",
+                )
             from starlette.responses import JSONResponse
 
             response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -290,6 +304,19 @@ class BearerAuthMiddleware:
         token = auth_header[7:].decode("utf-8", errors="replace")
         if not secrets.compare_digest(token, self._expected):
             logger.warning(f"认证失败: token 不匹配 ({path})")
+            if self._audit is not None:
+                client_ip = ""
+                client = scope.get("client")
+                if client:
+                    client_ip = client[0]
+                self._audit.log(
+                    actor=client_ip or "unknown",
+                    action="auth_fail",
+                    path=path,
+                    method=scope.get("method", ""),
+                    result="denied",
+                    detail="token 不匹配",
+                )
             from starlette.responses import JSONResponse
 
             response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})

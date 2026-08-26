@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-26
+
+### Added
+
+- **企业级商业生产发布阻塞项修复** (复审计 2026-08-26 GAP-2/GAP-4/GAP-8) — 安全态势升级
+  - **GAP-2 mTLS fail-closed** (`security/mtls.py`): 旧实现 mTLS 开启但证书路径不全时静默回退明文 (fail-open), 默认部署零节点身份校验。改 fail-closed — `server_ssl_context()` / `client_ssl_context()` / `server_ssl_kwargs()` / `client_kwargs()` 开启但证书不全 → raise `RuntimeError` 拒绝回退明文。新增 `certs_available()` helper。mTLS 关闭行为不变 (明文合法)。
+  - **GAP-8 审计日志** (`security/audit_log.py` 新模块): `AuditLogger` 追加写 JSONL 到 `~/.fusion/multi-node/audit.log`, 字段 ts/actor/action/path/method/node_id/result/detail。模块级单例 `get_audit_logger()`, 线程安全 (threading.Lock), 写失败降级 warning 不拖垮主路径。路径经 `FUSION_AUDIT_LOG` env 可覆盖。接入安全动作点: `BearerAuthMiddleware` 鉴权失败 (auth_fail) / agent 权限拒绝 (permission_deny) / master 节点注册 (register ok/denied) / 审批通过 (approve) / 审批拒绝 (reject) / 任务提交 (task_submit) / 任务取消 (task_cancel)。`BearerAuthMiddleware` 加 `audit_logger` 参数。
+  - **GAP-8 权限强制校验默认开** (`server/agent_server.py`): 旧 `_permission_enforce` 仅随 mTLS (默认关)。改读 `FUSION_PERMISSION_ENFORCE` env (默认 "1"=开), 缺 X-Node-Id → 403 (生产零信任)。mTLS 开亦强制。测试隔离: `tests/conftest.py` autouse 设 `FUSION_PERMISSION_ENFORCE=0` 回退兼容模式 (现有 http 测试 AUTH_HEADERS 无 X-Node-Id 须放行)。
+  - **GAP-4 CI 工作流** (`.github/workflows/ci.yml` 新增): ruff check + pytest (random order + 固定 seed 双跑, 捕获测试隔离回归)。Gates 所有 release。`FUSION_PERMISSION_ENFORCE=0` 隔离。
+  - `tests/test_enterprise_security.py` (21 用例): mTLS fail-closed (8) / AuditLogger (6) / 鉴权失败审计 (2) / 权限强制默认 (3) / master 路由审计 (2)。
+
+### Changed
+
+- `security/__init__.py`: 导出 `AuditLogger`
+- `pyproject.toml` / `__init__.py`: 0.8.9 → 0.9.0 (安全态势升级 = minor)
+- `tests/conftest.py`: autouse fixture 加 `FUSION_PERMISSION_ENFORCE=0` + `FUSION_AUDIT_LOG` 隔离 + `reset_audit_logger()` 每测试重建单例
+
 ## [0.8.9] - 2026-08-26
 
 ### Fixed
@@ -242,6 +259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI** — 15+ commands across 7 groups
 - 585 tests, 96.1% code coverage
 
+[0.9.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.9...v0.9.0
 [0.8.2]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/dahai80/fusion-multi-node/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dahai80/fusion-multi-node/compare/v0.4.0...v0.8.0

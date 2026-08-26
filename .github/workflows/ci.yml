@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          pip install -e ".[all]"
+
+      - name: Lint (ruff)
+        run: ruff check fusion_multi_node/
+
+      - name: Test (pytest, random order)
+        env:
+          FUSION_PERMISSION_ENFORCE: "0"
+        run: pytest tests/ -q -p randomly --no-header
+
+      - name: Test (pytest, reverse order — isolation regression)
+        env:
+          FUSION_PERMISSION_ENFORCE: "0"
+        run: pytest tests/ -q -p randomly --randomly-seed=1 --no-header
