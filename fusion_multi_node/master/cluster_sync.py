@@ -2,7 +2,7 @@
 
 ⚠️ AR审计 P1 合规: 仅限局域网对端同步 (is_safe_peer_host 拒环回/链路本地/元数据,
 放行私网), 不出站云。路径安全 (is_safe_path_segment + normpath 遍历拦截)。
-注意: ClusterSyncManager.start() 未接入生命周期, 仅按请求触发 (master_server 路由)。
+ClusterSyncManager 已接 master_server start()/stop() 生命周期 (E1 一次性构造于 __init__)。
 
 - ModelManifest: 模型文件清单 + SHA256 哈希
 - IncrementalSync: 仅同步差异文件

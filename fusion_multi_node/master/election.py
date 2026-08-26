@@ -11,12 +11,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,8 @@ class MasterElection:
         on_elected: Callable[[], Any] | None = None,
         on_demoted: Callable[[], Any] | None = None,
         send_vote_request: Callable[[VoteRequest, str], Any] | None = None,
+        send_heartbeat: Callable[[str], Any] | None = None,
+        state_path: Path | None = None,
     ):
         self.node_id = node_id
         self.priority = priority
@@ -81,12 +86,20 @@ class MasterElection:
         self._on_elected = on_elected
         self._on_demoted = on_demoted
         self._send_vote_request = send_vote_request
+        # C1: Leader 心跳广播回调 — leader 周期性向 follower 推 heartbeat, 维持权威。
+        # 旧实现 leader 仅自盖 _last_heartbeat, follower 收不到 → 误判 leader 死 → term 抖动重选。
+        self._send_heartbeat = send_heartbeat
+        # C2: term/voted_for 持久化 — 崩溃重启不丢投票历史, 防同一 term 重复投票 (split brain)。
+        # 无 path 则纯内存 (单 Master / 测试不落盘)。
+        self._state_path = state_path
 
         self.state = ElectionState.FOLLOWER
         self.current_term = 0
         self.voted_for: str | None = None
+        self._load_state()
         self._votes_received: set[str] = set()
         self._last_heartbeat = time.time()
+        self._last_broadcast = 0.0
         self._election_timeout = self._random_timeout()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -146,9 +159,33 @@ class MasterElection:
                     elif self.state == ElectionState.CANDIDATE:
                         pass
                     elif self.state == ElectionState.LEADER:
+                        # C1: 周期广播 heartbeat 到所有 follower (非每 0.5s, 按 heartbeat_interval)。
+                        # 旧实现仅 self._last_heartbeat = now, follower 收不到心跳 → 超时重选 → term 抖动。
                         self._last_heartbeat = now
+                        if now - self._last_broadcast >= self._heartbeat_interval:
+                            self._last_broadcast = now
+                            await self._broadcast_heartbeat_locked()
         except asyncio.CancelledError:
             pass
+
+    async def _broadcast_heartbeat_locked(self) -> None:
+        """已持 _lock 下向所有已知 follower 推 heartbeat (best-effort)。
+
+        C1 修复: 调 send_heartbeat 回调 (HTTP POST /api/ha/heartbeat)。
+        回调内自解析对端地址 + best-effort 吞异常, 这里只负责遍历已知节点。
+        """
+        if not self._send_heartbeat:
+            return
+        for peer_id in self._known_nodes:
+            if peer_id == self.node_id:
+                continue
+            try:
+                if asyncio.iscoroutinefunction(self._send_heartbeat):
+                    await self._send_heartbeat(peer_id)
+                else:
+                    self._send_heartbeat(peer_id)
+            except Exception as e:
+                logger.debug(f"心跳推送失败: {peer_id}: {e}")
 
     async def _start_election(self) -> None:
         self.current_term += 1
@@ -156,6 +193,7 @@ class MasterElection:
         self.voted_for = self.node_id
         self._votes_received = {self.node_id}
         self._election_timeout = self._random_timeout()
+        self._save_state()
 
         logger.info(f"发起选举: term={self.current_term}, node={self.node_id}")
 
@@ -187,6 +225,7 @@ class MasterElection:
     async def _handle_vote_response(self, resp: VoteResponse) -> None:
         if resp.term > self.current_term:
             self.current_term = resp.term
+            self._save_state()
             await self._become_follower()
             return
 
@@ -203,6 +242,7 @@ class MasterElection:
         async with self._lock:
             if req.term > self.current_term:
                 self.current_term = req.term
+                self._save_state()
                 await self._become_follower()
 
             vote_granted = False
@@ -214,6 +254,7 @@ class MasterElection:
                     self.voted_for = req.candidate_id
                     self._last_heartbeat = time.time()
                     self._election_timeout = self._random_timeout()
+                    self._save_state()
 
             return VoteResponse(
                 term=self.current_term,
@@ -225,6 +266,7 @@ class MasterElection:
         async with self._lock:
             if term >= self.current_term:
                 self.current_term = term
+                self._save_state()
                 self._leader_id = leader_id
                 self._last_heartbeat = time.time()
                 self._election_timeout = self._random_timeout()
@@ -252,6 +294,34 @@ class MasterElection:
                 await self._on_demoted()
             else:
                 self._on_demoted()
+
+    def _load_state(self) -> None:
+        """C2: 启动时读盘恢复 term/voted_for。无 state_path 或读失败 → 落 0/None (容错)。"""
+        if not self._state_path or not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text())
+            self.current_term = int(data.get("current_term", 0))
+            vf = data.get("voted_for")
+            self.voted_for = vf if (vf is None or isinstance(vf, str)) else None
+            logger.info(f"C2 选举状态恢复: term={self.current_term} voted_for={self.voted_for}")
+        except Exception as e:
+            logger.warning(f"C2 选举状态恢复失败 ({self._state_path}): {e}")
+
+    def _save_state(self) -> None:
+        """C2: term/voted_for 落盘 (原子写)。每次投票/term 变更后调, 防重启 split brain。"""
+        if not self._state_path:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump({"current_term": self.current_term, "voted_for": self.voted_for}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._state_path)
+        except Exception as e:
+            logger.warning(f"C2 选举状态落盘失败: {e}")
 
     def get_state(self) -> dict[str, Any]:
         return {

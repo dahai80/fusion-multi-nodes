@@ -65,15 +65,28 @@ class _FailClient:
 
     is_closed = False
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, json=None, headers=None, timeout=None):
         return _Resp(503, {"status": "error", "detail": "agent down"})
 
 
 class _OkClient:
     is_closed = False
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, json=None, headers=None, timeout=None):
         return _Resp(200, {"status": "ok", "result": {"output": "ok"}})
+
+
+class _ErrClient:
+    """C9: agent 内部错误 — 200+ok, 但 result 含 error 键 (OOM/坏模型)。
+
+    _dispatch_to_node 不 raise (status ok), _dispatch_data 识别 logic_fail
+    → report_fault("agent_internal_error") + 不可重试 (FAILED 非 PENDING)。
+    """
+
+    is_closed = False
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        return _Resp(200, {"status": "ok", "result": {"error": "OOM: 内存不足"}})
 
 
 class TestDispatchFaultReports:
@@ -89,8 +102,9 @@ class TestDispatchFaultReports:
 
         await master._dispatch_task(task)
 
-        # 任务被 finalize 为失败
-        assert task.status == TaskStatus.FAILED
+        # C8: 瞬时传输失败 (503) 可重试 → 入重试队列 PENDING (非直接 FAILED)
+        assert task.status == TaskStatus.PENDING
+        assert task in master._pending_retry, "瞬时派发失败应入重试队列"
         # 单次派发失败 = 1 次故障 (未达阈值 3, 仍可注册)
         assert not master.is_node_banned("n1")
         assert master._fault_counts["n1"], "派发失败应累计故障计数"
@@ -166,6 +180,56 @@ class TestSelectNodesSkipsBanned:
 
         selected = await master.select_nodes(ParallelMode.DATA, count=1)
         assert any(n.node_id == "n1" for n in selected), "解封后应重新可选"
+
+
+class TestAgentInternalErrorCircuit:
+    """C9: agent 内部错误 (200+ok+result.error) 对熔断器可见, 且不可重试。"""
+
+    @pytest.mark.asyncio
+    async def test_agent_internal_error_reports_fault(self):
+        master = ClusterMaster()
+        await master.register_node(_node("n1"))
+        master._dispatch_token = "test-token"
+        master._dispatch_http = _ErrClient()
+        task = _plant(master, _task("n1"))
+
+        await master._dispatch_task(task)
+
+        # C9: agent 逻辑错误 → report_fault(agent_internal_error) 计入故障窗口
+        assert master._fault_counts.get("n1"), "agent 内部错误应累计故障"
+        assert master.nodes["n1"].status == NodeStatus.FAULT, "agent 内部错误应置节点 FAULT (对熔断器可见)"
+        # 逻辑错误不可重试 → 直接 FAILED (非 PENDING)
+        assert task.status == TaskStatus.FAILED, "agent 内部错误应 FAILED 非 PENDING 重试"
+        assert task not in master._pending_retry, "逻辑错误不应入重试队列"
+
+    @pytest.mark.asyncio
+    async def test_agent_internal_error_eventually_bans(self):
+        master = ClusterMaster()
+        await master.register_node(_node("n1"))
+        master._dispatch_token = "test-token"
+        master._dispatch_http = _ErrClient()
+        threshold = master._FAULT_THRESHOLD
+
+        for i in range(threshold):
+            t = _plant(master, _task("n1", task_id=f"err{i}"))
+            await master._dispatch_task(t)
+
+        assert master.is_node_banned("n1"), "反复 agent 内部错误达阈值应 ban"
+
+    @pytest.mark.asyncio
+    async def test_retry_exhaustion_marks_failed(self):
+        """C8 重试耗尽: 瞬时失败重试 _max_retry_attempts 次后 → FAILED (非无限重试)。"""
+        master = ClusterMaster()
+        await master.register_node(_node("n1"))
+        master._dispatch_token = "test-token"
+        master._dispatch_http = _FailClient()
+        task = _plant(master, _task("n1"))
+        task._retry_count = master._max_retry_attempts  # 已耗尽重试预算
+
+        await master._dispatch_task(task)
+
+        assert task.status == TaskStatus.FAILED, "重试耗尽应 FAILED 非 PENDING"
+        assert task not in master._pending_retry
 
 
 def task_status_ok(master: ClusterMaster, task_id: str) -> bool:

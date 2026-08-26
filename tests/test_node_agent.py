@@ -1,5 +1,6 @@
 """Node Agent coverage tests."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -136,6 +137,31 @@ class TestNodeAgentReportHardware:
             ok = await agent.report_hardware()
         assert ok is False
 
+    @pytest.mark.asyncio
+    async def test_report_hardware_collects_off_event_loop(self):
+        # P1-10 (审计 §4.5): collect_hardware_info 同步阻塞须在 to_thread 里跑,
+        # 不在事件循环线程 — 验证调用线程 ≠ 当前事件循环线程。
+        import threading
+
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def fake_collect():
+            seen["tid"] = threading.get_ident()
+            return MagicMock(node_id="n1")
+
+        agent = NodeAgent()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_ac_class = _make_mock_client(mock_resp)
+        with (
+            patch.object(agent, "collect_hardware_info", side_effect=fake_collect),
+            patch("httpx.AsyncClient", mock_ac_class),
+        ):
+            ok = await agent.report_hardware()
+        assert ok is True
+        assert seen["tid"] != loop_thread, "同步阻塞调用须移出事件循环 (to_thread)"
+
 
 class TestNodeAgentExecuteTask:
     @pytest.mark.asyncio
@@ -247,6 +273,37 @@ class TestNodeAgentExecuteTask:
             )
         assert "error" in result
         assert agent._current_task is None
+
+    @pytest.mark.asyncio
+    async def test_execute_task_dedup_rejects_running_task_id(self):
+        # P1-14 (审计 §5.3): 同 task_id 仍在运行 → 拒重复派发, 返回 dedup_blocked。
+        agent = NodeAgent()
+        agent._dispatch_token = "test-token"
+        # 植入一个"运行中"占位句柄, 模拟上一执行未结束
+        placeholder = asyncio.sleep(100)
+        agent._running_task_handles["dup-tid"] = asyncio.create_task(placeholder)
+        try:
+            result = await agent.execute_task(
+                {"task_id": "dup-tid", "type": "inference", "model": "test", "params": {"prompt": "x"}}
+            )
+        finally:
+            agent._running_task_handles["dup-tid"].cancel()
+            try:
+                await agent._running_task_handles["dup-tid"]
+            except (asyncio.CancelledError, Exception):
+                pass
+        assert result.get("dedup_blocked") is True
+        assert "已运行" in result.get("error", "") or "重复" in result.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_execute_task_anon_id_no_collision(self):
+        # P1-14: 无 task_id 的直接调用分配匿名 id, 多次顺序调用序号递增不撞键。
+        agent = NodeAgent()
+        agent._dispatch_token = "test-token"
+        assert agent._anon_task_seq == 0
+        for _ in range(3):
+            await agent.execute_task({"type": "unknown"})
+        assert agent._anon_task_seq == 3
 
 
 class TestNodeAgentSandboxGate:
@@ -399,6 +456,22 @@ class TestNodeAgentSandboxGate:
         result = await agent.execute_task(
             {
                 "task_id": "e5e",
+                "type": "plugin",
+                "plugin": "../../admin",
+                "action": "run",
+                "params": {},
+            }
+        )
+        assert result.get("sandbox_blocked") is True
+        assert "插件" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_sandbox_gate_blocks_traversal_without_sandbox(self):
+        # AR #24: 默认部署 sandbox=None, E5 段校验仍须强制防穿越 (旧实现被 None 短路绕过)
+        agent = NodeAgent()  # 默认无沙箱
+        result = await agent.execute_task(
+            {
+                "task_id": "e5f",
                 "type": "plugin",
                 "plugin": "../../admin",
                 "action": "run",

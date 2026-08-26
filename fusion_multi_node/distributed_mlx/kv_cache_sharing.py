@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,7 +25,7 @@ import httpx
 from fusion_multi_node.protocol import KVCacheSyncMessage
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
-from fusion_multi_node.utils.auth import sanitize_node_url_part
+from fusion_multi_node.utils.auth import is_safe_outbound_host, sanitize_node_url_part
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,7 @@ class KVSharingManager:
         max_remote_lookup_ms: float = 50.0,
         enable_compression: bool = True,
         cluster_token: str = "",
+        persist_path: str | None = None,
     ):
         self.max_local_cache_mb = max_local_cache_mb
         self.max_remote_lookup_ms = max_remote_lookup_ms
@@ -126,6 +130,14 @@ class KVSharingManager:
         # 复用 HTTP 客户端
         self._http_client: httpx.AsyncClient | None = None
 
+        # P1-9: 磁盘持久化 — agent 重启可恢复/预热本地 KV 缓存 (审计 §6.3)。
+        # 全内存 OrderedDict 重启即失。save() 落盘 JSON, load() 启动恢复。
+        # 默认 ~/.fusion/multi-node/kv_cache.json (与 tasks.json/election_state.json 同域)。
+        self._persist_path: Path = (
+            Path(persist_path) if persist_path else Path.home() / ".fusion" / "multi-node" / "kv_cache.json"
+        )
+        self._dirty: bool = False
+
     async def _get_http_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=timeout, **mtls_client_kwargs())
@@ -142,6 +154,58 @@ class KVSharingManager:
             await self._http_client.aclose()
             self._http_client = None
 
+    # ── P1-9 磁盘持久化 ──
+
+    def save(self, path: str | None = None) -> bool:
+        """落盘本地 KV 缓存 (审计 §6.3)。原子写: tmp + os.replace。跳过已过期条目。"""
+        save_path = Path(path) if path else self._persist_path
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            entries = []
+            for entry in self._local_cache.values():
+                if entry.is_expired:
+                    continue
+                entries.append(self._serialize_entry(entry))
+            data = {
+                "saved_at": time.time(),
+                "entry_count": len(entries),
+                "entries": entries,
+            }
+            tmp = save_path.with_suffix(save_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, save_path)
+            self._dirty = False
+            logger.info(f"P1-9 KV 缓存落盘: {save_path} ({len(entries)} 条)")
+            return True
+        except Exception as e:
+            logger.error(f"P1-9 KV 缓存落盘失败: {e}")
+            return False
+
+    def load(self, path: str | None = None) -> int:
+        """启动恢复本地 KV 缓存 (审计 §6.3)。跳过已过期条目, 不覆盖已存在 cache_id。"""
+        load_path = Path(path) if path else self._persist_path
+        if not load_path.exists():
+            logger.info(f"P1-9 KV 缓存恢复: 文件不存在 {load_path}, 跳过")
+            return 0
+        try:
+            data = json.loads(load_path.read_text(encoding="utf-8"))
+            entries = data.get("entries", [])
+            restored = 0
+            for item in entries:
+                if item.get("cache_id") in self._local_cache:
+                    continue
+                entry = self._deserialize_entry(item)
+                if entry.is_expired:
+                    continue
+                if self.store_local(entry):
+                    restored += 1
+            self._dirty = False
+            logger.info(f"P1-9 KV 缓存恢复: {load_path} ({restored}/{len(entries)} 条)")
+            return restored
+        except Exception as e:
+            logger.error(f"P1-9 KV 缓存恢复失败: {e}")
+            return 0
+
     # ── 本地缓存管理 ──
 
     def store_local(self, entry: KVCacheEntry) -> bool:
@@ -157,6 +221,7 @@ class KVSharingManager:
         self._local_cache[entry.cache_id] = entry
         self._local_size_bytes += entry.total_size_bytes
         self._lookup_index[(entry.model_name, entry.prompt_hash)] = entry.cache_id
+        self._dirty = True
         logger.debug(
             f"KV 缓存存储: {entry.model_name} ({entry.total_tokens} tokens, {entry.total_size_bytes / 1024:.1f}KB)"
         )
@@ -175,6 +240,7 @@ class KVSharingManager:
             self._local_cache.pop(entry.cache_id, None)
             self._local_size_bytes -= entry.total_size_bytes
             self._lookup_index.pop((model_name, prompt_hash), None)
+            self._dirty = True
             return None
         entry.access_count += 1
         if entry.shards:
@@ -211,6 +277,7 @@ class KVSharingManager:
             cache_id, entry = self._local_cache.popitem(last=False)
             self._local_size_bytes -= entry.total_size_bytes
             self._lookup_index.pop((entry.model_name, entry.prompt_hash), None)
+            self._dirty = True
             logger.debug(f"KV 缓存淘汰: {cache_id} ({entry.total_size_bytes / 1024:.1f}KB)")
 
     # ── 远程缓存查询 ──
@@ -227,6 +294,10 @@ class KVSharingManager:
         for node_id in nodes:
             try:
                 safe_node = sanitize_node_url_part(node_id)
+                # H3 (AR #24): 出站 SSRF 守卫 — 挡云元数据/链路本地等恶意 host
+                if not is_safe_outbound_host(safe_node):
+                    logger.warning(f"远程 KV 查询跳过非安全对端: {node_id!r}")
+                    continue
                 resp = await client.post(
                     f"{mtls_scheme()}://{safe_node}:11458/api/kv/lookup",
                     json={
@@ -260,6 +331,10 @@ class KVSharingManager:
         try:
             client = await self._get_http_client(30.0)
             safe_source = sanitize_node_url_part(source_node)
+            # H3 (AR #24): 出站 SSRF 守卫 — 挡云元数据/链路本地等恶意 source host
+            if not is_safe_outbound_host(safe_source):
+                logger.warning(f"KV 传输跳过非安全源节点: {source_node!r}")
+                return False
             resp = await client.post(
                 f"{mtls_scheme()}://{safe_source}:11458/api/kv/transfer",
                 json={
@@ -325,6 +400,11 @@ class KVSharingManager:
             for node_id in nodes:
                 try:
                     safe_node = sanitize_node_url_part(node_id)
+                    # H3 (AR #24): 出站 SSRF 守卫 — 挡云元数据/链路本地等恶意 host
+                    if not is_safe_outbound_host(safe_node):
+                        logger.warning(f"缓存预热跳过非安全对端: {node_id!r}")
+                        results["failed"] += 1
+                        continue
                     resp = await client.post(
                         f"{mtls_scheme()}://{safe_node}:11458/api/kv/warm",
                         json={

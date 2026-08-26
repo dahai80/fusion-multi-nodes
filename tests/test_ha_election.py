@@ -55,6 +55,7 @@ class PortRoutingTransport(AsyncBaseTransport):
 def _make_master(tmp_path, host="127.0.0.1", port=M1_PORT) -> ClusterMaster:
     m = ClusterMaster(host=host, port=port, heartbeat_timeout=60.0)
     m._task_store_path = tmp_path / f"tasks-{port}.json"
+    m._election_state_path = tmp_path / f"election-{port}.json"
     m._dispatch_token = TEST_TOKEN
     return m
 

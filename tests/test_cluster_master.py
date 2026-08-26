@@ -128,6 +128,33 @@ class TestClusterMaster:
         assert master._running is False
 
     @pytest.mark.asyncio
+    async def test_start_wires_observability(self):
+        # P0-8: start() 接线 _observability (路由经此读, 原恒 None → 503)
+        master = ClusterMaster()
+        assert master._observability is None
+        await master.start(with_server=False, with_mdns=False)
+        assert master._observability is not None
+        await master.stop()
+
+    @pytest.mark.asyncio
+    async def test_collect_observability_records_metrics(self):
+        # P0-8: 注册一节点 → _collect_observability_locked 记录 mem_used_gb/active_tasks
+        master = ClusterMaster()
+        await master.start(with_server=False, with_mdns=False)
+        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458,
+                        total_memory_gb=64.0, available_memory_gb=48.0)
+        await master.register_node(info)
+        await master._collect_observability_locked()
+        obs = master._observability
+        latest_mem = obs.get_latest_metric("mem_used_gb", node_id="n1")
+        latest_tasks = obs.get_latest_metric("active_tasks", node_id="cluster")
+        assert latest_mem is not None
+        assert latest_mem.value == 16.0  # 64 - 48
+        assert latest_tasks is not None
+        assert latest_tasks.value == 0.0
+        await master.stop()
+
+    @pytest.mark.asyncio
     async def test_register_node(self):
         master = ClusterMaster()
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458)
@@ -492,6 +519,52 @@ class TestClusterMaster:
         assert "c1" not in master.kv_cache
 
     @pytest.mark.asyncio
+    async def test_find_kv_cache_lock_order_no_nested_cross_domain(self):
+        # P1-12 (审计 §2.4/§4.4): find_kv_cache 须 nodes→kv 顺序, 两锁不嵌套持有。
+        # _kv_lock 持有区不得 await 跨域 _nodes_lock。
+        master = ClusterMaster()
+        info = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(info)
+        await master.register_kv_cache(
+            KVCacheEntry(cache_id="c1", model_name="test", node_id="n1", created_at=time.time(), size_mb=100.0)
+        )
+
+        nested = {"kv_held_during_nodes_acquire": False}
+        real_nodes_lock = master._nodes_lock
+        real_kv_lock = master._kv_lock
+
+        orig_nodes_acquire = real_nodes_lock.acquire
+        orig_kv_release = real_kv_lock.release
+
+        async def spy_nodes_acquire():
+            if real_kv_lock.locked():
+                nested["kv_held_during_nodes_acquire"] = True
+            return await orig_nodes_acquire()
+
+        async def spy_kv_release():
+            return await orig_kv_release()
+
+        master._nodes_lock.acquire = spy_nodes_acquire  # type: ignore[method-assign]
+        master._kv_lock.release = spy_kv_release  # type: ignore[method-assign]
+        try:
+            found = await master.find_kv_cache("test")
+        finally:
+            master._nodes_lock.acquire = orig_nodes_acquire  # type: ignore[method-assign]
+            master._kv_lock.release = orig_kv_release  # type: ignore[method-assign]
+        assert found is not None
+        assert found.cache_id == "c1"
+        assert nested["kv_held_during_nodes_acquire"] is False, (
+            "find_kv_cache 在 _kv_lock 持有区获取 _nodes_lock (kv→nodes 嵌套, 违反 nodes→kv 锁序)"
+        )
+
+    @pytest.mark.asyncio
     async def test_get_stats(self):
         master = ClusterMaster()
         info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458)
@@ -511,8 +584,13 @@ class TestClusterMaster:
         with (
             patch("zeroconf.Zeroconf", return_value=mock_zc),
             patch("zeroconf.ServiceInfo"),
+            patch.object(
+                ClusterMaster,
+                "_collect_mdns_props",
+                return_value=("MacBookPro", "32.0"),
+            ),
         ):
-            master._start_mdns()
+            await master._start_mdns()
             master._stop_mdns()
             mock_zc.register_service.assert_called_once()
             mock_zc.close.assert_called_once()
@@ -571,6 +649,87 @@ class TestClusterMaster:
         assert master.nodes["n1"].active_tasks >= 1
         await master.complete_task("t1")
         assert master.nodes["n1"].active_tasks == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_http_timeout_follows_task_timeout_seconds(self):
+        # P1-13 (审计 §5.4): _dispatch_to_node HTTP 超时须随 task.timeout_seconds, 不固定 300s。
+        master = ClusterMaster()
+        info = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(info)
+        nodes_snap = await master._snapshot_nodes(["n1"])
+        token = master._get_dispatch_token()
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "result": {"ok": True}}
+
+        class FakeClient:
+            async def post(self, url, json=None, headers=None, timeout=None):
+                captured["timeout"] = timeout
+                return FakeResponse()
+
+        task = ClusterTask(
+            task_id="t-long",
+            name="infer",
+            mode=ParallelMode.DATA,
+            model_name="test",
+            timeout_seconds=600.0,
+        )
+        result = await master._dispatch_to_node(FakeClient(), task, "n1", nodes_snap, token)
+        assert result == {"ok": True, "node_id": "n1"}
+        # 600s 任务 → HTTP 超时 = 600 + 30 缓冲 = 630 (>300, 不再被掐断)
+        assert captured["timeout"] == 630.0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_http_timeout_floor(self):
+        # P1-13: 极小 timeout_seconds 不得让 HTTP 超时 < 30s 下限。
+        master = ClusterMaster()
+        info = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(info)
+        nodes_snap = await master._snapshot_nodes(["n1"])
+        token = master._get_dispatch_token()
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"status": "ok", "result": {"ok": True}}
+
+        class FakeClient:
+            async def post(self, url, json=None, headers=None, timeout=None):
+                captured["timeout"] = timeout
+                return FakeResponse()
+
+        task = ClusterTask(
+            task_id="t-tiny",
+            name="infer",
+            mode=ParallelMode.DATA,
+            model_name="test",
+            timeout_seconds=1.0,
+        )
+        await master._dispatch_to_node(FakeClient(), task, "n1", nodes_snap, token)
+        # 1s + 30 缓冲 = 31, > 下限 30
+        assert captured["timeout"] == 31.0
 
     @pytest.mark.asyncio
     async def test_complete_task_missing(self):

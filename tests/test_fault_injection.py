@@ -124,6 +124,7 @@ def _node(node_id: str, port: int) -> NodeInfo:
 def _make_master(tmp_path, port: int = M1_PORT) -> ClusterMaster:
     m = ClusterMaster(host="127.0.0.1", port=port, heartbeat_timeout=60.0)
     m._task_store_path = tmp_path / f"tasks-fault-{port}.json"
+    m._election_state_path = tmp_path / f"election-fault-{port}.json"
     m._dispatch_token = TEST_TOKEN
     return m
 

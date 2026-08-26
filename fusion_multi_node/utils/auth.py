@@ -142,6 +142,55 @@ def validate_node_id(node_id: str) -> bool:
     return True
 
 
+def is_registerable_host(host: str) -> bool:
+    """节点注册期主机校验 — 比 is_safe_peer_host 宽松: 允许 loopback + 私网 (单机/可信 LAN 部署)。
+
+    拒绝: 元数据主机名、链路本地、未指定、多播、保留段、携带凭据/路径的 URL 片段。
+    register_node 调用; 出站派发/cancel/KV 仍用更严的 is_safe_peer_host (拒 loopback)。
+
+    H1 (AR 审计 #24): 注册时不校验 ip 致恶意节点入库, 出站路径才拦 — 入口补一道,
+    挡掉云元数据/链路本地等明显恶意, 同时不破坏单机 127.0.0.1 + ASGI 测试。
+    """
+    if not host or not isinstance(host, str):
+        return False
+    host = host.strip()
+    if not host:
+        return False
+    if "@" in host or "/" in host or "?" in host or "#" in host:
+        return False
+    if host.lower() in SSRF_BLOCKED_HOSTNAMES:
+        logger.warning(f"注册拒绝: 元数据主机名 {host!r}")
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        # 允许 loopback (单机部署) + 私网; 拒链路本地/未指定/多播/保留
+        if ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            logger.warning(f"注册拒绝: 受限 IP {host!r}")
+            return False
+        return True
+    if host.lower() == "localhost":
+        return True
+    if not re.match(r"^[a-zA-Z0-9._\-]+$", host):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        logger.warning(f"注册拒绝: 无法解析主机名 {host!r}")
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            logger.warning(f"注册拒绝: 主机名 {host!r} 解析到受限 IP {info[4][0]!r}")
+            return False
+    return True
+
+
 def sanitize_node_url_part(node_id: str) -> str:
     if not validate_node_id(node_id):
         raise ValueError(f"不合法的 node_id: {node_id!r}")
@@ -157,11 +206,51 @@ def build_safe_url(scheme: str, host: str, port: int, path: str) -> str:
     return f"{scheme}://{host}:{int(port)}{path}"
 
 
+def is_safe_outbound_host(host: str) -> bool:
+    """轻量出站主机校验 — 不做 DNS 解析 (节点以 node_id 作 host 时不可解析, 仍合法)。
+
+    拒绝: 元数据主机名、链路本地、未指定、多播、携带凭据/路径的 URL 片段、内嵌 IP 表示受限段。
+    允许: loopback、私网、合法域名/标识符 (含不可解析 node_id)。
+
+    用途: KV 跨节点路径 (lookup_remote/transfer/warm) — node_id 直接当 host,
+    is_safe_peer_host 会 DNS 解析拒不可解析名 → 误杀测试/节点标识。此函数只挡
+    明确恶意 (H3 AR #24), 不要求可解析。
+    """
+    if not host or not isinstance(host, str):
+        return False
+    host = host.strip()
+    if not host:
+        return False
+    if "@" in host or "/" in host or "?" in host or "#" in host:
+        return False
+    if host.lower() in SSRF_BLOCKED_HOSTNAMES:
+        logger.warning(f"SSRF 拦截 (出站): 元数据主机名 {host!r}")
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_loopback:
+            return True  # 单机部署合法
+        if ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            logger.warning(f"SSRF 拦截 (出站): 受限 IP {host!r}")
+            return False
+        return True
+    if host.lower() == "localhost":
+        return True
+    # 合法标识符/域名 (含不可解析 node_id) — 不强制 DNS 解析
+    return bool(re.match(r"^[a-zA-Z0-9._\-]+$", host))
+
+
 class BearerAuthMiddleware:
     """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。"""
 
     EXEMPT_PATHS = {
         "/api/health",
+        "/api/health/deep",
+        "/health",
+        "/health/deep",
         "/docs",
         "/openapi.json",
         "/redoc",

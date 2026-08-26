@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from fusion_multi_node import __version__ as _node_protocol_version
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.utils.auth import is_safe_path_segment
@@ -285,6 +286,8 @@ class NodeAgent:
         self._current_task: dict[str, Any] | None = None
         # 运行中任务协程注册表 — task_id → asyncio.Task, 供 cancel_task 终止运行推理
         self._running_task_handles: dict[str, asyncio.Task] = {}
+        # P1-14: 无 task_id 的直接调用分配匿名 id 的自增序号 (避免多匿名任务 _running_task_handles 撞键)。
+        self._anon_task_seq = 0
         self._heartbeat_task: asyncio.Task | None = None
         self._hardware_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
@@ -500,7 +503,9 @@ class NodeAgent:
 
     async def report_hardware(self) -> bool:
         """向 Master 上报完整硬件信息。"""
-        info = self.collect_hardware_info()
+        # P1-10: collect_hardware_info 经 _ensure_static_hardware 调 system_profiler/ipconfig
+        # 同步子进程 (至 5s) — async 路径须 to_thread 移出 event loop (审计 §4.5)。
+        info = await asyncio.to_thread(self.collect_hardware_info)
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
@@ -518,6 +523,8 @@ class NodeAgent:
                     "device_model": info.get("device_model", ""),
                     "uma_size_gb": info.get("uma_size_gb", 0.0),
                     "mlx_version": info.get("mlx_version", ""),
+                    # P1-17 (审计 §6.7): 上报多节点协议版本, master 比对兼容性。
+                    "protocol_version": _node_protocol_version,
                     "role": "worker",
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
                     "active_tasks": 0,
@@ -542,8 +549,20 @@ class NodeAgent:
             "params": {...},
         }
         """
+        # P1-14 (审计 §5.3): 拒同 task_id 重复派发 — master 重派同 task_id 到本节点时
+        # 上一执行仍在跑 → 拒, 返回 dedup 错误 (master 归类逻辑错误不重试, 避免双重推理)。
+        # 无 task_id (直接调用/旧客户端) 分配匿名 id, 不做去重但防 _running_task_handles 撞键。
+        raw_task_id = task.get("task_id") or ""
+        if raw_task_id:
+            if raw_task_id in self._running_task_handles:
+                logger.warning(f"P1-14 拒重复派发: task_id={raw_task_id} 仍在运行")
+                return {"task_id": raw_task_id, "error": "task_id 已在运行 (重复派发)", "dedup_blocked": True}
+            task_id = raw_task_id
+        else:
+            self._anon_task_seq += 1
+            task_id = f"anon-{self._anon_task_seq}"
+            task["task_id"] = task_id
         self._current_task = task
-        task_id = task.get("task_id", "unknown")
         task_type = task.get("type", "inference")
         temp_dir = os.path.join(tempfile.gettempdir(), f"fusion_task_{task_id}")
         logger.info(f"执行任务: {task_id} ({task_type})")
@@ -606,6 +625,19 @@ class NodeAgent:
         对其加沙箱 allowed_paths 会误拒所有任务。
         无沙箱或允许时返回 None。
         """
+        # E5: 不可信输入段段校验防穿越 — 无沙箱配置时也强制 (plugin/action/model 不可信)。
+        # 旧实现 sandbox is None 在此之前 short-circuit return, 致默认部署 E5 gate 失效
+        # (AR 审计 #24: 默认安全姿态 sandbox=None → 入口防穿越形同虚设)。
+        if task_type == "plugin":
+            for seg_key in ("plugin", "action"):
+                seg = task.get(seg_key, "")
+                if seg and not is_safe_path_segment(seg):
+                    return f"插件 {seg_key} 段非法 (穿越/特殊字符): {seg!r}"
+        if task_type in ("inference", "embedding"):
+            model_name = task.get("model", "")
+            if model_name and not is_safe_path_segment(model_name):
+                return f"模型名段非法 (穿越/特殊字符): {model_name!r}"
+        # 沙箱路径/网络白名单 — 无沙箱配置时跳过 (仅 E5 段校验为强制项)
         if self._sandbox is None:
             return None
         # model_sync 出站对端主机走网络白名单
@@ -617,17 +649,6 @@ class NodeAgent:
         model_path = task.get("params", {}).get("model_path", "") if isinstance(task.get("params"), dict) else ""
         if model_path and not self._sandbox.check_path_access(model_path, write=False):
             return f"模型路径 {model_path} 不在沙箱允许访问路径内"
-        # E5: 插件 plugin/action 段段校验防穿越 (无沙箱配置时也强制, 因属不可信输入)
-        if task_type == "plugin":
-            for seg_key in ("plugin", "action"):
-                seg = task.get(seg_key, "")
-                if seg and not is_safe_path_segment(seg):
-                    return f"插件 {seg_key} 段非法 (穿越/特殊字符): {seg!r}"
-        # E5: 推理/Embedding model_name 段校验
-        if task_type in ("inference", "embedding"):
-            model_name = task.get("model", "")
-            if model_name and not is_safe_path_segment(model_name):
-                return f"模型名段非法 (穿越/特殊字符): {model_name!r}"
         return None
 
     async def cancel_task(self, task_id: str) -> bool:

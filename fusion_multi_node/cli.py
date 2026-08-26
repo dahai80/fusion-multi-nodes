@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 _config = ClusterConfig()
 _master: ClusterMaster | None = None
 _agent: NodeAgent | None = None
-_observability: ClusterObservability | None = None
 
 
 @click.group()
@@ -171,7 +170,12 @@ async def _async_node_start(
             ha_config = ClusterConfig().get_ha_config()
         except Exception:
             ha_config = None
-        await _master.start(with_server=True, with_mdns=with_mdns, ha_config=ha_config)
+        await _master.start(
+            with_server=True,
+            with_mdns=with_mdns,
+            ha_config=ha_config,
+            config=_config,  # P2-20 §6.8: 传 ClusterConfig 供 /api/v1/config/reload 热加载
+        )
 
         if transport == "fmp":
             from .protocol import FMPServer
@@ -291,7 +295,7 @@ def cluster_start(mode: str, transport: str):
 
 
 async def _async_cluster_start(mode: str, transport: str = "http"):
-    global _master, _agent, _observability
+    global _master, _agent
 
     if mode in ("master", "both"):
         _master = ClusterMaster(
@@ -300,6 +304,11 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         )
         # P1-H 注入租户并发配额 (DEFAULT_CONFIG scheduling.tenant_max_concurrent)。
         _master.configure_scheduling(_config.get("scheduling.tenant_max_concurrent", 4))
+        # P0-8: 注入带配置 retention 的 Observability (master.start 接生命周期 + 路由)。
+        # 原独立 _observability 全局不挂 master → /api/v1/observability/* 恒 503。
+        _master._observability = ClusterObservability(
+            retention_hours=_config.get("observability.retention_hours", 168.0)
+        )
         await _master.start()
 
         if transport == "fmp":
@@ -317,11 +326,6 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         await _agent.start()
         click.echo(f"✅ Node Agent 已启动: {_agent.config.node_id}")
 
-    if mode in ("master", "both"):
-        _observability = ClusterObservability(retention_hours=_config.get("observability.retention_hours", 168.0))
-        await _observability.start()
-        click.echo("✅ 可观测模块已启动")
-
 
 @cluster.command("stop")
 def cluster_stop():
@@ -330,10 +334,8 @@ def cluster_stop():
 
 
 async def _async_cluster_stop():
-    global _master, _agent, _observability
+    global _master, _agent
 
-    if _observability:
-        await _observability.stop()
     if _agent:
         await _agent.stop()
     if _master:
@@ -486,6 +488,7 @@ def task_list():
             TaskStatus.FAILED: "❌",
             TaskStatus.MIGRATED: "➡️",
             TaskStatus.TIMEOUT: "⏰",
+            TaskStatus.PARTIAL: "🟡",
         }.get(t.status, "⚪")
         click.echo(
             f"{t.task_id[:14]:<16} {t.name:<20} {t.mode.value:<10} {status_icon} {t.status.value:<10} {duration:<10}"

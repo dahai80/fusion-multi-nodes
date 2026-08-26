@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess  # noqa: F401  # patch("subprocess.run") 按字符串解析需模块已导入
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fusion_multi_node.utils.network_topology import (
@@ -710,33 +711,33 @@ class TestGetInterfaceType:
     def setup_method(self):
         self.detector = NetworkTopologyDetector()
 
-    def test_thunderbolt_type(self):
+    async def test_thunderbolt_type(self):
         mock_result = MagicMock()
         mock_result.stdout = "Thunderbolt Bridge"
         with patch("subprocess.run", return_value=mock_result):
-            assert self.detector._get_interface_type("bridge100") == "Thunderbolt"
+            assert await self.detector._get_interface_type("bridge100") == "Thunderbolt"
 
-    def test_ethernet_type(self):
+    async def test_ethernet_type(self):
         mock_result = MagicMock()
         mock_result.stdout = "USB 10/100/1000 LAN"
         with patch("subprocess.run", return_value=mock_result):
-            assert self.detector._get_interface_type("en0") == "Ethernet"
+            assert await self.detector._get_interface_type("en0") == "Ethernet"
 
-    def test_ethernet_keyword(self):
+    async def test_ethernet_keyword(self):
         mock_result = MagicMock()
         mock_result.stdout = "Ethernet Adapter"
         with patch("subprocess.run", return_value=mock_result):
-            assert self.detector._get_interface_type("en0") == "Ethernet"
+            assert await self.detector._get_interface_type("en0") == "Ethernet"
 
-    def test_unknown_type(self):
+    async def test_unknown_type(self):
         mock_result = MagicMock()
         mock_result.stdout = "Wi-Fi"
         with patch("subprocess.run", return_value=mock_result):
-            assert self.detector._get_interface_type("en0") == "Unknown"
+            assert await self.detector._get_interface_type("en0") == "Unknown"
 
-    def test_subprocess_exception(self):
+    async def test_subprocess_exception(self):
         with patch("subprocess.run", side_effect=Exception("fail")):
-            assert self.detector._get_interface_type("en0") == "Unknown"
+            assert await self.detector._get_interface_type("en0") == "Unknown"
 
 
 class TestFullDetect:
@@ -768,6 +769,25 @@ class TestFullDetect:
         ):
             await self.detector.detect()
             assert self.detector._detected is True
+
+    async def test_detect_runs_subprocess_off_event_loop(self):
+        # P1-10 (审计 §4.5): async detect() 内 subprocess.run 须经 to_thread 移出事件循环。
+        import threading
+
+        loop_thread = threading.get_ident()
+        run_threads = []
+
+        def tracking_run(*args, **kwargs):
+            run_threads.append(threading.get_ident())
+            return MagicMock(stdout="")
+
+        with patch("subprocess.run", side_effect=tracking_run):
+            await self.detector._detect_thunderbolt()
+
+        assert run_threads, "detect 应至少调用一次 subprocess.run"
+        assert all(
+            tid != loop_thread for tid in run_threads
+        ), "subprocess.run 须移出事件循环 (to_thread)"
 
 
 class TestNetworkPath:

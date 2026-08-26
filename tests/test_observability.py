@@ -414,6 +414,21 @@ class TestClusterObservabilityAlertRules:
         alerts = await obs.check_alert_rules(nodes)
         assert len(alerts) == 0
 
+    @pytest.mark.asyncio
+    async def test_check_alert_rules_dedup_repeated_ticks(self):
+        # P0-8: 周期调用须去重 — 同 (node_id, title) 已活跃则不再重复创建。
+        obs = ClusterObservability()
+        nodes = {"n1": {"status": "offline", "hostname": "node1"}}
+        first = await obs.check_alert_rules(nodes)
+        # 离线 + 无内存字段 (total 默认 1, avail 0 → 低内存也触发) = 2 条首告警
+        assert len(first) == 2
+        # 第二/三 tick (10s 周期) 不应再灌同质告警
+        second = await obs.check_alert_rules(nodes)
+        third = await obs.check_alert_rules(nodes)
+        assert second == []
+        assert third == []
+        assert len(obs.alerts) == 2
+
 
 class TestClusterObservabilityReport:
     def test_get_cluster_report(self):

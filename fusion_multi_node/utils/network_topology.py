@@ -88,7 +88,9 @@ class NetworkTopologyDetector:
     async def _detect_thunderbolt(self) -> None:
         """检测 Thunderbolt 网桥接口。"""
         try:
-            result = subprocess.run(
+            # P1-10: subprocess 同步阻塞 (至 10s) — to_thread 移出 event loop (审计 §4.5)。
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["system_profiler", "SPThunderboltDataType"],
                 capture_output=True,
                 text=True,
@@ -102,7 +104,8 @@ class NetworkTopologyDetector:
                 return
 
             # 检测 Thunderbolt 网桥接口
-            iface_result = subprocess.run(
+            iface_result = await asyncio.to_thread(
+                subprocess.run,
                 ["ifconfig", "-l"],
                 capture_output=True,
                 text=True,
@@ -131,7 +134,8 @@ class NetworkTopologyDetector:
     async def _detect_ethernet(self) -> None:
         """检测以太网接口。"""
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["ifconfig", "-l"],
                 capture_output=True,
                 text=True,
@@ -142,7 +146,7 @@ class NetworkTopologyDetector:
             for iface in interfaces:
                 if iface.startswith("en") and iface not in self._interfaces:
                     # 检查是否为以太网（不是 WiFi）
-                    iface_type = self._get_interface_type(iface)
+                    iface_type = await self._get_interface_type(iface)
                     if iface_type in ("Ethernet", "USB Ethernet"):
                         speed = await self._measure_interface_speed(iface)
                         latency = await self._measure_latency(iface)
@@ -163,7 +167,9 @@ class NetworkTopologyDetector:
     async def _detect_wifi(self) -> None:
         """检测 WiFi 接口。"""
         try:
-            result = subprocess.run(
+            # P1-10: subprocess 同步阻塞 (至 3s) — to_thread 移出 event loop (审计 §4.5)。
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [
                     "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport",
                     "-I",
@@ -204,10 +210,12 @@ class NetworkTopologyDetector:
             priority=0,
         )
 
-    def _get_interface_type(self, iface: str) -> str:
+    async def _get_interface_type(self, iface: str) -> str:
         """获取接口类型。"""
         try:
-            result = subprocess.run(
+            # P1-10: subprocess 同步阻塞 (至 5s) — to_thread 移出 event loop (审计 §4.5)。
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["system_profiler", "SPNetworkDataType"],
                 capture_output=True,
                 text=True,
@@ -263,7 +271,9 @@ class NetworkTopologyDetector:
     async def _measure_interface_speed(self, iface: str) -> float:
         """测量接口速度（Mbps）。"""
         try:
-            result = subprocess.run(
+            # P1-10: subprocess 同步阻塞 (至 2s) — to_thread 移出 event loop (审计 §4.5)。
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["ifconfig", iface],
                 capture_output=True,
                 text=True,

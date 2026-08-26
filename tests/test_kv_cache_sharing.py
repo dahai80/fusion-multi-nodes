@@ -352,6 +352,77 @@ class TestKVSharingManagerStats:
         assert stats["compression_enabled"] is False
 
 
+class TestKVSharingManagerPersistence:
+    def test_save_writes_json(self, tmp_path):
+        m = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        m.store_local(_make_entry(cache_id="c1", prompt_hash="h1"))
+        m.store_local(_make_entry(cache_id="c2", prompt_hash="h2"))
+        ok = m.save()
+        assert ok is True
+        import json
+
+        data = json.loads((tmp_path / "kv.json").read_text(encoding="utf-8"))
+        assert data["entry_count"] == 2
+        assert {e["cache_id"] for e in data["entries"]} == {"c1", "c2"}
+
+    def test_load_restores_entries(self, tmp_path):
+        m1 = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        m1.store_local(_make_entry(cache_id="c1", prompt_hash="h1", prompt_prefix="Hello"))
+        m1.store_local(_make_entry(cache_id="c2", prompt_hash="h2", prompt_prefix="World"))
+        assert m1.save() is True
+
+        m2 = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        restored = m2.load()
+        assert restored == 2
+        assert m2.lookup_local("test-model", "h1") is not None
+        assert m2.lookup_local("test-model", "h2") is not None
+        # prefix + tokens preserved
+        e = m2.lookup_local("test-model", "h1")
+        assert e.prompt_prefix == "Hello"
+
+    def test_load_missing_file(self, tmp_path):
+        m = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "nope.json"))
+        assert m.load() == 0
+        assert len(m._local_cache) == 0
+
+    def test_load_skips_expired(self, tmp_path):
+        m1 = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        m1.store_local(_make_entry(cache_id="fresh", prompt_hash="hf", ttl_seconds=3600.0))
+        m1.store_local(_make_entry(cache_id="stale", prompt_hash="hs", ttl_seconds=0.01))
+        assert m1.save() is True
+        time.sleep(0.02)
+
+        m2 = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        restored = m2.load()
+        # expired "stale" skipped at load time
+        assert restored == 1
+        assert m2.lookup_local("test-model", "hf") is not None
+        assert m2.lookup_local("test-model", "hs") is None
+
+    def test_save_skips_expired(self, tmp_path):
+        m = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        m.store_local(_make_entry(cache_id="stale", prompt_hash="hs", ttl_seconds=0.01))
+        time.sleep(0.02)
+        assert m.save() is True
+        import json
+
+        data = json.loads((tmp_path / "kv.json").read_text(encoding="utf-8"))
+        assert data["entry_count"] == 0
+
+    def test_dirty_flag_reset_on_save(self, tmp_path):
+        m = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        m.store_local(_make_entry())
+        assert m._dirty is True
+        m.save()
+        assert m._dirty is False
+
+    def test_default_persist_path(self):
+        # 不传 persist_path → 默认 ~/.fusion/multi-node/kv_cache.json (不实际落盘)
+        m = KVSharingManager(enable_compression=False)
+        assert m._persist_path.name == "kv_cache.json"
+        assert ".fusion" in str(m._persist_path)
+
+
 class TestKVCacheWarmScheduler:
     def test_record_prompt(self):
         m = KVSharingManager(enable_compression=False)

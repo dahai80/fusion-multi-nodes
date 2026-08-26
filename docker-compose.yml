@@ -13,17 +13,26 @@ services:
       FUSION_MULTINODE_HOST: "0.0.0.0"
       FUSION_MULTINODE_PORT: "11452"
       # 多容器共享密钥 — 所有 master/agent 必须一致 (auth.py 读此 env)。
-      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me}"
+      # P2-23 (审计 §6.10): 不带弱默认。未设则 compose 启动失败并提示 (见 .env.example)。
+      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:?必须设置 FUSION_CLUSTER_TOKEN — 复制 .env.example 为 .env 并填强随机值}"
       # 可信容器网段自动审批 (免手动 cluster approve; 生产仅对可信网段开放)。
       FUSION_AUTO_APPROVE_PATTERNS: "${FUSION_AUTO_APPROVE_PATTERNS:-192.168.,10.,172.16.0.0/12}"
     ports:
       - "11452:11452"
     networks:
       - fusion-cluster
+    # P1-16 (审计 §6.4): 容器 stdout 有界 — json-file 轮转 10MB×3, 不无界填盘。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11452/api/health',timeout=2).status==200 else 1)"]
+      # C11: liveness — 验 body status==ok (非仅 HTTP 200), 检 disk/mem/task-store。
+      # 用 liveness 非 deep (deep 检 node quorum, 但 agent 依赖 master healthy 启动 → 死锁)。
+      test: ["CMD", "python", "-c", "import urllib.request,json,sys; r=urllib.request.urlopen('http://127.0.0.1:11452/api/health',timeout=3); sys.exit(0 if json.loads(r.read()).get('status')=='ok' else 1)"]
       interval: 10s
-      timeout: 3s
+      timeout: 4s
       retries: 6
       start_period: 15s
     restart: unless-stopped
@@ -38,16 +47,23 @@ services:
       # 经服务名回连 master (bridge 网络内 DNS 解析)。
       FUSION_MASTER_HOST: "master"
       FUSION_MASTER_PORT: "11452"
-      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me}"
+      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:?必须设置 FUSION_CLUSTER_TOKEN — 复制 .env.example 为 .env 并填强随机值}"
       # 推理引擎在裸机: 经 host.docker.internal 回连 (Docker Desktop 内置)。
       FUSION_MLX_URL: "http://host.docker.internal:11434"
-      FUSION_MLX_API_KEY: "${FUSION_MLX_API_KEY:-dahai168}"
+      # P2-23 (审计 §6.10): 不带硬编码默认 API key。未设则 compose 启动失败并提示。
+      FUSION_MLX_API_KEY: "${FUSION_MLX_API_KEY:?必须设置 FUSION_MLX_API_KEY — 填 fusion-mlx 启用的 api_key}"
       # 单 agent 并发任务上限 — 压测时调高以充分利用 MLX 后端并发。
       FUSION_AGENT_MAX_TASKS: "${FUSION_AGENT_MAX_TASKS:-4}"
     # 不映射 host 端口 — master 经容器 bridge IP 回连, 支持无上限 --scale。
     # 宿主机无需直连 agent (压测客户端只经 master:11452 提交任务)。
     networks:
       - fusion-cluster
+    # P1-16 (审计 §6.4): 容器 stdout 有界 — json-file 轮转 10MB×3, 不无界填盘。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     extra_hosts:
       # Linux 上 host.docker.internal 默认不存在, 显式映射到 host-gateway。
       - "host.docker.internal:host-gateway"
@@ -55,11 +71,12 @@ services:
       master:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11458/api/health',timeout=2).status==200 else 1)"]
+      # C11: deep readiness — 验 body status==ok + fusion-mlx /v1/models 可达。
+      test: ["CMD", "python", "-c", "import urllib.request,json,sys; r=urllib.request.urlopen('http://127.0.0.1:11458/api/health/deep',timeout=4); sys.exit(0 if json.loads(r.read()).get('status')=='ok' else 1)"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 6
-      start_period: 15s
+      start_period: 20s
     restart: unless-stopped
 
 networks:

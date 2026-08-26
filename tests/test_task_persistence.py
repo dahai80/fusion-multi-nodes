@@ -18,6 +18,7 @@ from fusion_multi_node.master.cluster_master import (
     ParallelMode,
     TaskStatus,
 )
+from fusion_multi_node.observability.observability import ClusterObservability
 
 
 def _master_with_store(tmp_path: Path) -> ClusterMaster:
@@ -55,7 +56,9 @@ class TestPersistRestore:
         t.assigned_nodes = ["n1"]
         async with m._tasks_lock:
             m.tasks["t-run"] = t
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        # P1-11: 落盘在锁释放后。
+        m._write_task_store(snap)
         assert (tmp_path / "tasks.json").exists()
 
         m2 = _master_with_store(tmp_path)
@@ -71,7 +74,8 @@ class TestPersistRestore:
         t = _task("t-mig", TaskStatus.MIGRATED)
         async with m._tasks_lock:
             m.tasks["t-mig"] = t
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
         m2 = _master_with_store(tmp_path)
         await m2._restore_tasks()
         assert m2.tasks["t-mig"].status == TaskStatus.PENDING
@@ -82,7 +86,8 @@ class TestPersistRestore:
         t = _task("t-pend")
         async with m._tasks_lock:
             m.tasks["t-pend"] = t
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
         m2 = _master_with_store(tmp_path)
         await m2._restore_tasks()
         assert m2.tasks["t-pend"].status == TaskStatus.PENDING
@@ -93,7 +98,8 @@ class TestPersistRestore:
         for st in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMEOUT):
             async with m._tasks_lock:
                 m.tasks[f"t-{st.value}"] = _task(f"t-{st.value}", st)
-                m._persist_tasks_locked()
+                snap = m._persist_tasks_locked()
+            m._write_task_store(snap)
         m2 = _master_with_store(tmp_path)
         restored = await m2._restore_tasks()
         assert restored == 0
@@ -107,7 +113,8 @@ class TestPersistRestore:
             m.tasks["t-fail"] = _task("t-fail", TaskStatus.FAILED)
             m.tasks["t-run"] = _task("t-run", TaskStatus.RUNNING)
             m.tasks["t-pend"] = _task("t-pend", TaskStatus.PENDING)
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
         m2 = _master_with_store(tmp_path)
         restored = await m2._restore_tasks()
         assert restored == 2
@@ -119,7 +126,8 @@ class TestPersistRestore:
         m = _master_with_store(tmp_path)
         async with m._tasks_lock:
             m.tasks["t1"] = _task("t1")
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
         assert (tmp_path / "tasks.json").exists()
         assert not (tmp_path / "tasks.json.tmp").exists()
 
@@ -136,7 +144,8 @@ class TestPersistRestore:
         m = _master_with_store(tmp_path)
         async with m._tasks_lock:
             m.tasks["t1"] = _task("t1")
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
         data = json.loads((tmp_path / "tasks.json").read_text())
         assert "tasks" in data
         assert "saved_at" in data
@@ -151,7 +160,8 @@ class TestPersistRestore:
         await m.start(with_server=False, with_mdns=False)
         async with m._tasks_lock:
             m.tasks["t-survive"] = _task("t-survive", TaskStatus.RUNNING)
-            m._persist_tasks_locked()
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
         await m.stop()
         assert (tmp_path / "tasks.json").exists()
 
@@ -159,3 +169,59 @@ class TestPersistRestore:
         restored = await m2._restore_tasks()
         assert restored == 1
         assert m2.tasks["t-survive"].status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_fsync_runs_outside_tasks_lock(self, tmp_path):
+        # P1-11 (审计 §4.2): 落盘 (含 os.fsync) 须在 _tasks_lock 释放后执行, 不持锁 fsync。
+        m = _master_with_store(tmp_path)
+        async with m._tasks_lock:
+            m.tasks["t1"] = _task("t1", TaskStatus.RUNNING)
+        lock_state_at_write = {}
+
+        real_write = m._write_task_store
+
+        def spy_write(pending):
+            lock_state_at_write["locked"] = m._tasks_lock.locked()
+            return real_write(pending)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(m, "_write_task_store", spy_write)
+            await m._persist_tasks()
+        assert lock_state_at_write["locked"] is False, "落盘须在 _tasks_lock 释放后 (不持锁 fsync)"
+        assert (tmp_path / "tasks.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_persist_failure_emits_alert_and_metric(self, tmp_path):
+        # P1-15 (审计 §5.6): _write_task_store 落盘失败须发 critical 告警 + 失败指标, 不静默吞。
+        m = _master_with_store(tmp_path)
+        m._observability = ClusterObservability()
+        # 指向不可写路径触发 open() 失败 (父目录是文件 → mkdir 或 open 抛)
+        bad_path = tmp_path / "blocker"
+        bad_path.write_text("x")
+        m._task_store_path = bad_path / "tasks.json"
+        m._write_task_store([{"task_id": "t1", "status": "running"}])
+        alerts = m._observability.get_active_alerts()
+        assert any(a.title == "H3 任务持久化失败" and a.severity == "critical" for a in alerts)
+        latest = m._observability.get_latest_metric("task_persist_failed", "cluster")
+        assert latest is not None and latest.value == 1.0
+
+    @pytest.mark.asyncio
+    async def test_retry_count_survives_persist_restore(self, tmp_path):
+        # P2-26 (审计 §5.7): _retry_count 是动态属性, asdict 不序列化 → 崩溃重启归零
+        # → 允许额外重试超 _max_retry_attempts。显式序列化+恢复须闭环。
+        m = _master_with_store(tmp_path)
+        t = _task("t-retry", TaskStatus.RUNNING)
+        t._retry_count = 2
+        async with m._tasks_lock:
+            m.tasks["t-retry"] = t
+            snap = m._persist_tasks_locked()
+        m._write_task_store(snap)
+        # 落盘 JSON 含 _retry_count
+        data = json.loads((tmp_path / "tasks.json").read_text())
+        assert data["tasks"][0]["_retry_count"] == 2
+        # 新 Master 恢复: 重试预算保留, 不归零
+        m2 = _master_with_store(tmp_path)
+        restored = await m2._restore_tasks()
+        assert restored == 1
+        assert m2.tasks["t-retry"].status == TaskStatus.PENDING
+        assert getattr(m2.tasks["t-retry"], "_retry_count", 0) == 2
