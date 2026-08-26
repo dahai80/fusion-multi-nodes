@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import time
 from unittest.mock import patch
@@ -310,9 +311,10 @@ def _docker_available() -> bool:
         return False
 
 
+# compose 需要 FUSION_MLX_API_KEY env (真推理密钥); CI 无此 env, 跳过容器 E2E。
 _skip_no_docker = pytest.mark.skipif(
-    not _docker_available(),
-    reason="docker 不可用 (需 Docker Desktop 运行 + fusion-multi-node:latest 镜像)",
+    not _docker_available() or not os.environ.get("FUSION_MLX_API_KEY"),
+    reason="docker 不可用或未设 FUSION_MLX_API_KEY (需 Docker Desktop 运行 + 镜像 + 真推理密钥)",
 )
 
 

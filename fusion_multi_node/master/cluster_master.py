@@ -134,6 +134,8 @@ class ClusterTask:
     user: str = ""
     required_capability: str = ""
     preferred_node_id: str = ""
+    # #31 重试节点规避: 硬黑名单, 调度绝不派发到列表内节点 (重试时带入失败节点打破死循环)
+    exclude_nodes: list[str] = field(default_factory=list)
     priority: int = 0
     # M4-04 任务自动降级
     degraded_from_model: str = ""
@@ -165,6 +167,7 @@ class ClusterTask:
             user=spec.user,
             required_capability=spec.required_capability,
             preferred_node_id=spec.preferred_node_id,
+            exclude_nodes=list(spec.exclude_nodes),
             priority=spec.priority.value,
             spec=spec,
         )
@@ -377,6 +380,7 @@ class ClusterMaster:
             user=d.get("user", ""),
             required_capability=d.get("required_capability", ""),
             preferred_node_id=d.get("preferred_node_id", ""),
+            exclude_nodes=d.get("exclude_nodes", []),
             priority=d.get("priority", 0),
             degraded_from_model=d.get("degraded_from_model", ""),
             degradation_count=d.get("degradation_count", 0),
@@ -606,12 +610,21 @@ class ClusterMaster:
         count: int = 1,
         required_capability: str = "",
         preferred_node_id: str = "",
+        exclude_nodes: list[str] | None = None,
     ) -> list[NodeInfo]:
         """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。"""
         candidates = await self.get_online_nodes()
 
         # S1 熔断: 跳过 ban 期内节点 (派发失败累积达阈值自动 ban, 不再被选中)
         candidates = [n for n in candidates if not self.is_node_banned(n.node_id)]
+
+        # #31 重试节点规避: 硬黑名单过滤 (重试带入失败节点, 打破"重试回同一坏节点"死循环)
+        if exclude_nodes:
+            excluded = set(exclude_nodes)
+            candidates = [n for n in candidates if n.node_id not in excluded]
+            if not candidates:
+                logger.warning(f"select_nodes: exclude_nodes={list(excluded)} 过滤后无候选节点")
+                return []
 
         # M3-05 capability 过滤
         if required_capability:
@@ -834,6 +847,7 @@ class ClusterMaster:
                 count=len(task.model_shards) or 1,
                 required_capability=task.required_capability,
                 preferred_node_id=task.preferred_node_id,
+                exclude_nodes=task.exclude_nodes,
             )
         finally:
             if self._is_vram_first(task) and self.load_router.strategy != original_strategy:
@@ -868,6 +882,8 @@ class ClusterMaster:
                 if len(confirmed) < need:
                     shortfall = need - len(confirmed)
                     excluded = {n.node_id for n in confirmed}
+                    # #31: 补选同样遵守重试节点黑名单, 不回退到失败节点
+                    excluded.update(task.exclude_nodes)
                     extra = self._select_free_nodes_locked(
                         mode=task.mode,
                         required_memory_gb=required_mem,

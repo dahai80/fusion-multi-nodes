@@ -57,8 +57,15 @@ async def test_execute_in_sandbox_echo(executor):
 
 @pytest.mark.asyncio
 async def test_execute_in_sandbox_timeout():
+    # CI (Linux 无 CAP_SYS_ADMIN) unshare 运行时失败 → 超时路径不可测, 跳过。
     cfg = SandboxConfig(execution_timeout=1)
     ex = SandboxExecutor(cfg)
+    if ex.backend == "unshare":
+        import subprocess as _sp
+
+        probe = _sp.run(["unshare", "--pid", "--fork", "--mount-proc", "--", "true"], capture_output=True)
+        if probe.returncode != 0:
+            pytest.skip(f"unshare 不可用 (CI 无权限): {probe.stderr.decode().strip()}")
     result = await ex.execute_in_sandbox("t2", ["sleep", "10"])
     assert result["exit_code"] != 0
     assert "超时" in result["stderr"] or result["exit_code"] in (-6, -9)

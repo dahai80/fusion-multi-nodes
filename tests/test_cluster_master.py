@@ -433,6 +433,142 @@ class TestClusterMaster:
         assert len(selected) == 0
 
     @pytest.mark.asyncio
+    async def test_select_nodes_exclude_blacklist(self):
+        master = ClusterMaster()
+        info1 = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        info2 = NodeInfo(
+            node_id="n2",
+            hostname="mac2",
+            ip_address="10.0.0.2",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(info1)
+        await master.register_node(info2)
+        # #31 exclude_nodes 硬黑名单: n1 规避, 只剩 n2
+        selected = await master.select_nodes(
+            ParallelMode.DATA,
+            required_memory_gb=10.0,
+            count=1,
+            exclude_nodes=["n1"],
+        )
+        assert len(selected) == 1
+        assert selected[0].node_id == "n2"
+
+    @pytest.mark.asyncio
+    async def test_select_nodes_exclude_all_empty(self):
+        master = ClusterMaster()
+        info1 = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(info1)
+        # #31 全部节点规避 → 无候选, 返回空 (不回退到黑名单节点)
+        selected = await master.select_nodes(
+            ParallelMode.DATA,
+            required_memory_gb=10.0,
+            count=1,
+            exclude_nodes=["n1"],
+        )
+        assert selected == []
+
+    @pytest.mark.asyncio
+    async def test_select_nodes_preferred_soft_hint(self):
+        master = ClusterMaster()
+        info1 = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        info2 = NodeInfo(
+            node_id="n2",
+            hostname="mac2",
+            ip_address="10.0.0.2",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(info1)
+        await master.register_node(info2)
+        # preferred_node_id 软提示: 优先选 n1 (preferred_bonus)
+        selected = await master.select_nodes(
+            ParallelMode.DATA,
+            required_memory_gb=10.0,
+            count=1,
+            preferred_node_id="n1",
+        )
+        assert len(selected) == 1
+        assert selected[0].node_id == "n1"
+
+    @pytest.mark.asyncio
+    async def test_assign_task_exclude_nodes_passthrough(self):
+        # #31 端到端: assign_task 透传 exclude_nodes, 被规避节点不派发
+        master = ClusterMaster()
+        bad = NodeInfo(
+            node_id="bad",
+            hostname="mac-bad",
+            ip_address="10.0.0.9",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        good = NodeInfo(
+            node_id="good",
+            hostname="mac-good",
+            ip_address="10.0.0.8",
+            port=11458,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=50.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+        )
+        await master.register_node(bad)
+        await master.register_node(good)
+        task = ClusterTask(
+            task_id="t-exclude-1",
+            name="retry-avoid",
+            mode=ParallelMode.DATA,
+            model_name="small",
+            timeout_seconds=30.0,
+            user="u1",
+            created_at=time.time(),
+            required_capability="",
+            preferred_node_id="",
+            exclude_nodes=["bad"],
+        )
+        ok = await master.assign_task(task)
+        assert ok
+        assert task.status == TaskStatus.RUNNING
+        assert task.assigned_nodes == ["good"]
+
+    @pytest.mark.asyncio
     async def test_register_kv_cache(self):
         master = ClusterMaster()
         entry = KVCacheEntry(
