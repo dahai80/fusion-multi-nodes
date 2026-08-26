@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9] - 2026-08-26
+
+### Fixed
+
+- **测试隔离缺陷修复** (复审计 2026-08-26 发现, Rule 9/12 违规) — 测试污染真实 `~/.fusion/multi-node`
+  - `tests/conftest.py` (新增): autouse `_isolated_home` fixture 重定向 HOME 到 per-test tmp_path, 隔离 tasks.json/config.json/kv_cache.json/election_state.json 所有 `~/.fusion` 写入; symlink 真实 `~/.docker` 保 docker compose 插件发现 (容器 E2E 不受影响)
+  - `fusion_multi_node/cli.py`: 模块级 `_config = ClusterConfig()` (导入即解析 `Path.home()`, 缓存真实路径, HOME 重定向无法覆盖) → 懒加载 `_get_config()`, 首次访问才实例化; 14 处读取点全部更新
+  - 根因: H3 任务持久化写非终态任务到真实 tasks.json + CLI 导入即实例化; 污染源 `TestPriorityQueue::test_cancel_running_drains_queue` 留 RUNNING 任务; 随机顺序下 order-dependent 失败, 确定性顺序 1036 绿掩盖 bug
+  - 验证: `pytest tests/ -q` 随机顺序 1036 passed, ruff clean, 真实 `~/.fusion/multi-node` 全程未碰
+
+### Added
+
+- **复审计报告** `docs/audit/RE_AUDIT_2026-08-26.md` — v0.8.8 对照原审计 13 CRITICAL + 29 项证据复核; 判定 ⚠️ CONDITIONAL-READY (原 ❌); 8 项企业级残留 gap + 5 发布条件; P0 8/8 P1 10/10 P2 8/8 P3 2/3 (P3-28 张量 KV no-op issue #33 已知限制)
+
 ## [0.8.2] - 2026-08-25
 
 ### Added

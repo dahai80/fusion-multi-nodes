@@ -21,9 +21,19 @@ from .utils import NetworkTopologyDetector, setup_logger
 
 logger = logging.getLogger(__name__)
 
-_config = ClusterConfig()
+# 延迟初始化 — 避免模块导入时解析 Path.home() (config.json 路径)。
+# 导入即实例化会缓存真实 HOME 路径, 测试隔离 (HOME 重定向) 无法覆盖,
+# 且对运行时改 HOME 的进程也是潜在 bug。首次访问时才实例化。
+_config: ClusterConfig | None = None
 _master: ClusterMaster | None = None
 _agent: NodeAgent | None = None
+
+
+def _get_config() -> ClusterConfig:
+    global _config
+    if _config is None:
+        _config = ClusterConfig()
+    return _config
 
 
 @click.group()
@@ -174,7 +184,7 @@ async def _async_node_start(
             with_server=True,
             with_mdns=with_mdns,
             ha_config=ha_config,
-            config=_config,  # P2-20 §6.8: 传 ClusterConfig 供 /api/v1/config/reload 热加载
+            config=_get_config(),  # P2-20 §6.8: 传 ClusterConfig 供 /api/v1/config/reload 热加载
         )
 
         if transport == "fmp":
@@ -299,15 +309,15 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
 
     if mode in ("master", "both"):
         _master = ClusterMaster(
-            host=_config.get("cluster.master_host", "127.0.0.1"),
-            port=_config.get("cluster.master_port", 11452),
+            host=_get_config().get("cluster.master_host", "127.0.0.1"),
+            port=_get_config().get("cluster.master_port", 11452),
         )
         # P1-H 注入租户并发配额 (DEFAULT_CONFIG scheduling.tenant_max_concurrent)。
-        _master.configure_scheduling(_config.get("scheduling.tenant_max_concurrent", 4))
+        _master.configure_scheduling(_get_config().get("scheduling.tenant_max_concurrent", 4))
         # P0-8: 注入带配置 retention 的 Observability (master.start 接生命周期 + 路由)。
         # 原独立 _observability 全局不挂 master → /api/v1/observability/* 恒 503。
         _master._observability = ClusterObservability(
-            retention_hours=_config.get("observability.retention_hours", 168.0)
+            retention_hours=_get_config().get("observability.retention_hours", 168.0)
         )
         await _master.start()
 
@@ -321,7 +331,7 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         click.echo(f"✅ Cluster Master 已启动 (端口 {_master.port}, transport={transport})")
 
     if mode in ("agent", "both"):
-        agent_config = _config.to_node_agent_config()
+        agent_config = _get_config().to_node_agent_config()
         _agent = NodeAgent(agent_config)
         await _agent.start()
         click.echo(f"✅ Node Agent 已启动: {_agent.config.node_id}")
@@ -376,8 +386,8 @@ async def _master_http(method: str, path: str, json_body: dict | None = None) ->
 
     from fusion_multi_node.utils.auth import load_or_create_token
 
-    host = os.environ.get("FUSION_MULTINODE_HOST") or _config.get("cluster.master_host", "127.0.0.1")
-    port = int(os.environ.get("FUSION_MULTINODE_PORT") or _config.get("cluster.master_port", 11452))
+    host = os.environ.get("FUSION_MULTINODE_HOST") or _get_config().get("cluster.master_host", "127.0.0.1")
+    port = int(os.environ.get("FUSION_MULTINODE_PORT") or _get_config().get("cluster.master_port", 11452))
     token = load_or_create_token()
     headers = {"Authorization": f"Bearer {token}"}
     url = f"http://{host}:{port}{path}"
@@ -531,16 +541,16 @@ def config_list():
     """列出所有配置。"""
     click.echo()
     click.echo("⚙️  Fusion-Multi-Node 配置")
-    click.echo(f"  配置文件: {_config.config_path}")
+    click.echo(f"  配置文件: {_get_config().config_path}")
     click.echo()
-    click.echo(json.dumps(_config._data, indent=2, ensure_ascii=False))
+    click.echo(json.dumps(_get_config()._data, indent=2, ensure_ascii=False))
 
 
 @config.command("get")
 @click.argument("key")
 def config_get(key: str):
     """获取配置项。"""
-    value = _config.get(key)
+    value = _get_config().get(key)
     if value is not None:
         click.echo(f"{key} = {json.dumps(value, ensure_ascii=False)}")
     else:
@@ -557,7 +567,7 @@ def config_set(key: str, value: str):
     except (json.JSONDecodeError, TypeError):
         parsed = value
     try:
-        _config.set(key, parsed)
+        _get_config().set(key, parsed)
     except Exception as e:
         click.echo(f"配置校验失败: {e}", err=True)
         raise SystemExit(1)
@@ -568,8 +578,8 @@ def _get_master() -> ClusterMaster:
     global _master
     if _master is None:
         _master = ClusterMaster(
-            host=_config.get("cluster.master_host", "127.0.0.1"),
-            port=_config.get("cluster.master_port", 11452),
+            host=_get_config().get("cluster.master_host", "127.0.0.1"),
+            port=_get_config().get("cluster.master_port", 11452),
         )
     return _master
 
