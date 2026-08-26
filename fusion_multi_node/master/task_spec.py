@@ -28,6 +28,8 @@ class TaskSpec:
     user: str = ""
     required_capability: str = ""
     preferred_node_id: str = ""
+    # #31 重试节点规避: 硬黑名单 (重试带入失败节点)
+    exclude_nodes: list[str] = field(default_factory=list)
     priority: TaskPriority = TaskPriority.NORMAL
     model_shards: list[dict[str, Any]] = field(default_factory=list)
     input_data: dict[str, Any] | None = None
@@ -42,6 +44,7 @@ class TaskSpec:
             "user": self.user,
             "required_capability": self.required_capability,
             "preferred_node_id": self.preferred_node_id,
+            "exclude_nodes": list(self.exclude_nodes),
             "priority": self.priority.value,
             "model_shards": self.model_shards,
             "input_data": self.input_data,
@@ -68,6 +71,7 @@ class TaskSpec:
             user=data.get("user", ""),
             required_capability=data.get("required_capability", ""),
             preferred_node_id=data.get("preferred_node_id", ""),
+            exclude_nodes=data.get("exclude_nodes", []),
             priority=priority,
             model_shards=data.get("model_shards", []),
             input_data=data.get("input_data"),

@@ -130,6 +130,8 @@ class TaskSubmitRequest(BaseModel):
     user: str = ""
     required_capability: str = ""
     preferred_node_id: str = ""
+    # #31 重试节点规避: 硬黑名单 (绝不派发到列表内节点); 优先 preferred 健康节点
+    exclude_nodes: list[str] = []
     priority: int = 0
     # P1 派发载荷 — 透传到 agent /api/execute (task_type + params)
     task_type: str = "inference"
@@ -665,6 +667,8 @@ class MasterServer:
                 created_at=time.time(),
                 required_capability=req.required_capability,
                 preferred_node_id=req.preferred_node_id,
+                # #31 重试节点规避: 透传硬黑名单
+                exclude_nodes=list(req.exclude_nodes),
                 priority=req.priority,
                 task_type=req.task_type,
                 params={
