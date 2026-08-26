@@ -5,12 +5,22 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.0rc1-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1056%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1061%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **📦 v0.10.0-rc.1 (Release Candidate) — 2026-08-26**
+>
+> 单租户 LAN 场景**可带条件商用** (披露复审计 §8 条件 2/4/5 已补齐, 详见 [CHANGELOG](docs/CHANGELOG.md)):
+> - **always-on SLA 阻塞** (GAP-1): 默认单 Master, Master 宕机集群不可用; HA 选举 opt-in, standby 仅同步任务。须 HA 默认开 + 全状态同步 (Phase C)
+> - **吞吐上限声明** (GAP-6): 上游 fusion-mlx 60rpm 限流, 单节点推理吞吐受限; 多节点线性扩展
+> - **死代码 + KV no-op 披露** (GAP-5/7): autoscaler/mcp_gateway/cloud_fallback/StandbyMaster 未接线死代码; sync_kv_cache 仅元数据 (张量 KV 上游阻塞)
+> - **多租户/远程 SaaS 阻塞** (GAP-8): 单一共享 Bearer token 无 per-user RBAC。须多用户鉴权 (Phase F)。当前仅适用可信单团队 LAN
 
 ---
 
@@ -854,6 +864,13 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 ---
 
 ## 🛣️ Roadmap
+
+### v0.10.0-rc.1 🔶 — Release Candidate (2026-08-26)
+- [x] #31 重试节点规避 — `exclude_nodes` 硬黑名单 (select_nodes 过滤 + assign_task 透传 + 补选遵守, 打破重试回坏节点死循环)
+- [x] GAP-4 CI 修复 — `pytest-randomly` 声明 + 3 个 Linux x86_64 不兼容测试 skip-gate
+- [x] 复审计 §8 发布条件 2/4/5 披露补齐 — GAP-1 HA SPOF / GAP-6 吞吐上限 / GAP-5 死代码 + GAP-7 KV no-op
+- [x] 单租户 LAN 可带条件商用; 多租户/远程 SaaS + always-on SLA 阻塞声明
+- [x] 1061 tests, 0 ruff errors, CI 全绿
 
 ### v0.1.0 ✅
 - [x] Cluster Master — node discovery, scheduler, task lifecycle, fault tolerance
