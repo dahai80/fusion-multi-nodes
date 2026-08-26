@@ -974,7 +974,23 @@ class MasterServer:
         self._uvicorn_server = uvicorn.Server(config)
         scheme = "https" if ssl_kwargs else "http"
         logger.info(f"Master 服务启动: {scheme}://{host}:{port}")
-        await self._uvicorn_server.serve()
+        try:
+            await self._uvicorn_server.serve()
+        except OSError as e:
+            # 端口被占用 — 明确报冲突端口 (issue #25 同类: 同机服务撞端口难定位)。
+            _CONFLICT = {
+                11452: "fusion-multi-node Master (本服务)",
+                11458: "fusion-multi-node Agent",
+                11445: "fusion-comfyui",
+                11432: "fusion-mlx / fusion-gateway",
+                11434: "fusion-mlx (monorepo 默认)",
+                11450: "fusion-multi-node mDNS",
+                11446: "fusion-multi-node MCP/FMP",
+            }
+            who = _CONFLICT.get(port, "")
+            hint = f" (与 {who} 默认端口冲突)" if who else ""
+            logger.error(f"Master 端口 {port} bind 失败{hint}: {e}")
+            raise OSError(f"端口 {port} 被占用{hint}, 原 OSError: {e}") from e
 
     async def stop(self) -> None:
         if self._uvicorn_server:

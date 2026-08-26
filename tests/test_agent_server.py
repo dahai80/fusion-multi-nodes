@@ -384,6 +384,33 @@ class TestAgentServerStart:
         assert agent_server._uvicorn_server is mock_server
         mock_server.serve.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_start_port_conflict_raises_with_hint(self, agent_server):
+        """issue #25: 端口被占用 → OSError 带冲突端口提示, 非通用 bind 错误。"""
+        mock_uvicorn = MagicMock()
+        mock_config = MagicMock()
+        mock_server = MagicMock()
+        # bind 失败 — Address already in use
+        mock_server.serve = AsyncMock(side_effect=OSError(48, "Address already in use"))
+        mock_uvicorn.Config.return_value = mock_config
+        mock_uvicorn.Server.return_value = mock_server
+        with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+            with pytest.raises(OSError, match="11445.*fusion-comfyui"):
+                await agent_server.start(host="127.0.0.1", port=11445)
+
+    @pytest.mark.asyncio
+    async def test_start_port_conflict_no_known_conflict(self, agent_server):
+        """未知冲突端口 → OSError 仍抛 (无 hint 但含端口号)。"""
+        mock_uvicorn = MagicMock()
+        mock_config = MagicMock()
+        mock_server = MagicMock()
+        mock_server.serve = AsyncMock(side_effect=OSError(48, "Address already in use"))
+        mock_uvicorn.Config.return_value = mock_config
+        mock_uvicorn.Server.return_value = mock_server
+        with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+            with pytest.raises(OSError, match="12345"):
+                await agent_server.start(host="127.0.0.1", port=12345)
+
 
 class TestAgentServerStop:
     @pytest.mark.asyncio
