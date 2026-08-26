@@ -38,6 +38,11 @@ def _isolated_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
     monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
     # 审计日志走隔离 HOME 下的 audit.log — 不污染真实 ~/.fusion (与 token/tasks 同理)。
     monkeypatch.setenv("FUSION_AUDIT_LOG", str(home / ".fusion" / "multi-node" / "audit.log"))
+    # GAP-8 (Phase F1): 用户令牌存储隔离 — 隔离 HOME 下无 users.json, load_user_store() 返回 None
+    # → 中间件纯 cluster_token (单租户零配置向后兼容, 现有测试不受影响)。
+    # 测试需用户令牌时显式设 FUSION_USERS_FILE 指向 tmp。清 BOOTSTRAP_ADMIN 防误引导。
+    monkeypatch.delenv("FUSION_USERS_FILE", raising=False)
+    monkeypatch.delenv("FUSION_BOOTSTRAP_ADMIN", raising=False)
     # 审计 logger 是模块级单例 (首次 get_audit_logger 缓存路径)。HOME/env 改后须 reset,
     # 否则后续测试复用首测路径 (其 tmp 已销毁) → 写失败。每测试重建 → 写入本测试 tmp。
     from fusion_multi_node.security.audit_log import reset_audit_logger

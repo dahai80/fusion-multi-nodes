@@ -211,12 +211,31 @@ class MasterServer:
         self._shared_token = shared_token or load_or_create_token()
         # P2-20 (审计 §6.8): 持有 ClusterConfig 供 /api/v1/config/reload 热重载。
         self._cluster_config = config
+        # GAP-8 (Phase F1): 用户令牌存储 — 多租户 per-user 鉴权。load_user_store() 无文件/无 env
+        # 时返回 None → 中间件回退纯 cluster_token (单租户零配置向后兼容)。FUSION_BOOTSTRAP_ADMIN
+        # env 指定首启引导 ADMIN 用户名 (无用户库时自动创建并签发首个令牌, 记日志)。
+        from fusion_multi_node.security.user_store import load_user_store
+
+        self._user_store = load_user_store()
+        bootstrap_admin = os.environ.get("FUSION_BOOTSTRAP_ADMIN", "").strip()
+        if self._user_store is not None and bootstrap_admin and self._user_store.is_empty():
+            token = self._user_store.bootstrap_admin(bootstrap_admin)
+            if token:
+                logger.warning(
+                    f"首启引导 ADMIN 用户已创建: {bootstrap_admin} — 首个令牌已签发 (仅此一次显示, "
+                    f"请妥善保存)。后续用户管理经 /api/v1/users API。"
+                )
         # GAP-8: 审计日志 — 记节点注册/审批/鉴权失败/权限拒绝/任务提交取消等安全动作, 追加写 JSONL。
         # 须在 BearerAuthMiddleware 之前实例化 — 中间件经 audit_logger 参数引用。
         from fusion_multi_node.security.audit_log import get_audit_logger
 
         self._audit = get_audit_logger()
-        self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token, audit_logger=self._audit)
+        self.app.add_middleware(
+            BearerAuthMiddleware,
+            shared_token=self._shared_token,
+            audit_logger=self._audit,
+            user_store=self._user_store,
+        )
         # P2-22 (审计 §3.8): Master 无限流 → /api/nodes/register /api/join /api/ha/vote
         # /api/tasks/submit 无节流 → DoS + 审批队列 (max_pending=100) 耗尽。加全局限流。
         # 阈值高于 agent (集群内部流量: heartbeat 10s×N 节点 + 派发), 120 req/60s/IP。
