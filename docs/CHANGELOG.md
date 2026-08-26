@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-08-27 — GAP-8 Phase F1: per-user token store + dual-token middleware
+
+> **多租户令牌基座**: 引入 per-user API 令牌 (与集群共享令牌正交), BearerAuthMiddleware 按 `fmu_`
+> 前缀分流; 用户令牌存储文件持久化 (scrypt 哈希, 0600); UserRole (ADMIN/USER/VIEWER) + 用户层
+> 路径鉴权。单租户零配置向后兼容 (无 users.json → 纯 cluster_token, 字节级旧行为)。
+
+### Added
+
+- **用户令牌存储** (`security/user_store.py`) — GAP-8 Phase F1
+  - `UserStore`: 文件持久化 `~/.fusion/multi-node/users.json` (FUSION_USERS_FILE 覆盖), 原子 tmp+replace, 0600
+  - 密钥只存 scrypt 哈希 (`hashlib.scrypt`, stdlib, 无新依赖); 明文令牌仅签发时返回一次
+  - 令牌格式 `fmu_<userid>_<secret>`; 多活令牌 (rotate 签新不废旧, revoke 吊销)
+  - `create/delete/list/issue/revoke/revoke_all/rotate/validate/set_role/bootstrap_admin`
+  - `load_user_store()` — 无 env 无文件 → None (中间件回退纯 cluster_token); 有 → UserStore
+- **UserRole** (`security/permission.py`) — 与 NodeRole 正交的用户层角色 (ADMIN/USER/VIEWER)
+  - `_USER_ROLE_PERMISSIONS` + `_USER_PATH_PERMISSION_MAP` + `check_user_path_access(role, path, method)`
+  - ADMIN: 用户管理 + 任务全操作; USER: 任务提交/取消/查询 + 推理; VIEWER: 只读
+- **双令牌中间件** (`utils/auth.py` `BearerAuthMiddleware`)
+  - `user_store` 可选参数: 注入后 `fmu_` 前缀 → UserStore.validate → 注入 scope user_id/user_role
+  - cluster_token 路径 O(1) 不变; 无 user_store 时 `fmu_` 显式拒 (集群内部流量不携带用户令牌)
+  - 鉴权失败审计 detail 区分 (用户令牌校验失败 / 不可用于节点路由 / token 不匹配)
+- **首启引导** — `FUSION_BOOTSTRAP_ADMIN` env: 无用户库时自动创建 ADMIN 并签发首个令牌 (仅记日志, 令牌不回显)
+- **`security/__init__.py`** re-export UserRole/UserStore/UserRecord/UserToken/check_user_path_access/load_user_store
+
+### Backward compatibility
+
+- 无 `FUSION_USERS_FILE` 且无 `~/.fusion/multi-node/users.json` → `load_user_store()` 返回 None →
+  中间件纯 cluster_token, 与旧版字节级一致。单租户零配置部署无任何行为变化。
+- 集群内部 HTTP (master→agent 派发, agent 心跳, KV 跨节点, CLI) 仍用 cluster_token, 不受影响。
+
+### Tests
+
+- `tests/test_user_store.py` (22 用例): 创建/删除/角色/签发/校验/吊销/轮换/多活/持久化/原子写/损坏降级/空库/bootstrap
+- `tests/test_enterprise_security.py::TestUserTokenAuth` (6 用例): fmu 通过/错误 401+审计/cluster 不变/agent 拒 fmu_/无 store 回退/bootstrap env
+- `tests/conftest.py`: 清 FUSION_USERS_FILE/FUSION_BOOTSTRAP_ADMIN (隔离 HOME 下无 users.json → None)
+- 1112 tests (was 1085), 0 ruff errors
+
 ## [0.10.2] - 2026-08-26 — GAP-5 dead-code remediation
 
 > **死代码清理/标注**: autoscaler 未接线路由由歧义 `{"enabled":False}` 改为显式 503 not-wired;

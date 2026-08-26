@@ -244,7 +244,13 @@ def is_safe_outbound_host(host: str) -> bool:
 
 
 class BearerAuthMiddleware:
-    """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。"""
+    """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。
+
+    GAP-8 (Phase F1): 双令牌分流。user_store 注入后:
+    - fmu_ 前缀 → 用户令牌路径: UserStore.validate → 注入 scope["user_id"]/["user_role"]。
+    - 其余 → cluster_token 路径 (secrets.compare_digest, O(1), 不变)。
+    user_store=None (单租户零配置) → 纯 cluster_token, 字节级等同旧行为。
+    """
 
     EXEMPT_PATHS = {
         "/api/health",
@@ -258,10 +264,31 @@ class BearerAuthMiddleware:
         "/favicon.ico",
     }
 
-    def __init__(self, app, shared_token: str, audit_logger=None):
+    USER_TOKEN_PREFIX = "fmu_"
+
+    def __init__(self, app, shared_token: str, audit_logger=None, user_store=None):
         self.app = app
         self._expected = shared_token
         self._audit = audit_logger
+        self._user_store = user_store
+
+    def _client_ip(self, scope) -> str:
+        client = scope.get("client")
+        if client:
+            return client[0]
+        return ""
+
+    def _audit_fail(self, scope, detail: str, actor: str = "") -> None:
+        if self._audit is None:
+            return
+        self._audit.log(
+            actor=actor or self._client_ip(scope) or "unknown",
+            action="auth_fail",
+            path=scope.get("path", ""),
+            method=scope.get("method", ""),
+            result="denied",
+            detail=detail,
+        )
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -282,19 +309,7 @@ class BearerAuthMiddleware:
 
         if not auth_header.startswith(b"Bearer "):
             logger.warning(f"认证失败: 缺少 Bearer token ({path})")
-            if self._audit is not None:
-                client_ip = ""
-                client = scope.get("client")
-                if client:
-                    client_ip = client[0]
-                self._audit.log(
-                    actor=client_ip or "unknown",
-                    action="auth_fail",
-                    path=path,
-                    method=scope.get("method", ""),
-                    result="denied",
-                    detail="缺少 Bearer token",
-                )
+            self._audit_fail(scope, "缺少 Bearer token")
             from starlette.responses import JSONResponse
 
             response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -302,21 +317,41 @@ class BearerAuthMiddleware:
             return
 
         token = auth_header[7:].decode("utf-8", errors="replace")
+
+        # 用户令牌路径 (fmu_ 前缀) — 仅 user_store 注入时启用
+        if self._user_store is not None and token.startswith(self.USER_TOKEN_PREFIX):
+            result = self._user_store.validate(token)
+            if result is None:
+                logger.warning(f"认证失败: 用户令牌校验失败 ({path})")
+                self._audit_fail(scope, "用户令牌校验失败")
+                from starlette.responses import JSONResponse
+
+                response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                await response(scope, receive, send)
+                return
+            user_id, user_role = result
+            # 注入 scope — handler 经 scope["user_id"]/["user_role"] 取身份
+            scope["user_id"] = user_id
+            scope["user_role"] = user_role.value
+            logger.debug(f"用户令牌认证通过: user={user_id} role={user_role.value} ({path})")
+            await self.app(scope, receive, send)
+            return
+
+        # fmu_ 前缀但本服务无 user_store (agent/未配 master) — 显式拒: 集群内部流量不携带用户令牌。
+        # 落到下面 compare_digest 也会 401, 但显式分支给正确审计 detail (用户令牌误用于节点路由)。
+        if token.startswith(self.USER_TOKEN_PREFIX):
+            logger.warning(f"认证失败: 用户令牌不可用于本路由 ({path})")
+            self._audit_fail(scope, "用户令牌不可用于节点路由")
+            from starlette.responses import JSONResponse
+
+            response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            await response(scope, receive, send)
+            return
+
+        # 集群令牌路径 (cluster_token) — 热路径, O(1)
         if not secrets.compare_digest(token, self._expected):
             logger.warning(f"认证失败: token 不匹配 ({path})")
-            if self._audit is not None:
-                client_ip = ""
-                client = scope.get("client")
-                if client:
-                    client_ip = client[0]
-                self._audit.log(
-                    actor=client_ip or "unknown",
-                    action="auth_fail",
-                    path=path,
-                    method=scope.get("method", ""),
-                    result="denied",
-                    detail="token 不匹配",
-                )
+            self._audit_fail(scope, "token 不匹配")
             from starlette.responses import JSONResponse
 
             response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})

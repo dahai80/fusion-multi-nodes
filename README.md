@@ -5,22 +5,27 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.3-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1085%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1112%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.2 (2026-08-26) — GAP-5 死代码清理/标注**
+> **📦 v0.10.3 (2026-08-27) — GAP-8 Phase F1: 多租户令牌基座**
 >
-> autoscaler 未接线路由改显式 503 not-wired (非歧义 `enabled:False`); StandbyMaster 死代码删除 (零实例化, HA 路径唯一为 MasterElection)。详见 [CHANGELOG](docs/CHANGELOG.md)。
+> 引入 per-user API 令牌 (与集群共享令牌正交), `BearerAuthMiddleware` 按 `fmu_` 前缀分流; 用户令牌
+> 文件持久化 (scrypt 哈希, 0600); UserRole (ADMIN/USER/VIEWER) + 用户层路径鉴权。单租户零配置向后兼容
+> (无 users.json → 纯 cluster_token, 字节级旧行为)。详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 已完成 (Phase A-E): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码。
+> 已完成 (Phase A-E + F1): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座。
 > 仍待补齐 (Phase F):
-> - **多租户/远程 SaaS 阻塞** (GAP-8): 单一共享 Bearer token 无 per-user RBAC。须多用户鉴权 + token 轮转。当前仅适用可信单团队 LAN
+> - **F2 per-user RBAC 路由 + 用户 CRUD** (GAP-8): 令牌基座已就绪, 待接 master 用户面路由鉴权 + 用户管理 API
+> - **F3 统一推理代理** (#27): master `/v1/chat/completions` pass-through
+> - **F4 集群控制 API 契约** (#32): /api/v1 响应模型 + HTTP 文档
+> - **F5 令牌轮转** (GAP-8): 多活令牌 + cluster previous-active 滚动重启
 > - **KV no-op** (GAP-7): sync_kv_cache 仅元数据 (张量 KV 上游阻塞, issue #33)
 
 ---
@@ -865,6 +870,13 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 ---
 
 ## 🛣️ Roadmap
+
+### v0.10.3 ✅ — GAP-8 Phase F1: 多租户令牌基座 (2026-08-27)
+- [x] **per-user 令牌存储** (`security/user_store.py`) — `UserStore` 文件持久化 `users.json` (scrypt 哈希, 0600, 原子写), 令牌格式 `fmu_<uid>_<secret>`, 多活签发/吊销/轮换
+- [x] **UserRole** (`security/permission.py`) — 与 NodeRole 正交的 ADMIN/USER/VIEWER + `check_user_path_access` 路径鉴权
+- [x] **双令牌中间件** (`utils/auth.py`) — `BearerAuthMiddleware` 按 `fmu_` 前缀分流到 UserStore, cluster_token 热路径 O(1) 不变; 无 user_store 回退纯 cluster_token (单租户零配置向后兼容)
+- [x] **首启引导** — `FUSION_BOOTSTRAP_ADMIN` env 自动创建 ADMIN + 签发首令牌
+- [x] 28 个新测试 (test_user_store 22 + TestUserTokenAuth 6); 1112 tests, 0 ruff errors
 
 ### v0.10.2 ✅ — GAP-5 死代码清理/标注 (2026-08-26)
 - [x] **autoscaler 路由显式 not-wired** (GAP-5) — `GET/PUT /api/v1/autoscaler/config` 由歧义 `{"enabled":False}` 改 503 + detail 明示未接线; 模块保留待迁移

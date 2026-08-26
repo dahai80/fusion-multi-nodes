@@ -201,6 +201,123 @@ class TestAuthFailAudit:
         assert "不匹配" in fails[0]["detail"]
 
 
+# ── GAP-8 (Phase F1): 用户令牌双令牌分流 ──
+
+
+class TestUserTokenAuth:
+    """fmu_ 用户令牌在 master 用户面路由通过; 错误令牌 401+审计; cluster 令牌不变;
+    agent 路由拒 fmu_ 前缀。"""
+
+    async def test_user_token_accepted_on_master(self, tmp_path, monkeypatch):
+        from fusion_multi_node.security.audit_log import reset_audit_logger
+        from fusion_multi_node.security.permission import UserRole
+
+        monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
+        monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
+        monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
+        reset_audit_logger()
+        server = MasterServer(shared_token="cluster-tok")
+        store = server._user_store
+        assert store is not None
+        store.create_user("alice", UserRole.USER)
+        tok = store.issue_token("alice")
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/nodes", headers={"Authorization": f"Bearer {tok}"})
+        assert resp.status_code == 200
+
+    async def test_wrong_user_token_401_audit(self, tmp_path, monkeypatch):
+        from fusion_multi_node.security.audit_log import reset_audit_logger
+        from fusion_multi_node.security.permission import UserRole
+
+        monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
+        monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
+        monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
+        reset_audit_logger()
+        server = MasterServer(shared_token="cluster-tok")
+        server._user_store.create_user("alice", UserRole.USER)
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/nodes", headers={"Authorization": "Bearer fmu_alice_wrong"})
+        assert resp.status_code == 401
+        al = AuditLogger(log_path=str(tmp_path / "audit.log"))
+        fails = [e for e in al.read() if e["action"] == "auth_fail"]
+        assert len(fails) == 1
+        assert "用户令牌校验失败" in fails[0]["detail"]
+
+    async def test_cluster_token_still_accepted_with_user_store(self, tmp_path, monkeypatch):
+        from fusion_multi_node.security.audit_log import reset_audit_logger
+        from fusion_multi_node.security.permission import UserRole
+
+        monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
+        monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
+        monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
+        reset_audit_logger()
+        server = MasterServer(shared_token="cluster-tok")
+        server._user_store.create_user("alice", UserRole.USER)
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/nodes", headers={"Authorization": "Bearer cluster-tok"})
+        assert resp.status_code == 200
+
+    async def test_user_token_rejected_on_agent(self, tmp_path, monkeypatch):
+        """集群内部流量不携带用户令牌 — agent 路由拒 fmu_ 前缀。"""
+        from fusion_multi_node.security.audit_log import reset_audit_logger
+        from fusion_multi_node.security.permission import UserRole
+        from fusion_multi_node.security.user_store import UserStore
+
+        # agent 无 user_store (默认); 即便有, agent 路由也不该接受用户令牌
+        monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
+        monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
+        monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
+        reset_audit_logger()
+        # 先建用户拿令牌 (经独立 store), agent 不注入 user_store
+        store = UserStore()
+        store.create_user("alice", UserRole.USER)
+        tok = store.issue_token("alice")
+        server = AgentServer()
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/tasks", headers={"Authorization": f"Bearer {tok}"})
+        assert resp.status_code == 401
+        al = AuditLogger(log_path=str(tmp_path / "audit.log"))
+        fails = [e for e in al.read() if e["action"] == "auth_fail"]
+        assert any("节点路由" in e["detail"] for e in fails)
+
+    async def test_no_user_store_cluster_token_unchanged(self, tmp_path, monkeypatch):
+        """无 FUSION_USERS_FILE / users.json → load_user_store 返回 None → 纯 cluster_token。"""
+        from fusion_multi_node.security.audit_log import reset_audit_logger
+
+        monkeypatch.delenv("FUSION_USERS_FILE", raising=False)
+        monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
+        monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
+        reset_audit_logger()
+        server = MasterServer(shared_token="cluster-tok")
+        assert server._user_store is None
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/nodes", headers={"Authorization": "Bearer cluster-tok"})
+            bad = await c.get("/api/nodes", headers={"Authorization": "Bearer fmu_alice_x"})
+        assert resp.status_code == 200
+        # fmu_ 令牌无 user_store → 落显式拒分支 (用户令牌不可用于节点路由)
+        assert bad.status_code == 401
+
+    async def test_bootstrap_admin_env(self, tmp_path, monkeypatch):
+        from fusion_multi_node.security.audit_log import reset_audit_logger
+
+        monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
+        monkeypatch.setenv("FUSION_BOOTSTRAP_ADMIN", "rootadmin")
+        monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
+        monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
+        reset_audit_logger()
+        server = MasterServer(shared_token="cluster-tok")
+        store = server._user_store
+        assert store is not None
+        assert not store.is_empty()
+        assert store.get_user("rootadmin") is not None
+        assert store.get_user("rootadmin").role.value == "admin"
+
+
 # ── GAP-8: 权限强制校验默认开 ──
 
 

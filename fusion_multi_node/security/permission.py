@@ -19,6 +19,19 @@ class NodeRole(Enum):
     WORKER = "worker"
 
 
+class UserRole(Enum):
+    """用户层角色 (GAP-8 Phase F) — 与 NodeRole 正交, 管多租户 per-user RBAC。
+
+    ADMIN: 全部用户管理 (CRUD/签发/吊销令牌) + 任务操作
+    USER:  任务提交/取消/查询 + 推理 (/v1/chat/completions), 不可管理用户
+    VIEWER: 只读 (节点/任务列表/集群统计), 不可提交/取消/推理
+    """
+
+    ADMIN = "admin"
+    USER = "user"
+    VIEWER = "viewer"
+
+
 class Permission(Enum):
     NODE_REGISTER = "node:register"
     NODE_LIST = "node:list"
@@ -166,3 +179,96 @@ class PermissionManager:
     def remove_assignment(self, node_id: str) -> None:
         self._assignments.pop(node_id, None)
         logger.info(f"角色分配移除: {node_id}")
+
+
+# --- 用户层 RBAC (GAP-8 Phase F1) ---
+# UserRole 权限映射 — 与 NodeRole 正交。用户令牌仅 master 用户面路由用,
+# agent 路由拒 fmu_ 前缀 (集群内部流量从不携带用户凭据)。
+_USER_PERMISSION = "user_perm"  # 占位, 实际用下面的集合
+_USER_ROLE_PERMISSIONS: dict[UserRole, frozenset[str]] = {
+    UserRole.ADMIN: frozenset(
+        {
+            "user:manage",
+            "task:submit",
+            "task:cancel",
+            "task:list",
+            "task:migrate",
+            "task:degrade",
+            "node:list",
+            "cluster:stats",
+            "observability:read",
+            "chat:complete",
+        }
+    ),
+    UserRole.USER: frozenset(
+        {
+            "task:submit",
+            "task:cancel",
+            "task:list",
+            "node:list",
+            "cluster:stats",
+            "observability:read",
+            "chat:complete",
+        }
+    ),
+    UserRole.VIEWER: frozenset(
+        {
+            "task:list",
+            "node:list",
+            "cluster:stats",
+            "observability:read",
+        }
+    ),
+}
+
+# 用户面路由 → 所需权限。master handler 用 check_user_path_access 鉴权。
+# 注意: 用户管理路由 (CRUD/令牌) 仅 ADMIN; chat 路由 USER+。
+_USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
+    # 任务操作
+    ("POST", "/api/tasks/submit"): "task:submit",
+    ("POST", "/api/v1/tasks/submit"): "task:submit",
+    ("POST", "/api/tasks/cancel"): "task:cancel",
+    ("POST", "/api/v1/tasks"): "task:cancel",
+    ("GET", "/api/tasks"): "task:list",
+    ("GET", "/api/v1/tasks"): "task:list",
+    ("POST", "/api/tasks/migrate"): "task:migrate",
+    ("POST", "/api/v1/tasks/migrate"): "task:migrate",
+    ("POST", "/api/tasks/degrade"): "task:degrade",
+    ("POST", "/api/v1/tasks/degrade"): "task:degrade",
+    # 节点/集群只读
+    ("GET", "/api/nodes"): "node:list",
+    ("GET", "/api/v1/nodes"): "node:list",
+    ("GET", "/api/cluster/stats"): "cluster:stats",
+    ("GET", "/api/v1/cluster/stats"): "cluster:stats",
+    # 观测
+    ("GET", "/api/v1/observability/suggestions"): "observability:read",
+    ("GET", "/api/v1/observability/alerts"): "observability:read",
+    # 推理代理
+    ("POST", "/v1/chat/completions"): "chat:complete",
+    # 用户管理 (仅 ADMIN)
+    ("POST", "/api/v1/users"): "user:manage",
+    ("GET", "/api/v1/users"): "user:manage",
+    ("DELETE", "/api/v1/users"): "user:manage",
+    ("POST", "/api/v1/users/tokens"): "user:manage",
+    ("DELETE", "/api/v1/users/tokens"): "user:manage",
+}
+
+
+def check_user_path_access(role: UserRole, path: str, method: str = "GET") -> bool:
+    """用户层路径鉴权 — 查 (method, path) 所需权限, 验角色是否持有。
+
+    未登记路径 (集群内部路由/健康/文档) 默认放行 — 这些由 cluster_token 路径覆盖,
+    用户令牌不该到达; 到达也按放行交下层 node-RBAC 兜底。
+    """
+    perm = _USER_PATH_PERMISSION_MAP.get((method, path))
+    if perm is None:
+        # 路径前缀匹配 (带 id 的子路径, 如 /api/v1/users/<id>)
+        for (m, p), pm in _USER_PATH_PERMISSION_MAP.items():
+            if m == method and (path == p or path.startswith(p + "/")):
+                perm = pm
+                break
+    if perm is None:
+        return True
+    allowed = _USER_ROLE_PERMISSIONS.get(role, frozenset())
+    return perm in allowed
+
