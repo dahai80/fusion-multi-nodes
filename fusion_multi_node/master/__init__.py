@@ -16,7 +16,6 @@ from .cluster_master import (
     NodeInfo,
     NodeStatus,
     ParallelMode,
-    StandbyMaster,
     TaskStatus,
 )
 from .cluster_sync import (
@@ -91,7 +90,6 @@ __all__ = [
     "ShardResult",
     "ShardingStrategy",
     "ShardingType",
-    "StandbyMaster",
     "TaskPriority",
     "TaskShard",
     "TaskSharder",

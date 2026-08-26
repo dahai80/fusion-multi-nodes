@@ -149,6 +149,33 @@ class TestMasterServerObservability:
             assert len(data["suggestions"]) >= 1  # 默认 "集群运行正常" 建议
 
 
+class TestMasterServerAutoscalerNotWired:
+    """GAP-5 (审计 §7): autoscaler 未接线 → 路由显式 503 (非歧义 enabled:False)。"""
+
+    @pytest.mark.asyncio
+    async def test_get_config_503_not_wired(self):
+        master = ClusterMaster()
+        # _autoscaler 恒 None (零实例化) — 模拟现网
+        assert getattr(master, "_autoscaler", None) is None
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/autoscaler/config", headers=AUTH_HEADERS)
+            assert resp.status_code == 503
+            assert "not-wired" in resp.json()["detail"] or "未接线" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_put_config_503_not_wired(self):
+        master = ClusterMaster()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.put("/api/v1/autoscaler/config", json={"min_nodes": 1}, headers=AUTH_HEADERS)
+            assert resp.status_code == 503
+
+
 class TestMasterServerNodeManagement:
     @pytest.mark.asyncio
     async def test_register_node(self, client, master_server):
@@ -208,9 +235,7 @@ class TestMasterServerNodeManagement:
         assert server._approval_manager is not None
         transport = ASGITransport(app=server.app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await _register_node(
-                c, node_id="auto-1", ip_address="192.168.97.5"
-            )
+            resp = await _register_node(c, node_id="auto-1", ip_address="192.168.97.5")
         assert resp.status_code == 200, f"自动审批应放行: {resp.status_code} {resp.text}"
         assert "auto-1" in master.nodes
 
@@ -223,9 +248,7 @@ class TestMasterServerNodeManagement:
         assert server._approval_manager is not None
         transport = ASGITransport(app=server.app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await _register_node(
-                c, node_id="pend-1", ip_address="192.168.97.6"
-            )
+            resp = await _register_node(c, node_id="pend-1", ip_address="192.168.97.6")
         assert resp.status_code == 403, f"未配 env 应走审批门拒绝: {resp.status_code} {resp.text}"
         assert "pend-1" not in master.nodes
 
@@ -937,6 +960,7 @@ class TestConfigReload:
 
     def _write_config(self, path, tenant_max):
         import json as _json
+
         path.write_text(_json.dumps({"scheduling": {"tenant_max_concurrent": tenant_max}}))
 
     @pytest.mark.asyncio
