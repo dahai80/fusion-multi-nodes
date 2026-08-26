@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.7-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-943%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-946%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -722,6 +722,10 @@ FUSION_AUTO_APPROVE_PATTERNS="10.0.1." ./start.sh start
 ```
 
 > 生产仅对可信网段开放自动审批; 未配 env 则走手动审批门 (`fusion-multi-node cluster approve <node_id>`)。
+
+### 端口冲突明确报错 (v0.8.7)
+
+issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (与 fusion-comfyui 解冲突, `_STALE_PORT_MAP` 自动迁移旧配置)。本次补 bind 失败明确报错 — `AgentServer.start` / `MasterServer.start` 捕获 `OSError`, 对已知冲突端口 (comfyui 11445 / fusion-mlx 11432/11434 / master 11452 / mDNS 11450 / MCP 11446) 附提示 "(与 {服务} 默认端口冲突)", 非通用 bind 错误。测试: `test_start_port_conflict_raises_with_hint` (agent + master, mock uvicorn serve 抛 EADDRINUSE)。全量 946 passed 1 skipped。
 
 ### Phase 4 故障注入 E2E (v0.8.6)
 

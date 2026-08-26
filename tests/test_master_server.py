@@ -1,5 +1,7 @@
 """Master Server FastAPI coverage tests."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -578,3 +580,19 @@ class TestPrometheusMetrics:
         assert "fusion_cluster_nodes_total 0" in body
         assert "fusion_cluster_dispatch_latency_seconds_count 0" in body
         assert 'fusion_cluster_dispatch_latency_seconds{quantile="0.5"} 0.0000' in body
+
+
+class TestMasterServerStartPortConflict:
+    """issue #25: Master 端口被占用 → OSError 带冲突端口提示。"""
+
+    @pytest.mark.asyncio
+    async def test_start_port_conflict_raises_with_hint(self, master_server):
+        mock_uvicorn = MagicMock()
+        mock_config = MagicMock()
+        mock_server = MagicMock()
+        mock_server.serve = AsyncMock(side_effect=OSError(48, "Address already in use"))
+        mock_uvicorn.Config.return_value = mock_config
+        mock_uvicorn.Server.return_value = mock_server
+        with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+            with pytest.raises(OSError, match="11452.*Master"):
+                await master_server.start(host="127.0.0.1", port=11452)
