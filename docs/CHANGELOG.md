@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0-rc.1] - 2026-08-26 — Release Candidate
+
+> ⚠️ **RC 版本**: 企业生产商用前置披露补齐 + #31 重试节点规避。复审计 §8 发布条件 2/4/5 落地 (条件 1 CI 已于 v0.9.0 落地, 条件 3 mTLS 强制已落地 v0.9.0)。**非 GA** — GAP-1/6/5 企业残留 gap 仍未补齐 (见下 Phase C/D/E 计划)。
+
+### Added
+
+- **#31 重试节点规避: `exclude_nodes` 硬黑名单** (`server/master_server.py` / `master/cluster_master.py` / `master/task_spec.py`)
+  - `TaskSubmitRequest` / `ClusterTask` / `TaskSpec` 新增 `exclude_nodes: list[str]` 字段, 经 `to_dict`/`from_dict`/`_task_from_dict` round-trip (H3 持久化跨重启保留)
+  - `select_nodes`: LoadRouter 打分**前**过滤 `exclude_nodes` — 硬黑名单, 绝不回退到列表内节点。过滤后无候选 → 返回 `[]` + warning
+  - `assign_task`: 透传 `task.exclude_nodes` 到 `select_nodes`
+  - `_select_free_nodes_locked` (TOCTOU 补选): 补选同样遵守黑名单, 并发抢占补选不回退失败节点
+  - `preferred_node_id` 保持软提示 (LoadRouter `preferred_bonus`), 与硬黑名单正交
+  - **行为**: 重试时调用方把失败节点加入 `exclude_nodes` 重提, 调度选不同健康节点; 全部规避 → 入优先级队列 (P1-H) 而非派发黑名单节点。打破"重试回同一坏节点"死循环
+  - `tests/test_cluster_master.py` (5 用例): 黑名单过滤 / 全规避空候选 / preferred 软提示 / 端到端 assign_task 透传
+
+### Fixed
+
+- **GAP-4 CI 工作流修复** (复审计 §8 条件 1 补齐, v0.9.0 引入的 latent 缺陷)
+  - `pyproject.toml` `[test]`: 声明 `pytest-randomly>=3.15.0` — CI 跑 `pytest -p randomly` 但未声明依赖, 仅本地 venv 有, 全新 CI 安装 `ImportError: No module named 'randomly'`
+  - 3 个 Linux x86_64 runner 不兼容测试 skip-gate (Apple Silicon 目标项目, CI=ubuntu-latest):
+    - `tests/test_sandbox_executor.py::test_execute_in_sandbox_timeout`: unshare 需 CAP_SYS_ADMIN, CI 无权限 → 运行时 probe + skip
+    - `tests/test_core.py::test_collect_hardware`: 断言 `arch == arm64`, 非 darwin → skip
+    - `tests/test_real_network_e2e.py::test_container_cross_register_and_dispatch`: docker-compose 需 `FUSION_MLX_API_KEY` env, CI 无 → 扩展 skip-gate 要求该 env (CI 不跑真推理 E2E)
+
+### 补披露 — 复审计 §8 发布条件 2/4/5 (商用前置声明)
+
+> v0.9.0 判定 ⚠️ CONDITIONAL-READY。本 RC 补齐 3 项披露条件, 使单租户 LAN 场景可**带条件**商用。多租户/远程 SaaS + always-on SLA 仍阻塞 (见下)。
+
+- **条件 2 — GAP-1 HA SPOF 披露**: 默认单 Master 部署, Master 宕机集群不可用。`MasterElection` 选举为 opt-in (`start(ha_config={...})`), standby 仅同步任务 (不同步 nodes/kv/banned-set)。**不满足 always-on SLA**。生产 always-on 须: HA 默认开 + standby 全状态同步 (Phase C 计划)。当前适用: 可容忍短时不可用的单租户 LAN。
+- **条件 4 — GAP-6 吞吐上限声明**: 上游 fusion-mlx issue #635 — `--rate-limit 0` 不真正禁用 60rpm 限流器, 多节点高 QPS 压测被限。**单节点推理吞吐受上游 60rpm 限制**, 多节点线性扩展但单节点不突破。客户端高 QPS 须适配 429 (Phase D 计划: 客户端节流 + 文档声明)。
+- **条件 5 — GAP-5 死代码 + GAP-7 KV no-op 披露**:
+  - **GAP-5 死代码**: `autoscaler/` 路由静默返回 `enabled: False` (语义模糊); `mcp_gateway/` 未接线死代码 (待迁移 fusion-gateway #106); `cloud_fallback.py` 调度路径 v0.8.2 已切断 (模块+单测保留供独立验证, 待迁移); `StandbyMaster` 未接线死代码 (现网单 Master 无 HA)。Phase E 计划: 标注未实现 / 迁移 / 清理。
+  - **GAP-7 张量 KV no-op**: `ClusterMaster.sync_kv_cache` 返回 False (仅元数据同步, 非张量)。上游 fusion-mlx 无 KV 张量导出端点 (issue #650 已提, 阻塞 #33)。跨节点 KV 张量复用不可用; 当前 KV 仅本地预热 (`/api/kv/warm` 本地 `store_local`)。
+
+### 多租户 / 远程 SaaS 阻塞声明 (GAP-8 残留)
+
+- v0.9.0 修复审计日志 + 权限强制默认开, **但单一共享 Bearer token** (`~/.fusion/multi-node/.cluster_token`) 无 per-user RBAC。多租户/远程 SaaS 场景**不可用** — 须替换为多用户鉴权 + token 轮转 (Phase F 计划)。当前适用: 信任的单一运维团队的局域网。
+
+### Changed
+
+- `pyproject.toml` / `__init__.py`: 0.9.0 → 0.10.0rc1 (RC, 商用前置披露 = minor pre-release)
+- `pyproject.toml` `[test]`: 加 `pytest-randomly>=3.15.0`
+
 ## [0.9.0] - 2026-08-26
 
 ### Added
