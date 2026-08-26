@@ -263,31 +263,42 @@ class ClusterObservability:
     # ── 告警规则引擎 ──
 
     async def check_alert_rules(self, nodes: dict[str, Any]) -> list[Alert]:
-        """检查告警规则。"""
+        """检查告警规则。
+
+        P0-8: 每 tick 调用 (接 master 健康循环), 须去重 — 同 (node_id, title)
+        已有活跃告警则跳过, 否则每 10s 刷一条, deque 被同质告警灌满。
+        """
         new_alerts = []
+        active_keys = {(a.node_id, a.title) for a in self.alerts if not a.resolved}
 
         for node_id, node in nodes.items():
             # 节点离线
             if node.get("status") == "offline":
-                alert = self.create_alert(
-                    severity="critical",
-                    title=f"节点离线: {node_id}",
-                    message=f"节点 {node.get('hostname', node_id)} 已离线",
-                    node_id=node_id,
-                )
-                new_alerts.append(alert)
+                title = f"节点离线: {node_id}"
+                if (node_id, title) not in active_keys:
+                    alert = self.create_alert(
+                        severity="critical",
+                        title=title,
+                        message=f"节点 {node.get('hostname', node_id)} 已离线",
+                        node_id=node_id,
+                    )
+                    new_alerts.append(alert)
+                    active_keys.add((node_id, title))
 
             # 内存不足
             mem_available = node.get("available_memory_gb", 0)
             mem_total = node.get("total_memory_gb", 1)
             if mem_total > 0 and mem_available / mem_total < 0.1:
-                alert = self.create_alert(
-                    severity="warning",
-                    title=f"节点内存不足: {node_id}",
-                    message=f"可用内存仅 {mem_available:.1f}GB/{mem_total:.1f}GB",
-                    node_id=node_id,
-                )
-                new_alerts.append(alert)
+                title = f"节点内存不足: {node_id}"
+                if (node_id, title) not in active_keys:
+                    alert = self.create_alert(
+                        severity="warning",
+                        title=title,
+                        message=f"可用内存仅 {mem_available:.1f}GB/{mem_total:.1f}GB",
+                        node_id=node_id,
+                    )
+                    new_alerts.append(alert)
+                    active_keys.add((node_id, title))
 
         return new_alerts
 

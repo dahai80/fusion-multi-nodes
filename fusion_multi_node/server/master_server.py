@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from fusion_multi_node.master import (
     ClusterMaster,
@@ -34,7 +36,44 @@ from fusion_multi_node.utils.auth import (
     load_or_create_token,
 )
 
+if TYPE_CHECKING:
+    # P2-20 (审计 §6.8): /api/v1/config/reload 热加载 — 注入 ClusterConfig 类型提示。
+    from fusion_multi_node.config import ClusterConfig
+
 logger = logging.getLogger(__name__)
+
+# P1-17 (审计 §6.7): 多节点协议版本兼容校验。
+# master 接 agent 注册时比对 protocol_version — 低于 MIN 则拒 (schema 不匹配行为未定义),
+# 并给降级指引 (须升级至 >= MIN)。空串 (旧客户端/直测) 放行 + warn (灰度期向后兼容)。
+MIN_COMPAT_PROTOCOL_VERSION = "0.8.0"
+
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    """解析 '0.8.7' → (0, 8, 7); 非法段当 0。空串 → ()。"""
+    parts = []
+    for seg in v.split("."):
+        seg = seg.strip()
+        if seg.isdigit():
+            parts.append(int(seg))
+        else:
+            break
+    return tuple(parts)
+
+
+def _check_protocol_compat(agent_version: str) -> tuple[bool, str]:
+    """返回 (compatible, detail)。compatible=False 时 detail 为拒因+降级指引。"""
+    if not agent_version:
+        return True, "agent 未上报 protocol_version (旧客户端), 放行 (灰度兼容)"
+    av = _parse_version(agent_version)
+    mn = _parse_version(MIN_COMPAT_PROTOCOL_VERSION)
+    if not av:
+        return True, f"agent protocol_version 非标准格式 ({agent_version!r}), 放行 (灰度兼容)"
+    if av < mn:
+        return False, (
+            f"协议版本不兼容: agent {agent_version} < master 最低 {MIN_COMPAT_PROTOCOL_VERSION}。"
+            f"请升级该节点 fusion-multi-node 至 >= {MIN_COMPAT_PROTOCOL_VERSION} 后重新加入集群"
+        )
+    return True, f"协议版本兼容: agent {agent_version} >= {MIN_COMPAT_PROTOCOL_VERSION}"
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -60,6 +99,8 @@ class NodeRegisterRequest(BaseModel):
     device_model: str = ""
     uma_size_gb: float = 0.0
     mlx_version: str = ""
+    # P1-17 (审计 §6.7): 多节点协议版本 (fusion-multi-node __version__), master 比对兼容性。
+    protocol_version: str = ""
     role: str = "worker"
     tags: list[str] = []
     active_tasks: int = 0
@@ -156,11 +197,26 @@ class NodeResponse(BaseModel):
 class MasterServer:
     """集群 Master HTTP 服务。"""
 
-    def __init__(self, master: ClusterMaster | None = None, shared_token: str | None = None):
+    def __init__(
+        self,
+        master: ClusterMaster | None = None,
+        shared_token: str | None = None,
+        config: ClusterConfig | None = None,
+    ):
         self.master = master or ClusterMaster()
         self.app = FastAPI(title="Fusion Multi-Node Master", version=_VERSION)
         self._shared_token = shared_token or load_or_create_token()
+        # P2-20 (审计 §6.8): 持有 ClusterConfig 供 /api/v1/config/reload 热重载。
+        self._cluster_config = config
         self.app.add_middleware(BearerAuthMiddleware, shared_token=self._shared_token)
+        # P2-22 (审计 §3.8): Master 无限流 → /api/nodes/register /api/join /api/ha/vote
+        # /api/tasks/submit 无节流 → DoS + 审批队列 (max_pending=100) 耗尽。加全局限流。
+        # 阈值高于 agent (集群内部流量: heartbeat 10s×N 节点 + 派发), 120 req/60s/IP。
+        # 健康检查/指标/Prometheus 采集/SSE 高频或长连, 豁免避免误杀。
+        from fusion_multi_node.server.agent_server import InMemoryRateLimiter, RateLimitMiddleware
+
+        self._rate_limiter = InMemoryRateLimiter(max_requests=120, window_seconds=60.0)
+        self.app.add_middleware(RateLimitMiddleware, limiter=self._rate_limiter)
         self._permission_manager = PermissionManager()
         self._permission_manager.assign_role("master", NodeRole.MASTER, "system")
         self._uvicorn_server: Any | None = None
@@ -192,7 +248,27 @@ class MasterServer:
         @app.get("/api/health")
         @app.get("/health")
         async def health():
-            return {"status": "ok", "role": "master"}
+            # C11 (AR 审计 #24): liveness 不再恒 ok — 检本地依赖 (磁盘/内存/task-store 可写)。
+            # 仍快 (无 HTTP 出站, 无锁), 供 start.sh/docker healthcheck 起 master。
+            checks = self._liveness_checks()
+            ok = all(checks.values())
+            status = "ok" if ok else "degraded"
+            logger.debug(f"master liveness: {status} checks={checks}")
+            return {"status": status, "role": "master", "checks": checks}
+
+        @app.get("/api/health/deep")
+        @app.get("/health/deep")
+        async def health_deep():
+            # C11: readiness — liveness + 节点 quorum (≥1 ONLINE 节点)。
+            # 编排器/LB 据此 drain 半坏 master: 本机健康但无可用节点 → 不 ready。
+            checks = self._liveness_checks()
+            online_nodes = [n for n in self.master.nodes.values() if n.status == NodeStatus.ONLINE]
+            checks["node_quorum"] = len(online_nodes) > 0
+            checks["online_nodes"] = len(online_nodes)
+            ok = all(v for k, v in checks.items() if k != "online_nodes")
+            status = "ok" if ok else "degraded"
+            logger.info(f"master readiness: {status} checks={checks}")
+            return {"status": status, "role": "master", "checks": checks}
 
         # ── 集群同步 API (Issue #5) ──
 
@@ -243,7 +319,9 @@ class MasterServer:
             node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
-            report = self._sync_manager.collect_load_report()
+            # P1-10: collect_load_report 同步阻塞 (psutil.cpu_percent 100ms +
+            # system_profiler 至 10s) — async handler 内须 to_thread 移出 event loop (审计 §4.1)。
+            report = await asyncio.to_thread(self._sync_manager.collect_load_report)
             return report.to_dict()
 
         # M1-05 手动 IP 加入 — 走审批门，默认不自动注册
@@ -291,6 +369,13 @@ class MasterServer:
         async def register_node(req: NodeRegisterRequest):
             if not is_safe_path_segment(req.node_id):
                 raise HTTPException(status_code=400, detail="非法 node_id")
+            # P1-17 (审计 §6.7): 协议版本兼容校验 — 低于最低兼容版本拒注册并给降级指引。
+            ok, detail = _check_protocol_compat(req.protocol_version)
+            if not ok:
+                logger.warning(f"节点注册拒 (协议不兼容): {req.node_id} — {detail}")
+                raise HTTPException(status_code=400, detail=detail)
+            if req.protocol_version == "":
+                logger.info(f"节点 {req.node_id} {detail}")
             role = self._permission_manager.get_role(req.node_id)
             if role is not None and not await _check_permission(req.node_id, "/api/nodes/register", "POST"):
                 raise HTTPException(status_code=403, detail="权限不足: node register")
@@ -542,6 +627,39 @@ class MasterServer:
                 "tasks": [_task_to_resp(t) for t in all_tasks],
             }
 
+        # P1-18 (审计 §5.5): 任务状态 SSE 推送 — 客户端无需轮询即知 FAILED/COMPLETED。
+        # 必须注册在 /api/tasks/{task_id} 之前, 否则 "events" 被 path param 捕获。
+        # BearerAuthMiddleware 已覆盖 /api/* (仅豁免 health/docs), SSE 鉴权同其它端点。
+        @app.get("/api/tasks/events")
+        async def task_events():
+            async def event_stream():
+                q = self.master.subscribe_task_events()
+                logger.info("SSE /api/tasks/events 客户端连接")
+                try:
+                    yield 'event: ready\ndata: {"event":"ready"}\n\n'
+                    while True:
+                        try:
+                            payload = await asyncio.wait_for(q.get(), timeout=15.0)
+                        except TimeoutError:
+                            yield ": keepalive\n\n"
+                            continue
+                        yield f"event: {payload['event']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                except asyncio.CancelledError:
+                    logger.info("SSE /api/tasks/events 客户端断开")
+                    raise
+                finally:
+                    self.master.unsubscribe_task_events(q)
+
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+
         @app.get("/api/tasks/{task_id}")
         async def get_task(task_id: str):
             task = await self.master.get_task(task_id)
@@ -575,8 +693,13 @@ class MasterServer:
 
             async def _notify(client, nid, node):
                 try:
+                    # H2 (AR #24): 出站 SSRF 守卫 — 不裸 f-string, 走 build_safe_url+is_safe_peer_host
+                    if not is_safe_peer_host(node.ip_address):
+                        logger.warning(f"取消通知跳过非安全对端: {nid} ({node.ip_address!r})")
+                        return None
+                    url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/tasks/cancel")
                     resp = await client.post(
-                        f"{mtls_scheme()}://{node.ip_address}:{node.port}/api/tasks/cancel",
+                        url,
                         json={"task_id": task_id},
                         headers={
                             "Authorization": f"Bearer {self._shared_token}",
@@ -796,7 +919,13 @@ class MasterServer:
                             }
                         )
             if task.completed_at > 0:
-                event_type = "completed" if task.status == TaskStatus.COMPLETED else "failed"
+                # P3-29: PARTIAL 单独标事件类型 (非 failed — 有部分结果)
+                if task.status == TaskStatus.COMPLETED:
+                    event_type = "completed"
+                elif task.status == TaskStatus.PARTIAL:
+                    event_type = "partial"
+                else:
+                    event_type = "failed"
                 events.append(
                     {
                         "timestamp": task.completed_at,
@@ -923,6 +1052,32 @@ class MasterServer:
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
 
+        # ── P2-20 配置热加载 (审计 §6.8) ──
+        # 重读 config.json + 重应用运行时可调字段; 须重启字段 (端口/ha_config/mdns) 仅提示不生效。
+        @app.post("/api/v1/config/reload")
+        async def reload_config():
+            cfg = self._cluster_config
+            if cfg is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="config 热加载未启用: MasterServer 未注入 ClusterConfig (启动未传 config)",
+                )
+            try:
+                cfg.load()
+            except Exception as e:
+                logger.error(f"配置热加载失败: {e}")
+                raise HTTPException(status_code=500, detail=f"配置重载失败: {e}") from e
+            # 运行时可调字段重应用: 租户并发配额 (configure_scheduling)。
+            tenant_max = cfg.get("scheduling.tenant_max_concurrent", 4)
+            self.master.configure_scheduling(tenant_max)
+            logger.info(f"配置热加载完成: tenant_max_concurrent={tenant_max}")
+            return {
+                "status": "ok",
+                "reloaded": ["scheduling.tenant_max_concurrent"],
+                "restart_required": ["cluster.master_host", "cluster.master_port", "ha_config", "mdns"],
+                "config_path": cfg.config_path,
+            }
+
         # ── HA 双 Master 选举 + 任务同步 ──
         # POST /api/ha/vote — 对端 master 拉票, 透传 ClusterMaster.handle_vote_request。
         # POST /api/ha/sync-tasks — leader 推送任务快照, standby 合并落盘。
@@ -958,6 +1113,53 @@ class MasterServer:
                 raise HTTPException(status_code=400, detail="tasks 必须为列表")
             merged = await self.master.receive_synced_tasks(tasks)
             return {"status": "ok", "merged": merged}
+
+        # C1: Leader→Follower 心跳 — 维持 leader 权威, 防 follower 超时误判重选。
+        @app.post("/api/ha/heartbeat")
+        async def ha_heartbeat(req: dict):
+            leader_id = str(req.get("leader_id", ""))
+            term = int(req.get("term", 0))
+            if not leader_id:
+                raise HTTPException(status_code=400, detail="缺少 leader_id")
+            await self.master.handle_heartbeat(leader_id, term)
+            return {"status": "ok"}
+
+    def _liveness_checks(self) -> dict[str, Any]:
+        """C11: 本地 liveness 检查 — 磁盘可写 / 内存充足 / task-store 可写。
+
+        全本地无出站无锁, 供 /api/health (liveness) 与 /api/health/deep (readiness) 复用。
+        失败项进 checks 字典返回 (key→bool), 上层据此定 status。
+        """
+        checks: dict[str, Any] = {}
+        try:
+            import psutil
+
+            # 磁盘: task-store 所在分区剩余 > 512MB (绝对下限, 兼容 Mac APFS 容器占比失真)
+            store_dir = self.master._task_store_path.parent
+            if store_dir.exists():
+                usage = psutil.disk_usage(str(store_dir))
+                checks["disk_ok"] = usage.free > 512 * 1024 * 1024
+            else:
+                # 目录不存在视作可创建 — 写探针会建
+                checks["disk_ok"] = True
+            # 内存: 可用 > 256MB (master 自身常驻 + 任务簿)
+            mem = psutil.virtual_memory()
+            checks["mem_ok"] = mem.available > 256 * 1024 * 1024
+        except Exception as e:
+            logger.warning(f"liveness 资源采集失败: {e}")
+            checks["disk_ok"] = True
+            checks["mem_ok"] = True
+        # task-store 可写: 原子写探针 (写即删, 不污染 tasks.json)
+        try:
+            self.master._task_store_path.parent.mkdir(parents=True, exist_ok=True)
+            probe = self.master._task_store_path.with_suffix(".health_probe")
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            checks["task_store_writable"] = True
+        except Exception as e:
+            logger.warning(f"liveness task-store 写探针失败: {e}")
+            checks["task_store_writable"] = False
+        return checks
 
     async def start(self, host: str = "127.0.0.1", port: int = 11452, ssl_context=None) -> None:
         import uvicorn

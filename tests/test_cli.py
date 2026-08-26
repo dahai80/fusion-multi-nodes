@@ -182,22 +182,17 @@ class TestClusterCommands:
 
         old_master = cli_mod._master
         old_agent = cli_mod._agent
-        old_obs = cli_mod._observability
         try:
             mock_m = AsyncMock()
             mock_a = AsyncMock()
-            mock_o = AsyncMock()
             cli_mod._master = mock_m
             cli_mod._agent = mock_a
-            cli_mod._observability = mock_o
             await _async_cluster_stop()
             mock_m.stop.assert_called_once()
             mock_a.stop.assert_called_once()
-            mock_o.stop.assert_called_once()
         finally:
             cli_mod._master = old_master
             cli_mod._agent = old_agent
-            cli_mod._observability = old_obs
 
     @pytest.mark.asyncio
     async def test_async_cluster_stop_no_services(self):
@@ -205,16 +200,13 @@ class TestClusterCommands:
 
         old_master = cli_mod._master
         old_agent = cli_mod._agent
-        old_obs = cli_mod._observability
         try:
             cli_mod._master = None
             cli_mod._agent = None
-            cli_mod._observability = None
             await _async_cluster_stop()
         finally:
             cli_mod._master = old_master
             cli_mod._agent = old_agent
-            cli_mod._observability = old_obs
 
     def test_cluster_start_master(self, runner):
         with patch("fusion_multi_node.cli._async_cluster_start", new_callable=AsyncMock):
@@ -226,7 +218,6 @@ class TestClusterCommands:
         import fusion_multi_node.cli as cli_mod
 
         old_master = cli_mod._master
-        old_obs = cli_mod._observability
         try:
             mock_master = AsyncMock()
             mock_master.port = 11452
@@ -236,10 +227,10 @@ class TestClusterCommands:
                 patch("fusion_multi_node.cli.ClusterObservability", return_value=mock_obs),
             ):
                 await _async_cluster_start("master", "http")
-            assert True
+            # P0-8: obs 挂到 master._observability (非独立全局), start 内被 master.start 接管
+            assert mock_master._observability is mock_obs
         finally:
             cli_mod._master = old_master
-            cli_mod._observability = old_obs
 
     @pytest.mark.asyncio
     async def test_async_cluster_start_agent(self):

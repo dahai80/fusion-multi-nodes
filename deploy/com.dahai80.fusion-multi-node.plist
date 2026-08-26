@@ -44,13 +44,17 @@
     <dict>
         <key>PATH</key>
         <string>@@VENV_BIN@@:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- P1-16 (审计 §6.4): 应用日志走 RotatingFileHandler (10MB×5 有界) 落 @@LOGDIR@@/app_master.log -->
+        <key>FUSION_MULTINODE_LOG_FILE</key>
+        <string>@@LOGDIR@@/app_master.log</string>
     </dict>
 
     <key>WorkingDirectory</key>
     <string>@@REPO@@</string>
 
+    <!-- P1-16: stdout → /dev/null (应用日志已由文件 handler 落盘轮转, 避免无界增长); stderr 仍落盘捕获崩溃栈 -->
     <key>StandardOutPath</key>
-    <string>@@LOGDIR@@/stdout_master.launchd.log</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>@@LOGDIR@@/stderr_master.launchd.log</string>
 

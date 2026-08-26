@@ -132,6 +132,8 @@ class RateLimitMiddleware:
 
 
 class ExecuteRequest(BaseModel):
+    # P1-14 (审计 §5.3): task_id 供 agent 拒同 task_id 重复派发 (master 派发传真实 task_id)。
+    task_id: str = ""
     task_type: str = "inference"
     model_name: str = ""
     prompt: str = ""
@@ -192,6 +194,7 @@ class AgentServer:
             if not getattr(kv_manager, "_cluster_token", ""):
                 kv_manager._cluster_token = self._shared_token
         else:
+            # P1-9: 默认 manager 自带磁盘持久化路径 — agent 重启可恢复本地 KV 缓存 (审计 §6.3)。
             self.kv_manager = KVSharingManager(cluster_token=self._shared_token)
         self.app = FastAPI(title="Fusion Multi-Node Agent", version=_VERSION)
         self._rate_limiter = InMemoryRateLimiter()
@@ -245,7 +248,57 @@ class AgentServer:
         @app.get("/api/health")
         @app.get("/health")
         async def health():
-            return {"status": "ok"}
+            # C11 (AR 审计 #24): liveness 检本地 — fusion-mlx 端口探测 + 资源, 无 HTTP 出站。
+            checks: dict[str, Any] = {}
+            try:
+                import psutil
+
+                # 磁盘: 剩余 > 512MB (绝对下限, 兼容 Mac APFS 容器全盘占比失真)
+                checks["disk_ok"] = psutil.disk_usage("/").free > 512 * 1024 * 1024
+                checks["mem_ok"] = psutil.virtual_memory().available > 256 * 1024 * 1024
+            except Exception:
+                checks["disk_ok"] = True
+                checks["mem_ok"] = True
+            # fusion-mlx 端口探测 (本地 socket, 非 HTTP — 快, 供 healthcheck)
+            checks["fusion_mlx_port"] = bool(self.agent._check_service(self.agent.config.fusion_mlx_port))
+            ok = all(checks.values())
+            status = "ok" if ok else "degraded"
+            logger.debug(f"agent liveness: {status} checks={checks}")
+            return {"status": status, "role": "agent", "checks": checks}
+
+        @app.get("/api/health/deep")
+        @app.get("/health/deep")
+        async def health_deep():
+            # C11: readiness — liveness + 真 HTTP 探 fusion-mlx /v1/models。
+            # 编排器/LB 据此判定 agent 是否真能推理 (端口开≠模型就绪)。
+            checks: dict[str, Any] = {}
+            try:
+                import psutil
+
+                checks["disk_ok"] = psutil.disk_usage("/").free > 512 * 1024 * 1024
+                checks["mem_ok"] = psutil.virtual_memory().available > 256 * 1024 * 1024
+            except Exception:
+                checks["disk_ok"] = True
+                checks["mem_ok"] = True
+            checks["fusion_mlx_port"] = bool(self.agent._check_service(self.agent.config.fusion_mlx_port))
+            fusion_mlx_ok = False
+            try:
+                import httpx
+
+                url = (
+                    getattr(self.agent._backend, "base_url", None)
+                    or f"http://localhost:{self.agent.config.fusion_mlx_port}"
+                )
+                async with httpx.AsyncClient(timeout=2.0) as c:
+                    resp = await c.get(f"{url}/v1/models")
+                    fusion_mlx_ok = resp.status_code == 200
+            except Exception as e:
+                logger.debug(f"agent readiness fusion-mlx 探测失败: {e}")
+            checks["fusion_mlx_ready"] = fusion_mlx_ok
+            ok = all(checks.values())
+            status = "ok" if ok else "degraded"
+            logger.info(f"agent readiness: {status} checks={checks}")
+            return {"status": status, "role": "agent", "checks": checks}
 
         # ── 任务执行 ──
 
@@ -270,7 +323,8 @@ class AgentServer:
                 **pipeline_extra,
             }
             task = {
-                "task_id": "",
+                # P1-14: 透传真实 task_id (master 派发带入), 空=直接调用无追踪 (agent 分配匿名 id)。
+                "task_id": req.task_id,
                 "type": req.task_type,
                 "model": req.model_name,
                 "model_name": req.model_name,
@@ -364,6 +418,13 @@ class AgentServer:
         import uvicorn
 
         self._host = host
+        # P1-9: 启动恢复本地 KV 缓存 (审计 §6.3) — 落盘文件存在则读回预热。
+        try:
+            restored = self.kv_manager.load()
+            if restored:
+                logger.info(f"P1-9 Agent 启动恢复 KV 缓存: {restored} 条")
+        except Exception as e:
+            logger.warning(f"P1-9 Agent 启动恢复 KV 缓存失败 (不影响启动): {e}")
         ssl_kwargs = {}
         if ssl_context is None:
             from fusion_multi_node.security.mtls import server_ssl_kwargs
@@ -398,4 +459,9 @@ class AgentServer:
     async def stop(self) -> None:
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
+        # P1-9: 停服落盘本地 KV 缓存 (审计 §6.3) — 下次启动可恢复。
+        try:
+            self.kv_manager.save()
+        except Exception as e:
+            logger.warning(f"P1-9 Agent 停服落盘 KV 缓存失败: {e}")
         logger.info("Agent 服务已停止")

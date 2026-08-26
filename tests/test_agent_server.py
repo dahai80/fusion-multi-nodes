@@ -111,6 +111,44 @@ class TestHealthEndpoint:
         data = resp.json()
         assert data["status"] == "ok"
 
+    @pytest.mark.asyncio
+    async def test_health_liveness_checks_present(self, client):
+        # C11: liveness 带本地依赖检查 (disk/mem/fusion_mlx_port)
+        resp = await client.get("/api/health")
+        data = resp.json()
+        assert data["role"] == "agent"
+        assert "checks" in data
+        assert {"disk_ok", "mem_ok", "fusion_mlx_port"}.issubset(data["checks"].keys())
+
+    @pytest.mark.asyncio
+    async def test_health_deep_degraded_fusion_mlx_down(self, client):
+        # C11: readiness — fusion-mlx HTTP 探测失败 → degraded
+        resp = await client.get("/api/health/deep")
+        data = resp.json()
+        assert data["role"] == "agent"
+        assert data["checks"]["fusion_mlx_ready"] is False
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_health_deep_ok_fusion_mlx_up(self, mock_agent, mock_kv_manager):
+        # C11: readiness — mock fusion-mlx /v1/models 200 → ok
+        mock_agent._check_service.return_value = True
+        mock_agent._backend.base_url = "http://localhost:9999"
+        server = AgentServer(agent=mock_agent, kv_manager=mock_kv_manager, shared_token=TEST_TOKEN)
+        transport = ASGITransport(app=server.app)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        with patch("httpx.AsyncClient", MagicMock(return_value=mock_client)):
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.get("/api/health/deep")
+        data = resp.json()
+        assert data["checks"]["fusion_mlx_ready"] is True
+        assert data["status"] == "ok"
+
 
 class TestExecuteEndpoint:
     @pytest.mark.asyncio
@@ -424,3 +462,85 @@ class TestAgentServerStop:
         agent_server._uvicorn_server = mock_server
         await agent_server.stop()
         assert mock_server.should_exit is True
+
+
+class TestAgentServerKVPersistenceLifecycle:
+    # P1-9: AgentServer.start 恢复 KV 缓存, stop 落盘 — 真 KVSharingManager + tmp_path。
+    @pytest.mark.asyncio
+    async def test_start_loads_and_stop_saves_kv_cache(self, mock_agent, tmp_path):
+        import json
+
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
+        persist = tmp_path / "kv_cache.json"
+        # 先写一份已落盘的缓存 (模拟上一次运行 stop 时落盘)
+        mgr1 = KVSharingManager(enable_compression=False, persist_path=str(persist))
+        mgr1.store_local(
+            KVCacheEntry(
+                cache_id="c1",
+                model_name="m",
+                prompt_hash="h1",
+                prompt_prefix="Hello",
+                total_tokens=10,
+                total_size_bytes=512,
+                created_at=time.time(),
+                ttl_seconds=3600.0,
+                shards=[
+                    KVShard(
+                        shard_id="s1",
+                        model_name="m",
+                        layer_index=0,
+                        node_id="n1",
+                        token_count=10,
+                        size_bytes=512,
+                        created_at=time.time(),
+                    )
+                ],
+            )
+        )
+        assert mgr1.save() is True
+
+        # 新 server 用同一 persist_path — start() 应恢复 c1
+        mgr2 = KVSharingManager(enable_compression=False, persist_path=str(persist))
+        server = AgentServer(agent=mock_agent, kv_manager=mgr2, shared_token=TEST_TOKEN)
+        mock_uvicorn = MagicMock()
+        mock_uvicorn.Config.return_value = MagicMock()
+        mock_server = MagicMock()
+        mock_server.serve = AsyncMock()
+        mock_uvicorn.Server.return_value = mock_server
+        with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
+            await server.start(host="127.0.0.1", port=9999)
+        # 恢复后本地缓存应有 c1
+        assert mgr2.lookup_local("m", "h1") is not None
+
+        # 再存一条新缓存 → stop() 落盘应包含 c1 + c2
+        mgr2.store_local(
+            KVCacheEntry(
+                cache_id="c2",
+                model_name="m",
+                prompt_hash="h2",
+                prompt_prefix="World",
+                total_tokens=5,
+                total_size_bytes=256,
+                created_at=time.time(),
+                ttl_seconds=3600.0,
+                shards=[],
+            )
+        )
+        await server.stop()
+        data = json.loads(persist.read_text(encoding="utf-8"))
+        assert {e["cache_id"] for e in data["entries"]} == {"c1", "c2"}
+
+    @pytest.mark.asyncio
+    async def test_stop_saves_kv_cache(self, mock_agent, tmp_path):
+        import json
+
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
+        persist = tmp_path / "kv_cache.json"
+        mgr = KVSharingManager(enable_compression=False, persist_path=str(persist))
+        server = AgentServer(agent=mock_agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        await server.stop()
+        # 无缓存条目 → 落盘 0 条但文件应存在
+        assert persist.exists()
+        assert json.loads(persist.read_text(encoding="utf-8"))["entry_count"] == 0

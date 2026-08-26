@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,7 +16,12 @@ def setup_logger(
     level: int = logging.INFO,
     verbose: bool = False,
 ) -> logging.Logger:
-    """配置日志系统。"""
+    """配置日志系统。
+
+    P1-16 (审计 §6.4): 默认仅控制台 (StreamHandler, 兼容测试 1 handler 断言)。
+    设环境变量 FUSION_MULTINODE_LOG_FILE 时追加 RotatingFileHandler (10MB×5 上限),
+    落盘应用日志有界, 崩溃重启循环下不再无界填盘。start.sh / launchd plist 设此 env。
+    """
     if verbose:
         level = logging.DEBUG
 
@@ -22,13 +29,34 @@ def setup_logger(
     logger.setLevel(level)
     logger.handlers.clear()
 
-    handler = logging.StreamHandler(sys.stdout)
     if verbose:
         fmt = "[%(asctime)s] %(levelname)-8s %(name)s:%(lineno)d - %(message)s"
     else:
         fmt = "%(levelname)-8s %(message)s"
-    handler.setFormatter(logging.Formatter(fmt, datefmt="%H:%M:%S"))
+    formatter = logging.Formatter(fmt, datefmt="%H:%M:%S")
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+    log_file = os.environ.get("FUSION_MULTINODE_LOG_FILE")
+    if log_file:
+        try:
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(level)
+            logger.addHandler(file_handler)
+        except OSError as e:
+            # 落盘 handler 建失败不阻断启动 — 仍返回控制台 logger, 启动后可见此告警。
+            sys.stderr.write(f"[setup_logger] RotatingFileHandler 建失败 ({log_file}): {e}\n")
+            sys.stderr.flush()
 
     return logger
 

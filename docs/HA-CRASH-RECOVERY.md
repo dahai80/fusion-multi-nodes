@@ -1,8 +1,11 @@
 # HA 与崩溃恢复 (H2)
 
-> fusion-multi-node 现网为 **单 Master**。完整 Raft 多 Master HA 选举投票传输层未实现
-> (`StandbyMaster`/`MasterElection`/`setup_election` 为未接线原型, `start(ha_config=)` 默认关闭)。
+> fusion-multi-node **默认单 Master** 模式 (`_election is None`, `_is_leader=True`)。多 Master
+> HA 选举 (`MasterElection`/`setup_election`) **已接线** (P4 + P0-1): leader 心跳广播 + term/voted_for
+> 持久化 + 任务快照推 standby, 经 `start(ha_config={"enabled":True,...})` 显式启用; `StandbyMaster`
+> 仍为未接线死代码 (独立类, 与已接线的 `MasterElection` 分离)。默认部署不启用 HA。
 > 本文档描述 **务实 HA 路线**: 单 Master + launchd 进程守护 + H3 任务持久化 = 崩溃自愈, 不丢任务。
+> 多 Master HA 为技术预览, 非生产 SLA 承诺。
 
 ## 崩溃自愈链路
 
@@ -68,5 +71,5 @@ tail -f logs/stdout_master.launchd.log       # launchd 托管日志 (区别于 n
 ## 局限
 
 - 单 Master = SPOF, launchd 守护仅保证 **本机** 崩溃自愈, 不防整机宕机/网络分区。
-- 多 Master HA (跨机故障转移) 需 Raft 选举投票传输层, 当前未实现 — 不构成完整 HA 承诺。
-- 跨机 HA 上游需求未提 (现网架构无多 Master 部署场景); 本机崩溃自愈已覆盖主要故障模式。
+- 多 Master HA (跨机故障转移) 已接线但为 **技术预览** (非生产 SLA 验证): `start(ha_config=)` 显式配 peers 启动选举, leader 心跳 + 任务快照推 standby。生产关键负载仍建议单 Master + launchd + 定期备份。
+- 本机崩溃自愈 (launchd + H3) 已覆盖主要故障模式; 跨机故障转移为可选增强。

@@ -1,11 +1,13 @@
 """Master Server FastAPI coverage tests."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeStatus, ParallelMode, TaskStatus
+from fusion_multi_node.observability import ClusterObservability, LogEntry
 from fusion_multi_node.server.master_server import MasterServer
 
 TEST_TOKEN = "test-cluster-token"
@@ -44,6 +46,8 @@ def _register_node(client, node_id="n1", **kwargs):
         "cpu_cores": kwargs.get("cpu_cores", 12),
         "gpu_cores": kwargs.get("gpu_cores", 30),
     }
+    if "protocol_version" in kwargs:
+        payload["protocol_version"] = kwargs["protocol_version"]
     return client.post("/api/nodes/register", json=payload, headers=AUTH_HEADERS)
 
 
@@ -55,6 +59,94 @@ class TestMasterServerHealth:
         data = resp.json()
         assert data["status"] == "ok"
         assert data["role"] == "master"
+        # C11: liveness 带本地依赖检查 (disk/mem/task_store)
+        assert "checks" in data
+        assert data["checks"]["task_store_writable"] is True
+
+    @pytest.mark.asyncio
+    async def test_health_deep_degraded_no_nodes(self, client):
+        # C11: readiness — 无 ONLINE 节点 → degraded (node_quorum False)
+        resp = await client.get("/api/health/deep")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["role"] == "master"
+        assert data["checks"]["node_quorum"] is False
+        assert data["checks"]["online_nodes"] == 0
+        assert data["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_health_deep_ok_with_node(self, client, master_server):
+        # C11: 注册一节点 → readiness ok
+        await _register_node(client)
+        resp = await client.get("/api/health/deep")
+        data = resp.json()
+        assert data["checks"]["node_quorum"] is True
+        assert data["checks"]["online_nodes"] == 1
+        assert data["status"] == "ok"
+
+
+class TestMasterServerObservability:
+    """P0-8: Observability 接线后 /api/v1/observability/* 不再 503。"""
+
+    @pytest.mark.asyncio
+    async def test_routes_503_when_not_wired(self):
+        # 未接线 (master 未 start) → 503/empty (旧行为, 验 guard 仍在)
+        master = ClusterMaster()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/observability/logs/export", headers=AUTH_HEADERS)
+            assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_export_logs_ok_when_wired(self):
+        # 接线 → 200, 非空 logs 列表
+        import time
+
+        master = ClusterMaster()
+        master._observability = ClusterObservability()
+        master._observability.add_log(
+            LogEntry(timestamp=time.time(), node_id="n1", level="INFO", module="test", message="hello")
+        )
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/observability/logs/export", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["count"] >= 1
+            assert data["logs"][0]["message"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_alerts_ok_when_wired(self):
+        master = ClusterMaster()
+        master._observability = ClusterObservability()
+        master._observability.create_alert("warning", "t", "m", node_id="n1")
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/observability/alerts", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["count"] == 1
+            assert data["alerts"][0]["title"] == "t"
+
+    @pytest.mark.asyncio
+    async def test_suggestions_ok_when_wired(self):
+        master = ClusterMaster()
+        master._observability = ClusterObservability()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/observability/suggestions", headers=AUTH_HEADERS)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "suggestions" in data
+            assert len(data["suggestions"]) >= 1  # 默认 "集群运行正常" 建议
 
 
 class TestMasterServerNodeManagement:
@@ -193,6 +285,59 @@ class TestMasterServerNodeManagement:
         )
         # 未知节点应 fail visibly 返回 404, 不再静默吞错返 200
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_get_node_load_runs_sync_off_event_loop(self, client, master_server):
+        # P1-10 (审计 §4.1): collect_load_report 同步阻塞须在 to_thread 里跑,
+        # 不在事件循环线程 — 验证调用线程 ≠ 当前事件循环线程。
+        import threading
+
+        loop_thread = threading.get_ident()
+        seen_thread = {}
+
+        def fake_collect():
+            seen_thread["id"] = threading.get_ident()
+            report = MagicMock()
+            report.to_dict.return_value = {"cpu": 12.3, "mem": 40.0}
+            return report
+
+        await _register_node(client)
+        with patch.object(master_server._sync_manager, "collect_load_report", side_effect=fake_collect):
+            resp = await client.get("/api/nodes/n1/load", headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        assert seen_thread["id"] != loop_thread, "同步阻塞调用须移出事件循环 (to_thread)"
+
+
+class TestProtocolCompat:
+    # P1-17 (审计 §6.7): NodeRegisterRequest.protocol_version 比对, 拒不兼容并给降级指引。
+
+    @pytest.mark.asyncio
+    async def test_register_rejects_incompatible_version(self, client, master_server):
+        resp = await _register_node(client, protocol_version="0.7.0")
+        assert resp.status_code == 400
+        assert "协议版本不兼容" in resp.json()["detail"]
+        assert "0.8.0" in resp.json()["detail"]
+        assert "n1" not in master_server.master.nodes
+
+    @pytest.mark.asyncio
+    async def test_register_accepts_compatible_version(self, client, master_server):
+        resp = await _register_node(client, protocol_version="0.8.7")
+        assert resp.status_code == 200
+        assert "n1" in master_server.master.nodes
+
+    @pytest.mark.asyncio
+    async def test_register_accepts_empty_version_legacy(self, client, master_server):
+        # 空串 (旧客户端/直测) 放行 — 灰度期向后兼容, 不阻断。
+        resp = await _register_node(client)
+        assert resp.status_code == 200
+        assert "n1" in master_server.master.nodes
+
+    @pytest.mark.asyncio
+    async def test_register_accepts_nonstandard_version(self, client, master_server):
+        # 非标准格式版本 (非纯数字段) 放行 — 不误拒未知格式。
+        resp = await _register_node(client, protocol_version="dev-build")
+        assert resp.status_code == 200
+        assert "n1" in master_server.master.nodes
 
 
 class TestMasterServerTaskManagement:
@@ -596,3 +741,248 @@ class TestMasterServerStartPortConflict:
         with patch.dict("sys.modules", {"uvicorn": mock_uvicorn}):
             with pytest.raises(OSError, match="11452.*Master"):
                 await master_server.start(host="127.0.0.1", port=11452)
+
+
+class TestTaskEventBus:
+    """P1-18 (审计 §5.5): 任务状态 SSE 推送 — 事件总线 + /api/tasks/events 端点。"""
+
+    @pytest.mark.asyncio
+    async def test_finalize_failed_emits_event(self, master_server):
+        master = master_server.master
+        task = ClusterTask(
+            task_id="evt-fail",
+            name="fail-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            await master._finalize_task(task, success=False, error="boom", retryable=False)
+            payload = await asyncio.wait_for(q.get(), timeout=1.0)
+            assert payload["event"] == "failed"
+            assert payload["task_id"] == "evt-fail"
+            assert payload["error"] == "boom"
+            assert payload["status"] == "failed"
+        finally:
+            master.unsubscribe_task_events(q)
+
+    @pytest.mark.asyncio
+    async def test_finalize_completed_emits_event(self, master_server):
+        master = master_server.master
+        task = ClusterTask(
+            task_id="evt-ok",
+            name="ok-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            await master._finalize_task(task, success=True, error="", result={"r": 1})
+            payload = await asyncio.wait_for(q.get(), timeout=1.0)
+            assert payload["event"] == "completed"
+            assert payload["status"] == "completed"
+            assert payload["error"] == ""
+        finally:
+            master.unsubscribe_task_events(q)
+
+    @pytest.mark.asyncio
+    async def test_retry_exhaust_emits_failed(self, master_server):
+        master = master_server.master
+        task = ClusterTask(
+            task_id="evt-retry-exhaust",
+            name="retry-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        task._retry_count = master._max_retry_attempts
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            await master._finalize_task(task, success=False, error="transient", retryable=True)
+            payload = await asyncio.wait_for(q.get(), timeout=1.0)
+            assert payload["event"] == "failed"
+            assert "超限" in payload["error"]
+        finally:
+            master.unsubscribe_task_events(q)
+
+    @pytest.mark.asyncio
+    async def test_cancel_emits_event(self, master_server):
+        master = master_server.master
+        task = ClusterTask(
+            task_id="evt-cancel",
+            name="cancel-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            await master.cancel_task("evt-cancel", reason="user")
+            payload = await asyncio.wait_for(q.get(), timeout=1.0)
+            assert payload["event"] == "cancelled"
+            assert payload["status"] == "cancelled"
+        finally:
+            master.unsubscribe_task_events(q)
+
+    @pytest.mark.asyncio
+    async def test_full_queue_drops_oldest(self, master_server):
+        master = master_server.master
+        task = ClusterTask(
+            task_id="evt-overflow",
+            name="overflow-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            # 灌满队列 (maxsize=256) 后再 emit 一次, 不应抛 QueueFull
+            for i in range(256):
+                master._emit_task_event(task, "running")
+            master._emit_task_event(task, "running")
+            # 仍能消费到事件 (最旧被丢, 队列满 256)
+            drained = 0
+            while not q.empty():
+                await q.get()
+                drained += 1
+            assert drained == 256
+        finally:
+            master.unsubscribe_task_events(q)
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_stops_delivery(self, master_server):
+        master = master_server.master
+        task = ClusterTask(
+            task_id="evt-unsub",
+            name="unsub-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        master.unsubscribe_task_events(q)
+        master._emit_task_event(task, "running")
+        assert q.empty()
+
+    @pytest.mark.asyncio
+    async def test_sse_endpoint_registered_and_media_type(self, master_server):
+        # SSE 端点注册为 GET /api/tasks/events, 响应 media_type=text/event-stream。
+        # 不消费无限流体 (ASGITransport 下 StreamingResponse 无限生成器消费会死锁,
+        # 真实服务器的流式首帧验证留 E2E) — 此处验路由契约: 路径/方法/media_type。
+        routes = {r.path: r for r in master_server.app.routes}
+        assert "/api/tasks/events" in routes
+        route = routes["/api/tasks/events"]
+        assert route.methods is None or "GET" in route.methods
+        endpoint = route.endpoint
+        assert endpoint.__name__ == "task_events"
+        # StreamingResponse 的 media_type 在路由 endpoint 闭包内构造, 此处验端点存在即可。
+
+    @pytest.mark.asyncio
+    async def test_sse_endpoint_requires_auth(self):
+        master = ClusterMaster()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/tasks/events")
+            assert resp.status_code == 401
+
+
+class TestMasterRateLimit:
+    """P2-22 (审计 §3.8): Master 限流 — 超阈值返 429, 健康检查豁免。"""
+
+    @pytest.mark.asyncio
+    async def test_burst_returns_429(self):
+        # 阈值 120/60s → 第 121 个非豁免请求返 429。
+        master = ClusterMaster()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        server._approval_manager = None
+        # 压低阈值加速测试 (不依赖默认 120)。
+        server._rate_limiter._max = 5
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            codes = []
+            for _ in range(7):
+                r = await c.get("/api/nodes", headers=AUTH_HEADERS)
+                codes.append(r.status_code)
+            assert 429 in codes
+            assert codes.count(200) == 5
+
+    @pytest.mark.asyncio
+    async def test_health_exempt_from_ratelimit(self, client):
+        # 健康检查端点豁免限流 — 高频访问不返 429。
+        codes = []
+        for _ in range(15):
+            r = await client.get("/api/health")
+            codes.append(r.status_code)
+        assert all(c == 200 for c in codes)
+
+
+class TestConfigReload:
+    # P2-20 (审计 §6.8): /api/v1/config/reload 热加载 — 重读 config.json + 重应用租户配额。
+
+    def _write_config(self, path, tenant_max):
+        import json as _json
+        path.write_text(_json.dumps({"scheduling": {"tenant_max_concurrent": tenant_max}}))
+
+    @pytest.mark.asyncio
+    async def test_reload_reapplies_tenant_quota(self, tmp_path):
+        from fusion_multi_node.config import ClusterConfig
+
+        cfg_path = tmp_path / "config.json"
+        self._write_config(cfg_path, 8)
+        cfg = ClusterConfig(config_path=str(cfg_path))
+        master = ClusterMaster()
+        master.configure_scheduling(1)  # 初始非配置值
+        server = MasterServer(master=master, shared_token=TEST_TOKEN, config=cfg)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/api/v1/config/reload", headers=AUTH_HEADERS)
+            assert r.status_code == 200
+            assert r.json()["status"] == "ok"
+            assert master._tenant_max_concurrent == 8
+            # 改盘后再 reload, 新值生效 (无需重启)
+            self._write_config(cfg_path, 2)
+            r2 = await c.post("/api/v1/config/reload", headers=AUTH_HEADERS)
+            assert r2.status_code == 200
+            assert master._tenant_max_concurrent == 2
+
+    @pytest.mark.asyncio
+    async def test_reload_no_config_returns_503(self):
+        master = ClusterMaster()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN)  # 不传 config
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/api/v1/config/reload", headers=AUTH_HEADERS)
+            assert r.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_reload_requires_auth(self, tmp_path):
+        from fusion_multi_node.config import ClusterConfig
+
+        cfg_path = tmp_path / "config.json"
+        self._write_config(cfg_path, 4)
+        cfg = ClusterConfig(config_path=str(cfg_path))
+        master = ClusterMaster()
+        server = MasterServer(master=master, shared_token=TEST_TOKEN, config=cfg)
+        server._approval_manager = None
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/api/v1/config/reload")  # 无 Authorization
+            assert r.status_code == 401

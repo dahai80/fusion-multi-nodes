@@ -295,3 +295,128 @@ class TestDispatchIntegration:
         assert master.nodes[assigned].active_tasks == 0
 
 
+class FailingInferenceBackend(InferenceBackend):
+    """假推理后端 — chat 永远抛异常, 模拟 agent 内部错误 (OOM/坏模型)。
+
+    execute_task 捕获后返 {"error": ...} → master _dispatch_to_node 走 logic_fail 路径
+    (200+ok+result.error) → _dispatch_data 聚合为 PARTIAL (一成功一失败)。
+    """
+
+    async def chat(self, model, messages, temperature=0.7, max_tokens=4096, **kwargs):
+        raise RuntimeError("simulated backend failure")
+
+    async def embed(self, model, input_text, **kwargs):
+        raise RuntimeError("simulated backend failure")
+
+    async def health(self):
+        return False
+
+
+class TestPartialSuccess:
+    """P3-29 (审计 §5.9): DATA 并行部分节点成功 → PARTIAL 终态, 保留部分结果。"""
+
+    @pytest.fixture
+    async def cluster_partial(self, monkeypatch):
+        # SSRF 测试放行 — 仅测试作用域
+        monkeypatch.setattr(
+            "fusion_multi_node.master.cluster_master.is_safe_peer_host",
+            lambda host: True,
+        )
+        monkeypatch.setattr(
+            "fusion_multi_node.master.cluster_master.build_safe_url",
+            lambda scheme, host, port, path: f"{scheme}://{host}:{port}{path}",
+        )
+
+        # agent-a 成功, agent-b 失败 → PARTIAL
+        ok_backend = FakeInferenceBackend("agent-a")
+        agent_a = NodeAgent(
+            config=AgentConfig(node_id="agent-a", cluster_token=TEST_TOKEN, agent_port=AGENT_PORT_A),
+            backend=ok_backend,
+        )
+        server_a = AgentServer(agent=agent_a, shared_token=TEST_TOKEN)
+
+        fail_backend = FailingInferenceBackend()
+        agent_b = NodeAgent(
+            config=AgentConfig(node_id="agent-b", cluster_token=TEST_TOKEN, agent_port=AGENT_PORT_B),
+            backend=fail_backend,
+        )
+        server_b = AgentServer(agent=agent_b, shared_token=TEST_TOKEN)
+
+        port_to_app = {AGENT_PORT_A: server_a.app, AGENT_PORT_B: server_b.app}
+        routing_transport = PortRoutingTransport(port_to_app)
+
+        master = ClusterMaster(heartbeat_timeout=60.0)
+        master_server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        master_server._approval_manager = None
+
+        async def _fake_dispatch_http():
+            return AsyncClient(transport=routing_transport, timeout=10.0)
+
+        monkeypatch.setattr(master, "_get_dispatch_http", _fake_dispatch_http)
+        master._dispatch_token = TEST_TOKEN
+
+        try:
+            yield {
+                "master": master,
+                "ok_backend": ok_backend,
+                "routing_transport": routing_transport,
+            }
+        finally:
+            await master.stop()
+            await routing_transport.aclose()
+
+    @pytest.mark.asyncio
+    async def test_data_parallel_partial_success(self, cluster_partial):
+        """DATA 并行: agent-a 成功 + agent-b 失败 → PARTIAL, 保留 agent-a 的 output。
+
+        证明 P3-29 部分成功语义: 不浪费已成功节点工作, 不整任务 FAILED, 客户端可取
+        result.outputs 的部分结果。全失败才 FAILED (逻辑错误不重试)。
+        """
+        master = cluster_partial["master"]
+        ok_backend = cluster_partial["ok_backend"]
+        master_server = MasterServer(master=master, shared_token=TEST_TOKEN)
+        master_server._approval_manager = None
+
+        transport = ASGITransport(app=master_server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r1 = await _register_node(client, "agent-a", AGENT_PORT_A)
+            r2 = await _register_node(client, "agent-b", AGENT_PORT_B)
+            assert r1.status_code == 200 and r2.status_code == 200
+
+            task = ClusterTask(
+                task_id="task-partial",
+                name="partial-test",
+                mode=ParallelMode.DATA,
+                model_name="qwen-3b",
+                model_shards=[{"id": "s0"}, {"id": "s1"}],
+                task_type="inference",
+                params={"prompt": "hello", "messages": [], "max_tokens": 64, "temperature": 0.7},
+            )
+            ok = await master.assign_task(task)
+            assert ok
+            assert task.assigned_nodes == ["agent-a", "agent-b"]
+
+            await self._drain_dispatch(master)
+            final = await master.get_task(task.task_id)
+
+        assert final.status == TaskStatus.PARTIAL, (
+            f"期望 PARTIAL 实得 {final.status}: {final.error}"
+        )
+        # 保留成功节点的部分结果
+        assert len(final.result["outputs"]) == 1
+        assert final.result["outputs"][0]["content"] == "echo@agent-a:hello"
+        assert len(final.result["errors"]) == 1
+        assert "agent-b" in final.result["errors"][0]
+        # 成功节点确实执行
+        assert len(ok_backend.chat_calls) == 1
+        # active_tasks 回降
+        assert master.nodes["agent-a"].active_tasks == 0
+        assert master.nodes["agent-b"].active_tasks == 0
+
+    async def _drain_dispatch(self, master: ClusterMaster, timeout_s: float = 5.0) -> None:
+        deadline_iters = int(timeout_s * 20)
+        for _ in range(deadline_iters):
+            pending = [t for t in master._dispatch_tasks.values() if not t.done()]
+            if not pending:
+                return
+            await asyncio.sleep(0.05)

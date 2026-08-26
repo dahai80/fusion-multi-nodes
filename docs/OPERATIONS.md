@@ -1,0 +1,134 @@
+# 运维 Runbook (Operations)
+
+> P2-21 (审计 §6.9): 处置流程覆盖常见故障与运维操作。每节含 症状/诊断/处置/恢复验证。
+> 部署模式见 `docs/DEPLOYMENT.md`, 崩溃恢复见 `docs/HA-CRASH-RECOVERY.md`。
+
+## 诊断入口
+
+| 检查项 | 命令 | 正常 |
+|--------|------|------|
+| Master 健康 | `curl -sH "Authorization: Bearer $TOKEN" http://127.0.0.1:11452/api/health` | `status: ok` |
+| Master 深度健康 | `... /api/health/deep` | `status: ok` + node quorum |
+| Agent 健康 (本机) | `curl -sH "Authorization: Bearer $TOKEN" http://127.0.0.1:11458/api/health/deep` | `status: ok` + fusion-mlx 可达 |
+| 节点清单 | `... /api/nodes` | 在线节点 active |
+| 任务清单 | `... /api/tasks` | 无大量 PENDING 堆积 |
+| 进程 | `./start.sh status` / `launchctl list \| grep fusion-multi-node` | PID 在跑 |
+| 指标 | `... /api/v1/metrics` (Prometheus 文本) | — |
+| 告警 | `... /api/v1/observability/alerts` | 空 |
+
+数据目录 `~/.fusion/multi-node/`: `tasks.json` (H3 任务持久化) / `election_state.json` (选举 term/voted_for) / `kv_cache.json` (KV 缓存) / `config.json` / `.cluster_token` (mode 0600)。
+日志: `FUSION_MULTINODE_LOG_FILE` 指向文件 + RotatingFileHandler 10MB×5; 容器 `docker compose logs`。
+
+## 节点下线 (node down)
+
+**症状**: Master `/api/nodes` 某节点 `status: offline`; 派往该节点的任务超时重试。
+**诊断**: `GET /api/nodes/{node_id}` 看 `last_heartbeat`; 离线 3600s 后 Master 自动清理。
+**处置**:
+1. 登录该节点: `./start.sh status` (nohup) 或 `launchctl list | grep fusion` (launchd)。进程死 → `restart` / `install-launchd`。
+2. 进程在但 heartbeat 断 → 查 agent 日志 (网络/防火墙; 11458 端口可达性)。
+3. 节点硬件故障不可恢复 → Master 自动隔离 (心跳超时), 已派任务超时重派其他节点 (`_enqueue_retry`, 最多 1 次)。
+4. 调度侧: `select_nodes` 已跳过 `is_node_banned()` 节点 (S1 任务级熔断, dispatch 失败累计 ban)。
+**恢复验证**: `GET /api/nodes` 该节点回 `online` + `active_tasks` 正常。
+
+## Master 下线 (master down)
+
+**症状**: `11452` 不可达; 所有 agent 失去调度; CLI `cluster status` 超时。
+**诊断**: `./start.sh status` 退出码 1; `logs/stderr.log` 含崩溃栈。
+**处置**:
+1. nohup 模式: `./start.sh restart`。
+2. launchd 模式: KeepAlive 自动重启 (10s 节流); 若未重启查 `launchctl list` 退出码 + plist。
+3. docker-compose: `restart:unless-stopped` 自动重启; `docker compose logs master`。
+4. 启动后 H3 自动恢复: `_restore_tasks` 读 `tasks.json`, RUNNING→PENDING 重派, 不丢任务。
+**恢复验证**: `GET /api/health` `ok` + `GET /api/tasks` 在途任务已重派。
+**单 Master = SPOF**: launchd/docker 自愈仅本机崩溃, 整机宕机无 failover (除非启用多 Master HA, 见 DEPLOYMENT.md, 技术预览)。
+
+## 脑裂 (split brain)
+
+**症状**: 多 Master HA 模式下, 网络分区导致两个 leader。
+**诊断**: `election_state.json` term 抖动增长; `/api/ha/vote` 高频; standby `/api/tasks/submit` 返 503 与 leader 冲突。
+**处置**:
+1. **单 Master 模式无脑裂风险** (默认, `_election is None`)。
+2. 多 Master HA: 恢复网络分区 → 选举自动收敛 (Raft term 高者胜)。分区期间 standby 拒派发 (`assign_task` 返 False, submit 返 503) → 任务不双派。
+3. 持续不稳 → 退回单 Master: 停所有 standby, 主 Master `start(ha_config=None)` (默认单 Master)。
+**恢复验证**: `GET /api/ha/vote` 静默; 一个 leader `_is_leader=True`, 其余 standby。
+
+## 磁盘满 (disk full)
+
+**症状**: `GET /api/health` `degraded` (磁盘 <512MB); H3 落盘失败告警 `H3 任务持久化失败` (critical) + `task_persist_failed` 指标。
+**诊断**: `df -h ~/.fusion/multi-node/`; `/api/v1/observability/alerts` 看持久化告警。
+**处置**:
+1. 清理: 容器 `docker compose logs` 占盘 → 已配 json-file 10MB×3 (P1-16); 日志文件 `FUSION_MULTINODE_LOG_FILE` RotatingFileHandler 10MB×5; 删旧归档。
+2. `tasks.json` 过大 → 终态任务不落盘 (仅非终态), `_max_completed_tasks=1000` 内存上限; 必要时备份后清空 (见备份章节)。
+3. `kv_cache.json` → `_max_kv_cache=500` 内存上限 + TTL 过期; `save()` 跳过期条目。
+4. 清出空间后, 下次 `_persist_loop` (15s) 自动恢复落盘; 告警自清。
+**恢复验证**: `GET /api/health` `ok`; 持久化告警消失。
+
+## fusion-mlx 不可达
+
+**症状**: Agent `/api/health/deep` `degraded` (fusion-mlx `/v1/models` 不可达); DATA 并行推理任务 FAILED `httpx.ConnectError`。
+**诊断**: Agent 日志 `FusionMLXBackend` 连接错误; `FUSION_MLX_URL` 端口 (默认 11434, 本项目 config 默认 11432 — **实测固化一方**, 见 CLAUDE.md 端口表)。
+**处置**:
+1. `~/claude-home/fusion-mlx/start.sh status` — 进程/端口/已载模型。
+2. 停 → `start.sh start` (真实加载模型); 等待 `/v1/models` 返回模型列表。
+3. api_key 不匹配 → `FUSION_MLX_API_KEY` 须与 fusion-mlx 启用 key 一致 (401 = 漏带/错 key)。
+4. Master 侧: 推理失败任务 `report_fault` → 节点进熔断 ban 期, 不再派发; fusion-mlx 恢复后 ban 期过自动复派。
+**恢复验证**: Agent `/api/health/deep` `ok` + `/v1/models` 含目标模型 id。
+
+## 任务积压 (task backlog)
+
+**症状**: `GET /api/tasks` 大量 PENDING; 派发延迟; agent `active_tasks` 打满。
+**诊断**: `/api/v1/cluster/stats` 看 active/pending 计数; 各节点 `active_tasks` vs `max_tasks`。
+**处置**:
+1. 节点算力不足 → 扩容 agent (`docker compose up --scale agent=N` 或裸机新 Mac 加入)。
+2. 单 agent 并发瓶颈 → 调高 `FUSION_AGENT_MAX_TASKS` (压测时)。
+3. 租户配额限流 → `scheduling.tenant_max_concurrent` (热加载: `POST /api/v1/config/reload` 无需重启, P2-20)。
+4. 优先级倒置 → 提交任务带高 `priority` (优先级队列, P1-H)。
+5. 派往死节点卡住 → 任务超时 (`task.timeout_seconds`) 自动重试/FAILED; 确认节点熔断已生效。
+**恢复验证**: PENDING 计数下降; 派发延迟回正常基线 (`tests/test_load_stress.py` 压测基线参考)。
+
+## 版本升级 (upgrade)
+
+**症状/场景**: fusion-multi-node 版本升级 (协议兼容: agent 版本 ≥ `MIN_COMPAT_PROTOCOL_VERSION` 0.8.0, 否则注册被拒 400)。
+**处置**:
+1. 滚动升级 (推荐, 零停机): 先升 agent (旧 master 兼容新 agent 注册), 再升 master。agent 重注册带 `protocol_version` (=`__version__`)。
+2. 全量升级: 停 master → `git pull` + `pip install -e .` → `./start.sh restart` (H3 恢复在途任务)。agent 同步升。
+3. 降级: 旧 agent 连新 master — 低于 `MIN_COMPAT_PROTOCOL_VERSION` 注册返 400 + 降级指引; 空串/非标准放行 + warn (灰度兼容)。
+4. 配置迁移: `ClusterConfig.load()` 自动迁移旧端口 (`_migrate_stale_ports`) + 校验脏键回退默认, 无需手动改 `config.json`。
+**恢复验证**: `GET /api/health` `ok`; 所有 agent `/api/nodes` `online`; `protocol_version` 一致。
+
+## 备份与恢复 (backup/restore)
+
+**备份** (定期, 关键状态文件):
+```bash
+BACKUP=~/.fusion/multi-node-backup-$(date +%Y%m%d)
+mkdir -p "$BACKUP"
+cp ~/.fusion/multi-node/{tasks.json,election_state.json,kv_cache.json,config.json} "$BACKUP/" 2>/dev/null || true
+# .cluster_token 单独安全备份 (mode 0600)
+cp ~/.fusion/multi-node/.cluster_token "$BACKUP/" && chmod 600 "$BACKUP/.cluster_token"
+```
+**恢复**:
+```bash
+./start.sh stop
+cp "$BACKUP"/{tasks.json,election_state.json,kv_cache.json,config.json,.cluster_token} ~/.fusion/multi-node/
+chmod 600 ~/.fusion/multi-node/.cluster_token
+./start.sh start   # H3 _restore_tasks 恢复在途任务; election_state 恢复 term/voted_for
+```
+- `tasks.json`: 非终态任务 (RUNNING/MIGRATED/PENDING) → 启动重派; 终态不落盘。
+- `election_state.json`: 选举 term/voted_for (多 Master HA); 单 Master 模式无影响。
+- `kv_cache.json`: KV 缓存 (P1-9 持久化); 过期条目不恢复。
+- `config.json`: 集群配置 (含端口/HA/scheduling)。
+- `.cluster_token`: 集群共享密钥 — **所有节点必须一致**, 恢复后须同步全集群 (见 Token 轮换)。
+
+## Token 轮换 (token rotation)
+
+**场景**: 怀疑 token 泄露 / 定期轮换安全实践。共享 Bearer token = 唯一节点身份, 一处泄露全集群沦陷。
+**处置** (全集群同步, 须短暂停机或滚动):
+1. 生成新 token: `python -c "import secrets; print(secrets.token_urlsafe(32))"`。
+2. 全集群节点设 `FUSION_CLUSTER_TOKEN=<新值>` (env 优先于文件, `load_or_create_token` 读 env)。
+   - 裸机: 各 Mac 启动脚本/launchd plist env。
+   - docker-compose: `.env` 文件 `FUSION_CLUSTER_TOKEN` (P2-23, 未设启动失败)。
+3. 滚动重启: 先 master (`./start.sh restart`), 再各 agent。新旧 token 切换期间, 未更新节点鉴权 401 → 短暂离线。
+4. 或全停全启 (更安全, 无 401 窗口): 全节点停 → 设新 token → 全启。
+5. 删旧 token 文件: `rm ~/.fusion/multi-node/.cluster_token` (env 接管后文件不再用)。
+**恢复验证**: `GET /api/health` 带新 token 返 200; 旧 token 返 401; 所有 `/api/nodes` `online`。
+**加固**: 启用 mTLS (`FUSION_MTLS_ENABLED=1` + per-node cert) 减少单 token 依赖 — 见 README 安全边界表。

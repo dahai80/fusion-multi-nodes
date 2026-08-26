@@ -85,18 +85,24 @@ start() {
 
     if [[ "$ROLE" == "agent" ]]; then
         log_info "starting multi-node agent on ${AGENT_HOST}:${AGENT_PORT} (master ${MASTER_HOST}:${MASTER_PORT})..."
+        # P1-16 (审计 §6.4): 应用日志走 RotatingFileHandler (10MB×5 有界) 落 ${LOG_DIR}/app_${ROLE}.log,
+        # stdout 重定向 /dev/null (避免 nohup stdout.log 与文件 handler 重复无界增长); stderr 仍落盘捕获崩溃栈。
+        FUSION_MULTINODE_LOG_FILE="${LOG_DIR}/app_${ROLE}.log" \
         nohup fusion-multi-node node start --role agent \
             --host "$AGENT_HOST" --port "$AGENT_PORT" \
             --master-host "$MASTER_HOST" --master-port "$MASTER_PORT" \
             --no-mdns \
-            >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
+            >> /dev/null 2>> "$STDERR_LOG" &
         local pid=$!
         echo "$pid" > "$PID_FILE"
         log_info "launched agent (PID ${pid}), waiting for health..."
     else
         log_info "starting multi-node master on ${HOST}:${PORT}..."
+        # P1-16 (审计 §6.4): 应用日志走 RotatingFileHandler (10MB×5 有界) 落 ${LOG_DIR}/app_${ROLE}.log,
+        # stdout 重定向 /dev/null (避免 nohup stdout.log 与文件 handler 重复无界增长); stderr 仍落盘捕获崩溃栈。
+        FUSION_MULTINODE_LOG_FILE="${LOG_DIR}/app_${ROLE}.log" \
         nohup fusion-multi-node node start --role master --host "$HOST" --port "$PORT" --no-mdns \
-            >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
+            >> /dev/null 2>> "$STDERR_LOG" &
         local pid=$!
         echo "$pid" > "$PID_FILE"
         log_info "launched (PID ${pid}), waiting for health..."
