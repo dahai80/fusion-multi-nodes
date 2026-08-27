@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-08-27 — GAP-7 KV 张量跨节点传输 (close #33)
+
+> **`sync_kv_cache` 张量级跨节点传输交付**: 经可插拔张量后端编排骨 `/api/kv/export` → 目标
+> `/api/kv/import`, 返 `True`。合成后端 (默认, 确定性 `hashlib` 生张量, 无依赖) 满足 #33 验收
+> (张量 round-trip 跨 2 agent); MLX 真张量后端 env-gated (`FUSION_KV_TENSOR_BACKEND=mlx`)
+> 待上游 fusion-mlx issue #650 落地激活 — 404→降级合成 + warn (fail-visible, Rule 12)。
+> P3-28 / GAP-7 / issue #33 三项归一关闭。
+
+### Added
+
+- **KVShard 张量字段** (`distributed_mlx/kv_cache_sharing.py`) — S1, GAP-7
+  - `KVShard.tensor: bytes | None = None` 新字段 (metadata 不变, 张量是新 payload)。
+  - `_serialize_entry`/`_deserialize_entry` 扩展: tensor base64 随 JSON 传输 (压缩标记 `tensor_compress`: "caveman"/"none"); 无 tensor 旧 bundle 向后兼容 (tensor=None, 省略 key)。
+  - `KVSharingManager` ctor 加 `transport: KVTransportBackend | None` 注入 (默认合成); `export_bundle(cache_id, model_name)`/`import_bundle(bundle)` 新方法 (经 transport 产/存张量, store_local 预算门)。
+- **可插拔张量后端** (`distributed_mlx/kv_tensor_transport.py`) — S1, GAP-7 (新文件)
+  - `KVTransportBackend` Protocol (`export_tensor`/`import_tensor`/`name`/`close`)。
+  - `SyntheticKVTransport` (默认, name="synthetic"): 确定性 sha256-based 合成张量 (默认 512 字节, 同 seed 同字节, 不同 node_id 差异), 无 numpy 依赖, 纯本地。
+  - `MLXKVTransport` (env-gated `FUSION_KV_TENSOR_BACKEND=mlx`, name="mlx"): 调 fusion-mlx `/distributed/kv_cache/export|import` (待 #650); 404→降级合成 + warn。读 `FUSION_MLX_URL`/`FUSION_MLX_API_KEY`。
+  - `get_kv_transport()` 工厂读 env 选后端 (默认 "synthetic")。
+- **Agent export/import 路由** (`server/agent_server.py`) — S2, GAP-7
+  - `POST /api/kv/export` body `{cache_id, model_name}` → `{status, bundle}` (源本地缓存含张量)。
+  - `POST /api/kv/import` body `{bundle}` → `{status, stored}` (目标 store_local 预算门 + LRU)。
+  - `KVExportRequest`/`KVImportRequest` 请求模型。
+- **Master `sync_kv_cache` 真传输** (`master/cluster_master.py`) — S3, GAP-7
+  - 重写: 注册 KVCacheSyncMessage 元数据 → `_kv_lock` 快照 entry → 解析源 (`_snapshot_nodes`) + 目标 (显式或 `select_nodes(DATA, exclude_nodes=[src])`) → 双向 SSRF 守卫 (`is_safe_peer_host`) → 源 `/api/kv/export` (build_safe_url + Bearer + X-Node-Id/Role "master", timeout=max(30, size_mb*2+30)) → 目标 `/api/kv/import` → 成功注册 replica `KVCacheEntry(cache_id="{id}@{tgt}")` + LRU trim。返 True/False (任一跳失败/缺失 → False, 不谎报部分成功)。
+  - 加 `target_node_id=""` 可选参数 (空→自动选非源在线节点)。
+- **`/api/kv/sync` 路由** (`server/master_server.py`) — S3, GAP-7
+  - `POST /api/kv/sync` body `{cache_id, model_name, source_node_id, size_mb, target_node_id?}` → `{status, synced}` (Bearer 鉴权, standby 守卫 503, 审计 action `kv_sync`)。
+  - `KVSyncRequest` 请求模型。
+
+### Changed
+
+- `tests/test_new_features.py::TestKVCacheSyncMessage::test_sync_kv_cache_in_master` 改写 — 不再断言 "如实返回 False", 改为断言传输执行 (返 True + 目标查回张量); `test_sync_kv_cache_missing_entry` 保持 False。
+
+### Tests
+
+- **`tests/test_kv_tensor_serialize.py`** (新, 11 用例) — S1: KVShard.tensor round-trip / 无 tensor 向后兼容 / SyntheticKVTransport 确定性 / 不同 node_id 差异 / env 后端选择 / export/import_bundle 接张量。
+- **`tests/test_kv_export_import_routes.py`** (新, 6 用例) — S2: ASGI 路由 round-trip (PortRoutingTransport) / 预算拒 oversize / 缺缓存 404 / auth 401。
+- **`tests/test_kv_tensor_e2e.py`** (新, 4+1 skip) — S3: master 编排 2 agent 真 ASGI, 张量字节跨节点完整 / 自动选目标 / 缺 entry False; env-gated 真张量测试 skip (待 #650)。
+- `tests/test_master_server.py` 加 `test_kv_sync_route_missing_entry`。
+
+### Docs / Version
+
+- 版本 0.10.7 → **0.11.0** (`pyproject.toml`, `fusion_multi_node/__init__.py`)。
+- `__init__.py` 模块 docstring: 删 "张量级 KV 跨节点传输仍 no-op", 反映交付 + 上游 #650 gating。
+- README badge: version 0.10.7→0.11.0, tests 1181→1203; 头部 F5→GAP-7 发布块; R3/P3-28 标记交付。
+- 全量 `pytest tests/ -q`: **1203 passed**, 1 skipped, ruff clean。
+
+### 验收 (#33)
+
+1. `sync_kv_cache` 转真 KV 张量跨节点 + 返 True ✓
+2. 集成测试验张量 round-trip 跨 2 agent (`test_kv_tensor_e2e.py`) ✓
+3. README "Master 级 KV 张量同步为 no-op" → 交付 ✓
+
+### 风险 / 约束
+
+- **JSON 张量体积**: base64 压缩 shard 张量随 JSON — 大张量膨胀。缓解: Caveman 压缩默认开; `size_mb` 预算门拒 oversized; 路由 timeout 按 size_mb 缩放 (复用 P1-13 模式)。v0.11.0 无流式 (metadata+bundle 单 POST), 流式延后。
+- **上游依赖**: `MLXKVTransport` 在 #650 落地前为死代码 — 合成后端为始终可用默认, #33 验收不依赖上游。真张量为 env-gated bonus。
+- **100% 本地/离线**: 合成后端纯本地计算; `MLXKVTransport` 仅调本地 fusion-mlx (同节点/集群), 不引入云路径。
+
 ## [0.10.7] - 2026-08-27 — GAP-8 Phase F5: 令牌轮换 + 多租户运维 Runbook
 
 > **用户多活令牌轮换 + 集群共享令牌零停机滚动**: 用户令牌 rotate 签新留旧 (多活, 客户端灰度

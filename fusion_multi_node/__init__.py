@@ -21,8 +21,12 @@ and storage volumes.
   cluster_sync 被 master_server (LAN 模型清单同步) 复用 — 保留至迁移落地。
 - autoscaler: **未接线死代码** (零实例化, /api/v1/autoscaler/* 恒 404)。
 - PIPELINE 并行: 接 fusion-mlx `/distributed/*` (上游 issue #621/#630 已交付 closed),
-  多节点客户端存根已接 + 真 E2E 验证通过; 张量级 KV 跨节点传输 (sync_kv_cache) 仍 no-op (P3-28 长期, issue #33)。
+  多节点客户端存根已接 + 真 E2E 验证通过。
+- GAP-7 KV 张量跨节点传输 (v0.11.0, close #33): `sync_kv_cache` 经可插拔张量后端
+  (合成默认 / MLX 真张量 env-gated FUSION_KV_TENSOR_BACKEND=mlx 待上游 #650) 编排
+  源 agent /api/kv/export → 目标 /api/kv/import, 返 True。合成后端满足 #33 验收
+  (张量 round-trip), 真张量为 env-gated bonus。
 """
 
-__version__ = "0.10.7"
+__version__ = "0.11.0"
 __app_name__ = "Fusion-Multi-Node"

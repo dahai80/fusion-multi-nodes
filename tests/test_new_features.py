@@ -2414,22 +2414,141 @@ class TestKVCacheSyncMessage:
         assert restored.size_mb == 256.0
 
     def test_sync_kv_cache_in_master(self):
-        # R3: 元数据登记成功但张量传输未实现 (上游 fusion-mlx issue #621),
-        # sync_kv_cache 应如实返回 False, 不谎报同步成功。
+        # GAP-7 (#33): sync_kv_cache 实现张量跨节点传输 — 源 export → 目标 import → 返 True。
+        # 注入两 agent ASGI (源持有缓存) + 路由 transport, master 编排两端 HTTP。
         async def _test():
+            from httpx import ASGITransport, AsyncBaseTransport, AsyncClient, Request, Response
+
+            from fusion_multi_node.agent import AgentConfig, NodeAgent
+            from fusion_multi_node.distributed_mlx.kv_cache_sharing import (
+                KVCacheEntry as AgentKVEntry,
+            )
+            from fusion_multi_node.distributed_mlx.kv_cache_sharing import (
+                KVShard,
+            )
+            from fusion_multi_node.distributed_mlx.kv_tensor_transport import SyntheticKVTransport
+            from fusion_multi_node.server.agent_server import AgentServer
+
             cm = ClusterMaster()
             from fusion_multi_node.master.cluster_master import KVCacheEntry
 
+            # 注册 master 级 KV 条目 (源节点 n-src)
             entry = KVCacheEntry(
                 cache_id="c1",
                 model_name="llama-3b",
-                node_id="n1",
+                node_id="n-src",
                 created_at=time.time(),
-                size_mb=100.0,
+                size_mb=0.1,
             )
             await cm.register_kv_cache(entry)
-            result = await cm.sync_kv_cache("c1", "llama-3b", "n1", 100.0)
-            assert result is False
+
+            # 注册两个在线节点 (源 + 目标)
+            from fusion_multi_node.master.cluster_master import NodeInfo, NodeStatus
+
+            for nid, port in (("n-src", 33057), ("n-tgt", 33058)):
+                ni = NodeInfo(
+                    node_id=nid,
+                    hostname=nid,
+                    ip_address="127.0.0.1",
+                    port=port,
+                    status=NodeStatus.ONLINE,
+                )
+                async with cm._nodes_lock:
+                    cm.nodes[nid] = ni
+
+            # 两 agent server — 源预存缓存, 共享合成张量后端
+            from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
+            kv_src = KVSharingManager(
+                cluster_token="test-cluster-token",
+                transport=SyntheticKVTransport(tensor_size=128),
+            )
+            kv_src.store_local(
+                AgentKVEntry(
+                    cache_id="c1",
+                    model_name="llama-3b",
+                    prompt_hash="h1",
+                    prompt_prefix="Hi",
+                    total_tokens=16,
+                    total_size_bytes=256,
+                    created_at=time.time(),
+                    ttl_seconds=3600.0,
+                    shards=[
+                        KVShard(
+                            shard_id="s0",
+                            model_name="llama-3b",
+                            layer_index=0,
+                            node_id="n-src",
+                            token_count=16,
+                            size_bytes=256,
+                            created_at=time.time(),
+                            tensor=None,
+                            is_compressed=False,
+                        )
+                    ],
+                )
+            )
+            agent_src = NodeAgent(
+                config=AgentConfig(node_id="n-src", cluster_token="test-cluster-token", agent_port=33057),
+            )
+            server_src = AgentServer(agent=agent_src, kv_manager=kv_src, shared_token="test-cluster-token")
+            server_src._rate_limiter._max = 100000
+            kv_tgt = KVSharingManager(
+                cluster_token="test-cluster-token",
+                transport=SyntheticKVTransport(),
+            )
+            agent_tgt = NodeAgent(
+                config=AgentConfig(node_id="n-tgt", cluster_token="test-cluster-token", agent_port=33058),
+            )
+            server_tgt = AgentServer(agent=agent_tgt, kv_manager=kv_tgt, shared_token="test-cluster-token")
+            server_tgt._rate_limiter._max = 100000
+
+            class _Route(AsyncBaseTransport):
+                def __init__(self):
+                    self._c = {
+                        33057: AsyncClient(transport=ASGITransport(app=server_src.app), base_url="http://t"),
+                        33058: AsyncClient(transport=ASGITransport(app=server_tgt.app), base_url="http://t"),
+                    }
+
+                async def handle_async_request(self, request: Request) -> Response:
+                    c = self._c.get(request.url.port)
+                    if c is None:
+                        return Response(404)
+                    return await c.request(
+                        request.method,
+                        str(request.url),
+                        content=request.content,
+                        headers=dict(request.headers),
+                    )
+
+                async def aclose(self):
+                    for c in self._c.values():
+                        await c.aclose()
+
+            route = _Route()
+            cm._dispatch_http = AsyncClient(transport=route, timeout=30.0)
+            cm._dispatch_token = "test-cluster-token"
+
+            # SSRF 守卫拦 127.0.0.1 — 测试作用域放行 (与现有 dispatch E2E 一致)
+            # build_safe_url 调 utils.auth.is_safe_peer_host, master 调 cluster_master.is_safe_peer_host — 两处同放行
+            from fusion_multi_node.master import cluster_master as _cm_mod
+            from fusion_multi_node.utils import auth as _auth_mod
+
+            _orig_safe_cm = _cm_mod.is_safe_peer_host
+            _orig_safe_auth = _auth_mod.is_safe_peer_host
+            _cm_mod.is_safe_peer_host = lambda host: True
+            _auth_mod.is_safe_peer_host = lambda host: True
+            try:
+                result = await cm.sync_kv_cache("c1", "llama-3b", "n-src", 0.1, target_node_id="n-tgt")
+            finally:
+                _cm_mod.is_safe_peer_host = _orig_safe_cm
+                _auth_mod.is_safe_peer_host = _orig_safe_auth
+            await route.aclose()
+            await cm._dispatch_http.aclose()
+            assert result is True
+            # 目标本地查回张量
+            got = kv_tgt.lookup_local_by_id("c1")
+            assert got is not None and got.shards[0].tensor is not None
 
         asyncio.run(_test())
 

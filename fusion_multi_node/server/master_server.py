@@ -180,6 +180,15 @@ class KVRegisterRequest(BaseModel):
     ttl_seconds: float = 3600.0
 
 
+class KVSyncRequest(BaseModel):
+    # GAP-7 (#33): 跨节点 KV 张量同步请求 — master 编排源→目标传输。
+    cache_id: str
+    model_name: str
+    source_node_id: str
+    size_mb: float
+    target_node_id: str = ""
+
+
 class LoadUpdateRequest(BaseModel):
     node_id: str
     uma_used_ratio: float = 0.0
@@ -1164,6 +1173,30 @@ class MasterServer:
                 "size_mb": entry.size_mb,
                 "access_count": entry.access_count,
             }
+
+        @app.post("/api/kv/sync")
+        async def sync_kv(req: KVSyncRequest):
+            # GAP-7 (#33): 跨节点 KV 张量同步 — master 编排源 agent /api/kv/export → 目标 /api/kv/import。
+            # standby 守卫 (非 leader 拒绝派发型操作)。
+            if self.master._election is not None and not self.master._is_leader:
+                raise HTTPException(status_code=503, detail="standby master 不执行 KV 同步")
+            ok = await self.master.sync_kv_cache(
+                req.cache_id,
+                req.model_name,
+                req.source_node_id,
+                req.size_mb,
+                req.target_node_id,
+            )
+            self._audit.log(
+                actor="master",
+                action="kv_sync",
+                path="/api/kv/sync",
+                method="POST",
+                node_id=req.source_node_id,
+                result="ok" if ok else "failed",
+                detail=f"cache_id={req.cache_id} source={req.source_node_id} target={req.target_node_id or 'auto'}",
+            )
+            return {"status": "ok" if ok else "skip", "synced": 1 if ok else 0}
 
         # ── 集群统计 ──
 

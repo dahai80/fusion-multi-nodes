@@ -176,6 +176,17 @@ class KVWarmRequest(BaseModel):
     total_size_bytes: int = 0
 
 
+class KVExportRequest(BaseModel):
+    # GAP-7 (#33): 源节点导出 KV 张量 bundle — 含分片张量 (base64) 供跨节点传输。
+    cache_id: str
+    model_name: str = ""
+
+
+class KVImportRequest(BaseModel):
+    # GAP-7 (#33): 目标节点导入 KV 张量 bundle — store_local 预算硬门 (max_local_cache_mb + LRU)。
+    bundle: dict[str, Any]
+
+
 class TaskCancelRequest(BaseModel):
     task_id: str
 
@@ -498,6 +509,27 @@ class AgentServer:
         @app.get("/api/kv/stats")
         async def kv_stats():
             return self.kv_manager.get_stats()
+
+        @app.post("/api/kv/export")
+        async def kv_export(req: KVExportRequest):
+            # GAP-7 (#33): 源节点导出含张量的 bundle — 经 transport 后端产出分片张量并入元数据。
+            # 缓存不存在 → 404; 张量后端不可达 → bundle 仍含元数据 (张量缺, 目标降级存)。
+            bundle = await self.kv_manager.export_bundle(req.cache_id, req.model_name)
+            if bundle is None:
+                raise HTTPException(status_code=404, detail=f"KV 缓存未找到: {req.cache_id}")
+            logger.info(f"GAP-7 KV 张量导出: cache_id={req.cache_id} shards={len(bundle.get('shards', []))}")
+            return {"status": "ok", "bundle": bundle}
+
+        @app.post("/api/kv/import")
+        async def kv_import(req: KVImportRequest):
+            # GAP-7 (#33): 目标节点导入 bundle — import_bundle 反序列化 + 经后端装张量 + store_local 预算门。
+            # 超预算/解析失败 → stored=False (不静默吞, 调用方据 False 决策)。
+            try:
+                stored = await self.kv_manager.import_bundle(req.bundle)
+            except Exception as e:
+                logger.warning(f"GAP-7 KV 张量导入异常: {e}")
+                stored = False
+            return {"status": "ok" if stored else "skip", "stored": 1 if stored else 0}
 
         # ── 硬件信息 ──
 
