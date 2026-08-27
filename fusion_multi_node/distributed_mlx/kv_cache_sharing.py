@@ -280,6 +280,10 @@ class KVSharingManager:
                 f"KV 缓存条目过大: {entry.total_size_bytes / 1024:.1f}KB > 容量 {max_bytes / 1024:.1f}KB，拒绝存储"
             )
             return False
+        # P2-4 (审计 §6.3): 重复 cache_id 先回退旧条目字节 (防 import_bundle 重复导入累积重复计数)。
+        prev = self._local_cache.get(entry.cache_id)
+        if prev is not None:
+            self._local_size_bytes -= prev.total_size_bytes
         if self._local_size_bytes + entry.total_size_bytes > max_bytes:
             self._evict(entry.total_size_bytes)
         self._local_cache[entry.cache_id] = entry
@@ -549,6 +553,7 @@ class KVSharingManager:
             return None
         node_id = self._node_id_for_export(entry)
         # 为缺张量的分片经后端产出 (合成/MLX); 已有张量的分片直传 (避免重复生成)。
+        old_total = entry.total_size_bytes
         for shard in entry.shards:
             if shard.tensor is None:
                 tensor = await self._transport.export_tensor(cache_id, shard.model_name, node_id)
@@ -559,6 +564,10 @@ class KVSharingManager:
                     shard.size_bytes += len(tensor)
         # 张量并入条目总字节 (传输计费 + 目标内存预算)
         self._recompute_entry_size(entry)
+        # P2-4 (审计 §6.3): 张量并入后同步 _local_size_bytes — 旧实现仅改 entry.total_size_bytes
+        # 不调账 _local_size_bytes (LRU 预算跟踪器), 源侧 LRU gate (store_local/evict) 按旧小值
+        # 减账 → 实际占用超 max_local_cache_mb 无淘汰。导出侧条目已在本地缓存, 增量补账。
+        self._sync_local_size_delta(entry, old_total)
         bundle = self._serialize_entry(entry)
         logger.info(
             f"GAP-7 KV 导出 bundle: cache_id={cache_id} model={model_name} "
@@ -618,6 +627,7 @@ class KVSharingManager:
         # 先逐分片经后端产张量 (缺则合成/MLX), 收集元数据 + 张量字节 (张量小可一次产, 大则优化为分块)
         shard_metas = []
         tensors = []
+        old_total = entry.total_size_bytes
         for shard in entry.shards:
             if shard.tensor is None:
                 tensor = await self._transport.export_tensor(cache_id, shard.model_name, node_id)
@@ -632,6 +642,8 @@ class KVSharingManager:
             shard_metas.append(shard_d)
             tensors.append(t)
         self._recompute_entry_size(entry)
+        # P2-4 (审计 §6.3): 流式导出同样补账 _local_size_bytes (与 export_bundle 一致)。
+        self._sync_local_size_delta(entry, old_total)
         metadata = {
             "version": self.KV_STREAM_VERSION,
             "entry": {
@@ -750,6 +762,24 @@ class KVSharingManager:
             # size_bytes 已含张量 (export_bundle 并入), 此处汇总
             total += shard.size_bytes
         entry.total_size_bytes = total
+
+    def _sync_local_size_delta(self, entry: KVCacheEntry, old_total: int) -> None:
+        """P2-4 (审计 §6.3): 导出张量后把条目增量字节补账进 _local_size_bytes。
+
+        张量并入 entry.total_size_bytes (经 _recompute_entry_size), 但 _local_size_bytes
+        (LRU 预算跟踪器) 未同步 → store_local/evict 按旧小值减账, 实际占用超 max_local_cache_mb
+        无淘汰。此函数按 (新-旧) 差额补账; 条目不在本地缓存 (导出前已 pop) 则不调账。
+        """
+        delta = entry.total_size_bytes - old_total
+        if delta == 0:
+            return
+        if entry.cache_id in self._local_cache:
+            self._local_size_bytes += delta
+            self._dirty = True
+            logger.debug(
+                f"P2-4 KV 导出补账: cache_id={entry.cache_id} delta={delta}B "
+                f"_local_size_bytes={self._local_size_bytes}B"
+            )
 
     def _serialize_entry(self, entry: KVCacheEntry) -> dict:
         """序列化 KV 缓存条目供跨节点传输。

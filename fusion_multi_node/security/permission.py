@@ -318,18 +318,27 @@ def check_user_path_access(role: UserRole, path: str, method: str = "GET") -> bo
             if m == method and (path == p or path.startswith(p + "/")):
                 perm = pm
                 break
-    # F2: 动态 task 子路径 /api/tasks/{task_id}/<op> — op 在尾部, 非固定前缀。
+    # F2 / P2-8 (审计 §3.4): 动态 task 子路径 /api/tasks/{task_id}/<op> — op 在尾部, 非固定前缀。
     # 前缀匹配够不到 (path=/api/tasks/ghost/cancel 不 startswith /api/tasks/cancel/)。
-    # 按 task 父路径 + 尾部 op 联合判定: /api/tasks 分段后末段为 cancel/migrate/degrade 即命中。
-    if perm is None and path.startswith("/api/tasks/"):
+    # 按 task 父路径 + 尾部 op 联合判定: /api/tasks|/api/v1/tasks 分段后:
+    #   - POST 尾部 op (cancel/migrate/degrade) → 各自写权限 (USER/ADMIN, VIEWER 拒)
+    #   - GET 尾部 op (progress/timeline) 或纯 {task_id} 详情 → 父读权限 task:list (VIEWER 可读)
+    #   - 其他未知 op → perm 仍 None → 下方 fail-closed 拒 (P1-5, 非白名单不继承放行)
+    # 旧 F2 仅覆盖 cancel/migrate/degrade 3 op, GET 读子路径 (progress/timeline) 无登记
+    # → 走 fail-closed (或路由根本未调 RBAC, 见 master_server 补 _enforce_user_rbac)。
+    # P2-8 补全: 尾部 op 全覆盖 — 写 op 各自权限, 读 op 继承父 task:list。
+    if perm is None and (path.startswith("/api/tasks/") or path.startswith("/api/v1/tasks/")):
         tail = path.rsplit("/", 1)[-1]
-        op_perm = {
-            "cancel": "task:cancel",
-            "migrate": "task:migrate",
-            "degrade": "task:degrade",
-        }.get(tail)
-        if op_perm is not None:
-            perm = op_perm
+        if method in ("POST", "PUT", "DELETE"):
+            op_perm = {
+                "cancel": "task:cancel",
+                "migrate": "task:migrate",
+                "degrade": "task:degrade",
+            }.get(tail)
+            if op_perm is not None:
+                perm = op_perm
+        else:  # GET — 读子路径 (progress/timeline) 或纯 {task_id} 详情 → 父读权限
+            perm = "task:list"
     if perm is None:
         # P1-5: fail-closed — 未登记路径拒用户令牌 (不再默认放行)。
         logger.warning(f"用户 RBAC 未登记路径, fail-closed 拒绝: {method} {path} role={role.value}")

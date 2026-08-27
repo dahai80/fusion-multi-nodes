@@ -236,3 +236,44 @@ class TestRealTensorE2EGated:
         ok = await t.import_tensor("c-real", "llama-1b", exported, "agent-a")
         await t.close()
         assert ok is True
+
+
+class TestP2_2MlxTransportSSRF:
+    # P2-2 (审计 §3.5): MLXKVTransport 构造校验出站 host — 云元数据/链路本地 host
+    # raise RuntimeError fail-closed; localhost/127.0.0.1/私网合法放行。
+
+    def test_default_localhost_allowed(self, monkeypatch):
+        monkeypatch.delenv("FUSION_MLX_URL", raising=False)
+        t = MLXKVTransport()  # 默认 http://localhost:11432 → 合法
+        assert t._base_url == "http://localhost:11432"
+
+    def test_explicit_127_allowed(self):
+        t = MLXKVTransport(base_url="http://127.0.0.1:11432")
+        assert t._base_url == "http://127.0.0.1:11432"
+
+    def test_private_lan_allowed(self):
+        t = MLXKVTransport(base_url="http://192.168.1.50:11432")
+        assert "192.168.1.50" in t._base_url
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            "http://169.254.169.254:80",  # 云元数据链路本地
+            "http://0.0.0.0:80",  # 未指定
+            "http://224.0.0.1:80",  # 多播
+        ],
+    )
+    def test_restricted_hosts_raise(self, evil):
+        with pytest.raises(RuntimeError, match="SSRF"):
+            MLXKVTransport(base_url=evil)
+
+    def test_env_url_evil_host_raises(self, monkeypatch):
+        monkeypatch.setenv("FUSION_MLX_URL", "http://169.254.169.254:80")
+        with pytest.raises(RuntimeError, match="SSRF"):
+            MLXKVTransport()
+
+    def test_env_url_good_host_allowed(self, monkeypatch):
+        monkeypatch.setenv("FUSION_MLX_URL", "http://localhost:11432")
+        t = MLXKVTransport()
+        assert t._base_url == "http://localhost:11432"
+        assert t._client is None  # 构造不发请求, 惰性 client

@@ -566,3 +566,89 @@ class TestAgentServerKVPersistenceLifecycle:
         # 无缓存条目 → 落盘 0 条但文件应存在
         assert persist.exists()
         assert json.loads(persist.read_text(encoding="utf-8"))["entry_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_p2_3_stop_calls_kv_manager_close(self, mock_agent, tmp_path):
+        """P2-3 (审计 §6.3): AgentServer.stop 调 kv_manager.close() 关 httpx + 张量后端,
+        修资源泄漏 (旧 stop 仅 save 不 close)。用真 KVSharingManager + 注入未关 httpx 客户端验 close 生效。"""
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
+        mgr = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
+        # 触发 _get_http_client 创建 httpx 客户端 (模拟用过跨节点路径)。
+        client = await mgr._get_http_client(5.0)
+        assert client is not None and not client.is_closed
+        server = AgentServer(agent=mock_agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        await server.stop()
+        # close() 后 httpx 客户端已关 (句柄释放, 非泄漏)。
+        assert client.is_closed
+
+    @pytest.mark.asyncio
+    async def test_p2_3_stop_close_failure_does_not_raise(self, mock_agent, tmp_path):
+        """P2-3: kv_manager.close() 抛异常 → stop 不传播 (catch + warning, 不拖垮停服)。"""
+        mgr = MagicMock()
+        mgr.save.side_effect = RuntimeError("盘满")
+        mgr.close = AsyncMock(side_effect=RuntimeError("关连接失败"))
+        server = AgentServer(agent=mock_agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        # save + close 均抛, stop 仍正常返回 (两步各自 try/except 容错)。
+        await server.stop()
+        mgr.save.assert_called_once()
+        mgr.close.assert_awaited_once()
+
+
+class TestP3_2KVSaveAlert:
+    """P3-2 (审计 §6.11): AgentServer.stop KV 落盘失败升 critical + 上报 master 故障。"""
+
+    @pytest.mark.asyncio
+    async def test_save_failure_reports_fault(self, tmp_path):
+        # save() 抛异常 → critical 日志 + report_fault 上报 master (best-effort)。
+        mgr = MagicMock()
+        mgr.save.side_effect = RuntimeError("盘满")
+        mgr.close = AsyncMock()
+        agent = MagicMock()
+        agent.config = AgentConfig(node_id="n1")
+        agent.report_fault = AsyncMock(return_value=True)
+        server = AgentServer(agent=agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        await server.stop()
+        mgr.save.assert_called_once()
+        agent.report_fault.assert_awaited_once()
+        kwargs = agent.report_fault.await_args.kwargs
+        assert kwargs.get("fault_type") == "kv_persist_failed"
+
+    @pytest.mark.asyncio
+    async def test_save_returns_false_reports_fault(self, tmp_path):
+        # save() 返 False (落盘内部失败不抛) → 同样上报故障。
+        mgr = MagicMock()
+        mgr.save.return_value = False
+        mgr.close = AsyncMock()
+        agent = MagicMock()
+        agent.config = AgentConfig(node_id="n1")
+        agent.report_fault = AsyncMock(return_value=True)
+        server = AgentServer(agent=agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        await server.stop()
+        agent.report_fault.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_save_success_no_fault(self, tmp_path):
+        # save() 成功 → 不上报故障 (避免噪声)。
+        mgr = MagicMock()
+        mgr.save.return_value = True
+        mgr.close = AsyncMock()
+        agent = MagicMock()
+        agent.config = AgentConfig(node_id="n1")
+        agent.report_fault = AsyncMock(return_value=True)
+        server = AgentServer(agent=agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        await server.stop()
+        agent.report_fault.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_report_fault_failure_does_not_break_stop(self, tmp_path):
+        # report_fault 自身失败 (停服期 master 不可达) → 不传播, stop 正常返回。
+        mgr = MagicMock()
+        mgr.save.return_value = False
+        mgr.close = AsyncMock()
+        agent = MagicMock()
+        agent.config = AgentConfig(node_id="n1")
+        agent.report_fault = AsyncMock(side_effect=RuntimeError("master 不可达"))
+        server = AgentServer(agent=agent, kv_manager=mgr, shared_token=TEST_TOKEN)
+        await server.stop()
+        mgr.close.assert_awaited_once()

@@ -37,7 +37,7 @@ master = ClusterMaster(host="127.0.0.1", port=11452)
 | `assign_task` | `(task: ClusterTask) -> bool` | Assign task to best node; queues PENDING if no nodes |
 | `complete_task` | `(task_id: str, error: str = None) -> ClusterTask` | Complete or fail a task |
 | `cancel_task` | `(task_id: str) -> bool` | Cancel a pending/running task (recursive sub_tasks) |
-| `migrate_task` | `(task_id: str) -> bool` | Migrate task to another node |
+| `migrate_task` | `(task_id: str) -> bool` | Manually migrate task to another node (转 MIGRATED → 重派). **注**: MIGRATED 语义亦由 P1-15 自动路径满足 — 节点 OFFLINE 时其 RUNNING 任务自动转 PENDING + 源节点并入 `exclude_nodes` 重派 (等价自动迁移), 手动 API 为显式运维操作 |
 | `degrade_task` | `(task_id: str) -> bool` | Degrade model (chain 70b→...→1b, max 2) |
 | `check_heartbeat` | `() -> list[str]` | Check all nodes, return stale node IDs |
 | `find_kv_cache` | `(model: str, prompt_hash: str) -> KVCacheEntry or None` | Look up KV cache by model+hash |
@@ -84,6 +84,8 @@ master = ClusterMaster(host="127.0.0.1", port=11452)
 | `NodeStatus` | `OFFLINE`, `ONLINE`, `BUSY`, `FAULT` |
 | `ParallelMode` | `PIPELINE`, `DATA` |
 | `TaskStatus` | `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `MIGRATED`, `TIMEOUT`, `PARTIAL`, `CANCELLED` |
+
+> **MIGRATED 语义** (P3-3 校准): 由手动 `migrate_task` API 与 P1-15 自动路径共同设置 — 节点 OFFLINE 时其 RUNNING 任务经 `_refresh_node_statuses` 自动转 PENDING + 源节点并入 `exclude_nodes` 重派 (等价自动迁移), 非"仅手动"。手动 API 保留显式运维迁移。
 
 ---
 

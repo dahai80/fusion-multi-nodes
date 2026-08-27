@@ -321,7 +321,8 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         # P0-8: 注入带配置 retention 的 Observability (master.start 接生命周期 + 路由)。
         # 原独立 _observability 全局不挂 master → /api/v1/observability/* 恒 503。
         _master._observability = ClusterObservability(
-            retention_hours=_get_config().get("observability.retention_hours", 168.0)
+            retention_hours=_get_config().get("observability.retention_hours", 168.0),
+            persist=_get_config().get("observability.persist", False),
         )
         await _master.start()
 

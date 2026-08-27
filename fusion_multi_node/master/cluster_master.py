@@ -359,6 +359,69 @@ class ClusterMaster:
             logger.info(f"节点手动解封: {node_id}")
         return removed
 
+    async def _probe_banned_nodes(self) -> None:
+        """P2-5 (审计 §5.9): ban 期满节点主动健康探测。
+
+        旧实现 ban 到期仅被动解封 — 下次 select_nodes 调 _is_node_banned 才惰性清条目,
+        但坏节点不会主动恢复, 持续 ban 的节点错过恢复窗直到有任务再派它才试。
+        此处在 _health_check_loop 内对到期 ban 节点发轻量 GET /api/health:
+          - 探测 OK (HTTP 200) → unban_node 解封 + 清故障计数, 节点立即可派;
+          - 探测失败 (连接拒/超时/非 200) → 续 ban 一周期 (_BAN_DURATION_S), 不放回坏节点。
+
+        锁内仅快照到期 ban 节点 + NodeInfo (ip/port), 锁外发 HTTP (不持锁 await, 避阻塞)。
+        无 NodeInfo 的纯字符串 ban (历史/外部 ban) 跳过 — 无地址不可探。
+        """
+        now = time.time()
+        # 锁内快照: 到期 ban 节点 id + 对应 NodeInfo (取 ip/port 供探测)。
+        probes: list[tuple[str, NodeInfo]] = []
+        async with self._nodes_lock:
+            for nid, unban_at in list(self._banned_nodes.items()):
+                if now < unban_at:
+                    continue
+                node = self.nodes.get(nid)
+                if node is None:
+                    # 无 NodeInfo 的 ban (外部 ban/已清理节点) — 惰性清条目即可, 不探测。
+                    self._banned_nodes.pop(nid, None)
+                    self._fault_counts.pop(nid, None)
+                    logger.info(f"P2-5 ban 到期节点 {nid} 无 NodeInfo, 惰性清 ban 条目")
+                    continue
+                probes.append((nid, node))
+        if not probes:
+            return
+        client = await self._get_dispatch_http()
+        token = self._get_dispatch_token()
+        for nid, node in probes:
+            ok = await self._probe_node_health(client, node, token)
+            if ok:
+                self.unban_node(nid)
+                logger.info(f"P2-5 ban 到期节点 {nid} 健康探测 OK, 主动解封")
+            else:
+                # 探测失败续 ban 一周期 — 不放回坏节点 (避免下次 select_nodes 派发即失败)。
+                self._banned_nodes[nid] = time.time() + self._BAN_DURATION_S
+                self._fault_counts.pop(nid, None)
+                logger.warning(f"P2-5 ban 到期节点 {nid} 健康探测失败, 续 ban {self._BAN_DURATION_S:.0f}s")
+
+    async def _probe_node_health(self, client: httpx.AsyncClient, node: NodeInfo, token: str) -> bool:
+        """P2-5: 单节点轻量 GET /api/health 探测。返回 True=存活可解封, False=不可达。
+
+        SSRF 守卫同 _dispatch_to_node (is_safe_peer_host); 超时短 (5s) 避拖慢健康循环。
+        任何异常 (连接拒/超时/非 200/SSRF) 均判 False — 探测失败即续 ban。
+        """
+        try:
+            if not is_safe_peer_host(node.ip_address):
+                logger.debug(f"P2-5 探测节点 {node.node_id} ip {node.ip_address} 非安全对端, 跳过")
+                return False
+            url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/health")
+            headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master", "X-Node-Role": "master"}
+            resp = await client.get(url, headers=headers, timeout=5.0)
+            if resp.status_code == 200:
+                return True
+            logger.debug(f"P2-5 探测节点 {node.node_id} HTTP {resp.status_code}, 续 ban")
+            return False
+        except Exception as e:
+            logger.debug(f"P2-5 探测节点 {node.node_id} 异常: {e}, 续 ban")
+            return False
+
     # ── H3 任务持久化 + 启动恢复 ──
 
     _PERSIST_SKIP_FIELDS = {"spec"}  # spec 由 model_* 字段重建, 不直接序列化
@@ -426,6 +489,31 @@ class ClusterMaster:
         t._retry_count = int(d.get("_retry_count", 0) or 0)
         # P1-21 (审计 §5.4): 恢复 next_retry_at, 崩溃前已退避的任务恢复后不立即重派。
         t.next_retry_at = float(d.get("next_retry_at", 0.0) or 0.0)
+        # P2-10 (审计 §5.9): PARTIAL 终态崩溃补全 (env FUSION_PARTIAL_RECOVERY=1 开启时)。
+        # PARTIAL = DATA 并行部分节点成功, 已成功节点 outputs 须保留, 仅重派失败节点。
+        # 从 result.outputs[].node_id 提取已成功节点 → 并入 exclude_nodes (select_nodes 自动跳过);
+        # 旧 outputs 存 _partial_prev_outputs, _dispatch_data 补全后合并 (非覆盖);
+        # 转 PENDING + 清 assigned_nodes/start (走 P1-1 同路径重派)。
+        if st == "partial" and os.environ.get("FUSION_PARTIAL_RECOVERY", "0") == "1":
+            prev_result = d.get("result", {}) or {}
+            prev_outputs = list(prev_result.get("outputs", [])) if isinstance(prev_result, dict) else []
+            prev_succeeded = {o.get("node_id") for o in prev_outputs if isinstance(o, dict) and o.get("node_id")}
+            if prev_succeeded:
+                seen_excl = set(recovered_exclude)
+                for nid in prev_succeeded:
+                    if nid not in seen_excl:
+                        recovered_exclude.append(nid)
+                        seen_excl.add(nid)
+                t.exclude_nodes = recovered_exclude
+                t._partial_prev_outputs = prev_outputs
+                logger.info(
+                    f"P2-10 PARTIAL 补全: {t.task_id} 保留 {len(prev_outputs)} 已成功节点 "
+                    f"outputs, exclude={list(prev_succeeded)}, 转 PENDING 重派未完成节点"
+                )
+            # PARTIAL 转 PENDING 重派 (类似 RUNNING/MIGRATED 路径)
+            t.status = TaskStatus.PENDING
+            t.assigned_nodes = []
+            t.started_at = 0.0
         return t
 
     def _persist_tasks_locked(self) -> list[dict[str, Any]]:
@@ -433,6 +521,9 @@ class ClusterMaster:
 
         P1-11 (审计 §4.2): 拆出 I/O — 锁内仅建快照, 落盘 (含 os.fsync 阻塞) 移到 _write_task_store,
         在 _tasks_lock 释放后执行, 不再持锁 fsync。
+        P2-10 (审计 §5.9): PARTIAL 终态默认不存 (维持 P3-29 不重派); env FUSION_PARTIAL_RECOVERY=1
+        开启时 PARTIAL 也落盘 → 崩溃后 _restore_tasks 转 PENDING 重派仅未完成节点 (已成功节点
+        从 result.outputs[].node_id 提取并入 exclude_nodes), 补全 DATA 并行部分失败任务。
         """
         _TERMINAL = {
             TaskStatus.COMPLETED,
@@ -441,6 +532,14 @@ class ClusterMaster:
             TaskStatus.TIMEOUT,
             TaskStatus.PARTIAL,
         }
+        partial_recovery = os.environ.get("FUSION_PARTIAL_RECOVERY", "0") == "1"
+        if partial_recovery:
+            _TERMINAL = {
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.TIMEOUT,
+            }
         return [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
 
     def _write_task_store(self, pending: list[dict[str, Any]]) -> None:
@@ -1223,6 +1322,13 @@ class ClusterMaster:
         #   有成功有失败 → PARTIAL (终态, 不重试, 保留 outputs 供客户端取部分结果)。
         all_success = bool(outputs) and not errors
         partial_success = bool(outputs) and bool(errors)
+        # P2-10 (审计 §5.9): PARTIAL 补全重派 — 合并上次已成功节点 outputs (非覆盖)。
+        # _task_from_dict PARTIAL 恢复时存 _partial_prev_outputs; 本次重派仅跑未完成节点
+        # (已成功节点在 exclude_nodes, select_nodes 不选), 故本次 outputs 全新, 须与旧合并。
+        prev_outputs = getattr(task, "_partial_prev_outputs", None) or []
+        if prev_outputs:
+            merged = list(prev_outputs) + list(outputs)
+            outputs = merged
         if all_success:
             await self._finalize_task(
                 task,
@@ -1230,6 +1336,9 @@ class ClusterMaster:
                 error="",
                 result={"outputs": outputs, "errors": errors, "node_count": len(node_ids)},
             )
+            # P2-10: 补全成功 → 清 _partial_prev_outputs (已完成, 无须再合并)。
+            if hasattr(task, "_partial_prev_outputs"):
+                task._partial_prev_outputs = None
         elif partial_success:
             logger.warning(
                 f"DATA 并行部分成功: {task.name} ({task.task_id}) "
@@ -1242,6 +1351,9 @@ class ClusterMaster:
                 error="; ".join(errors),
                 result={"outputs": outputs, "errors": errors, "node_count": len(node_ids)},
             )
+            # P2-10: 补全仍 PARTIAL (本次又有失败) → 清 _partial_prev_outputs 防下次再合并重复。
+            if hasattr(task, "_partial_prev_outputs"):
+                task._partial_prev_outputs = outputs
         else:
             # 全失败: 仅有传输级失败 → 可重试; 有 agent 逻辑错误 → 不重试 (C9 已 report_fault, 熔断器会 ban)
             retryable = transient_fail and not logic_fail
@@ -1263,13 +1375,34 @@ class ClusterMaster:
         (b64.npy, 仅 layers)。末段出口 = 最终 hidden_states (lm_head/解码超上游首版范围,
         docs/distributed-pipeline.md line 151 — 调度器只负责层前向链, 不做 token 生成)。
         每节点派发 task_type=pipeline_step, 经 _dispatch_to_node 透传 pipeline 字段。
+
+        P2-11 (审计 §6.7): PIPELINE 段级检查点 (env FUSION_PIPELINE_CHECKPOINT=1)。
+        各段 hidden_states 落 task.params["_pipeline_ckpt"]; 段失败 retryable=True 入重试后,
+        重派从最近已完成段续 (而非首段从头), 避重跑已成功段 (大模型层前向昂贵)。
+        语义不变: 任一段失败仍整体失败 (hidden_states 链式强依赖), 仅减少重试代价。
         """
         client = await self._get_dispatch_http()
         model_id = task.params.get("model_id", task.model_name)
         input_ids = task.params.get("input_ids")
         hidden_states = None  # 首段 None → 上游 embed+layers
         steps = []
+        # P2-11: 检点续跑 — ckpt 存 last completed step idx + 该步出口 hidden_states。
+        # 重派 (重试/崩溃恢复) 时从 ckpt.step+1 续, 跳过已成功段。env 关 → 无 ckpt 从头。
+        ckpt_enabled = os.environ.get("FUSION_PIPELINE_CHECKPOINT", "0") == "1"
+        ckpt = task.params.get("_pipeline_ckpt") if ckpt_enabled else None
+        start_idx = 0
+        if isinstance(ckpt, dict) and "step" in ckpt and "hidden_states" in ckpt:
+            start_idx = int(ckpt.get("step", -1)) + 1
+            hidden_states = ckpt.get("hidden_states")
+            # 恢复已成功段的 steps 元信息 (供末段 shape/dtype + result.steps 完整)。
+            prev_steps = ckpt.get("steps", [])
+            if isinstance(prev_steps, list):
+                steps = list(prev_steps)
+            logger.info(f"P2-11 PIPELINE 检点续跑: {task.task_id} 从段 {start_idx} 续 (ckpt 含 {start_idx} 段已完成)")
         for idx, nid in enumerate(node_ids):
+            if idx < start_idx:
+                # 检点续跑跳过已成功段 (assigned_nodes 节点顺序对齐 model_shards)
+                continue
             shard = task.model_shards[idx] if idx < len(task.model_shards) else {}
             layer_range = shard.get("layer_range", [])
             shard_index = int(shard.get("shard_index", idx))
@@ -1318,6 +1451,17 @@ class ClusterMaster:
                 }
             )
             logger.info(f"P3 流水线段 {idx} ({nid}) 完成: shape={r.get('shape')} dtype={r.get('dtype')}")
+            # P2-11: 段完成即落检查点 (env 开) — 段失败重派可从本段续, 不回跑已成功段。
+            # 检点存最后完成段 idx + 出口 hidden_states + steps 元信息, 复用 task.params 持久化路径。
+            if ckpt_enabled:
+                task.params["_pipeline_ckpt"] = {
+                    "step": idx,
+                    "hidden_states": hidden_states,
+                    "steps": steps,
+                }
+        # P2-11: 全成功 → 清检查点 (已完成, 无须续跑)。
+        if ckpt_enabled:
+            task.params.pop("_pipeline_ckpt", None)
         await self._finalize_task(
             task,
             success=True,
@@ -2472,6 +2616,10 @@ class ClusterMaster:
         if self._observability is None:
             self._observability = ClusterObservability()
         await self._observability.start()
+        # P2-12 (审计 §6.5): persist=True 时启动恢复历史 metrics/alerts/logs (env 门控默认关)。
+        recovered = self._observability.load()
+        if recovered:
+            logger.info(f"P2-12 Observability 恢复 {recovered} 条历史数据")
         logger.info("P0-8 Observability 已接线 (周期采集 + 告警规则)")
         # P0-5: 告警出站通道 — observability 接线后注册 webhook handler (env 门控)。
         self._register_alert_webhook()
@@ -2552,6 +2700,8 @@ class ClusterMaster:
         # P0-8: 停止 Observability 清理循环
         if self._observability:
             await self._observability.stop()
+            # P2-12 (审计 §6.5): persist=True 时停机落盘历史 metrics/alerts/logs (env 门控默认关)。
+            self._observability.save()
         self._stop_mdns()
         logger.info("Cluster Master 已停止")
 
@@ -2709,6 +2859,10 @@ class ClusterMaster:
                     # P0-8: 周期采集节点指标 + 告警规则 (接 _observability, 路由不再 503)。
                     if self._observability:
                         await self._collect_observability_locked()
+                    # P2-5 (审计 §5.9): ban 期满节点主动健康探测 — 旧实现仅被动解封
+                    # (下次 select_nodes 调 _is_node_banned 才惰性清), 持续 ban 的坏节点
+                    # 可能错过恢复窗。此处到期即 GET /api/health 探测: OK 则解封, 失败续 ban。
+                    await self._probe_banned_nodes()
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -2793,6 +2947,9 @@ class ClusterMaster:
             "model_name": task.model_name,
             "retry_count": getattr(task, "_retry_count", 0),
         }
+        # P2-7 (审计 §5.5): 满队列丢事件计数 — 旧实现丢最旧条目静默无告警, 运维不知 SSE 慢消费丢事件。
+        # 此处记 logger.warning + event_dropped 指标 (接 P0-8 Observability / P0-5 webhook 可告警)。
+        dropped = 0
         for q in list(self._event_subscribers):
             try:
                 q.put_nowait(payload)
@@ -2800,10 +2957,20 @@ class ClusterMaster:
                 try:
                     q.get_nowait()
                     q.put_nowait(payload)
+                    dropped += 1
                 except asyncio.QueueEmpty:
                     pass
                 except Exception:
                     logger.debug("P1-18 丢 SSE 事件 (订阅者队列异常)")
+                    dropped += 1
+        if dropped > 0:
+            logger.warning(f"P2-7 丢 {dropped} 个 SSE 任务事件 (订阅者队列满, 慢消费)")
+            obs = self._observability
+            if obs is not None:
+                try:
+                    obs.record_metric("cluster", "event_dropped", float(dropped))
+                except Exception:
+                    pass
 
     async def get_node(self, node_id: str) -> NodeInfo | None:
         """取单节点快照引用 (nodes 域只读)。"""

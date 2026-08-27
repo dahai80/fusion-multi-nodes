@@ -17,16 +17,36 @@ import hashlib
 import logging
 import os
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 import httpx
 
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
+from fusion_multi_node.utils.auth import is_safe_outbound_host
 
 logger = logging.getLogger(__name__)
 
 # 上游 fusion-mlx KV 张量导出/导入端点 (issue #650 提案, 未落地)。
 _KV_EXPORT_PATH = "/distributed/kv_cache/export"
 _KV_IMPORT_PATH = "/distributed/kv_cache/import"
+
+
+def _ssrf_guard(base_url: str) -> str:
+    """P2-2 (审计 §3.5): 出站 SSRF 守卫 — base_url host 经 is_safe_outbound_host 校验。
+
+    MLXKVTransport 调本地 fusion-mlx (operator env FUSION_MLX_URL), 仍守一道防
+    云元数据/链路本地主机名 (与 kv_cache_sharing 跨节点路径同守卫)。不安全 host
+    raise RuntimeError fail-closed (Rule 12), 不静默发请求。localhost/127.0.0.1
+    合法 (单机/同节点部署), 11432 默认放行。
+    """
+    parsed = urlparse(base_url)
+    host = parsed.hostname or ""
+    if not is_safe_outbound_host(host):
+        raise RuntimeError(
+            f"MLXKVTransport SSRF 拦截: base_url={base_url!r} host={host!r} 非安全出站主机, "
+            f"拒发请求 (云元数据/链路本地/受限段)。检查 FUSION_MLX_URL 配置。"
+        )
+    return base_url
 
 
 @runtime_checkable
@@ -105,7 +125,9 @@ class MLXKVTransport:
         timeout: float = 60.0,
     ):
         env_url = os.environ.get("FUSION_MLX_URL")
-        self._base_url = (env_url or base_url).rstrip("/")
+        resolved = (env_url or base_url).rstrip("/")
+        # P2-2: 构造即校验出站 host — 不安全直接 raise (fail-closed), 不留到首请求。
+        self._base_url = _ssrf_guard(resolved)
         self._api_key = api_key or os.environ.get("FUSION_MLX_API_KEY", "")
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None

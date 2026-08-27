@@ -262,12 +262,31 @@ class AgentConfig:
     # 单节点并发任务上限 — Master 据此 gate 派发 (active_tasks >= max_tasks 不派)。
     # 默认 4; 容器/裸机多并发压测经 FUSION_AGENT_MAX_TASKS env 调高。
     max_tasks: int = 4
+    # P2-9 (审计 §6.2): 子进程插件 per-task 资源限制 (仅 SandboxExecutor 子进程, 非主推理进程)。
+    # 默认 0 = 不限 (不误杀单长跑 agent; 推理资源在 fusion-mlx 侧)。
+    # operator 设 >0 → 起子进程插件时经 preexec_fn 把 RLIMIT_AS/RLIMIT_CPU 加到子进程。
+    # 0 不限: 保既有行为, 主推理路径不 setrlimit (维持现状)。
+    task_mem_limit_mb: int = 0
+    task_cpu_quota: int = 0
 
     def __post_init__(self) -> None:
         env_mt = os.environ.get("FUSION_AGENT_MAX_TASKS")
         if env_mt:
             try:
                 self.max_tasks = max(1, int(env_mt))
+            except ValueError:
+                pass
+        # P2-9: env 覆盖 per-task rlimit knob。
+        env_mem = os.environ.get("FUSION_TASK_MEM_LIMIT_MB")
+        if env_mem:
+            try:
+                self.task_mem_limit_mb = max(0, int(env_mem))
+            except ValueError:
+                pass
+        env_cpu = os.environ.get("FUSION_TASK_CPU_QUOTA")
+        if env_cpu:
+            try:
+                self.task_cpu_quota = max(0, int(env_cpu))
             except ValueError:
                 pass
 
@@ -316,6 +335,23 @@ class NodeAgent:
         # 进程级 RLIMIT_AS/CPU 会整 agent 一起限制, 误杀在途任务。OS 级强隔离走
         # SandboxExecutor (subprocess 插件), 推理为 HTTP 调用无子进程, 不适用。
         self._sandbox = sandbox
+
+    def build_subprocess_sandbox_config(self):
+        # P2-9 (审计 §6.2): AgentConfig.task_mem_limit_mb/task_cpu_quota → SandboxConfig
+        # (仅子进程插件用, 经 SandboxExecutor.execute_in_sandbox preexec_fn 加 rlimit)。
+        # 0 = 不限: knob 传 0 → SandboxConfig 对应字段 0 → _apply_rlimits_in_child 跳过该项。
+        # nproc/disk 不在 AgentConfig 暴露 (per-task 限插件内存/CPU 已够), 传 0 跳过。
+        # 主推理路径不调此方法 (维持不 setrlimit, 推理资源在 fusion-mlx 侧)。
+        from fusion_multi_node.security.sandbox import SandboxConfig
+
+        enforce = self.config.task_mem_limit_mb > 0 or self.config.task_cpu_quota > 0
+        return SandboxConfig(
+            max_memory_mb=self.config.task_mem_limit_mb,
+            max_cpu_seconds=self.config.task_cpu_quota,
+            max_disk_mb=0,
+            max_processes=0,
+            enforce_rlimits=enforce,
+        )
 
     # ── 硬件信息收集 ──
 

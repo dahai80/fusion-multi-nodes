@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import resource
@@ -29,6 +30,12 @@ class SandboxConfig:
     max_disk_mb: int = 10240
     max_processes: int = 8
     execution_timeout: int = 600
+    # P2-9 (审计 §6.2): 子进程 rlimit 强制开关。
+    # 旧 SandboxExecutor.execute_in_sandbox 用 create_subprocess_exec 无 preexec_fn →
+    # python-resource 后端子进程 rlimit 根本未应用 (SandboxConfig 默认值形同虚设)。
+    # 默认 False 保既有行为 (sandbox-exec/unshare 后端由 OS profile 强制, 不靠 rlimit);
+    # operator 按需开 True → 经 preexec_fn 把 rlimit 加到子进程 (仅子进程, 不碰主进程)。
+    enforce_rlimits: bool = False
     allowed_paths: list[str] = field(
         default_factory=lambda: [
             "/tmp",
@@ -202,6 +209,40 @@ class WorkerSandbox:
         return len(self._active_sandboxes)
 
 
+def _apply_rlimits_in_child(
+    max_cpu_seconds: int,
+    max_memory_mb: int,
+    max_disk_mb: int,
+    max_processes: int,
+) -> None:
+    # P2-9 (审计 §6.2): preexec_fn — fork 后 exec 前在子进程设 rlimit。
+    # 仅在子进程执行, 不碰父 (主推理进程) → 不误杀单长跑 agent (CLAUDE.md 约束)。
+    # 0 = 不限 (跳过该项, 默认 AgentConfig knob 传 0 保单长跑不受限)。
+    try:
+        if max_cpu_seconds > 0:
+            resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
+        if max_memory_mb > 0:
+            max_bytes = max_memory_mb * 1024 * 1024
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (max_bytes, max_bytes))
+            except (ValueError, AttributeError):
+                pass
+        if max_disk_mb > 0:
+            max_file_bytes = max_disk_mb * 1024 * 1024
+            try:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (max_file_bytes, max_file_bytes))
+            except (ValueError, AttributeError):
+                pass
+        if max_processes > 0:
+            try:
+                resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
+            except (ValueError, AttributeError):
+                pass
+    except Exception as e:
+        # preexec_fn 抛错会终止 fork; 记日志但让子进程继续 (限流非致命, OS 沙箱兜底)。
+        logger.warning(f"P2-9 子进程 rlimit 设置失败 (继续无 rlimit): {e}")
+
+
 class SandboxExecutor:
     """M6-02 OS 级沙箱执行器 — macOS sandbox-exec / Linux unshare。"""
 
@@ -292,11 +333,30 @@ class SandboxExecutor:
             full_cmd = command
             logger.info(f"SandboxExecutor[{task_id}]: 无 OS 沙箱，直接执行")
 
+        # P2-9 (审计 §6.2): enforce_rlimits=True → preexec_fn 在子进程设 rlimit (仅子进程)。
+        # 旧实现无 preexec_fn → python-resource 后端子进程 rlimit 未应用。
+        # sandbox-exec/unshare 后端由 OS profile 强制, 不需 preexec_fn (rlimit 冗余且可能与 profile 冲突)。
+        preexec = None
+        if self.config.enforce_rlimits and self._backend == "python-resource":
+            preexec = functools.partial(
+                _apply_rlimits_in_child,
+                self.config.max_cpu_seconds,
+                self.config.max_memory_mb,
+                self.config.max_disk_mb,
+                self.config.max_processes,
+            )
+            logger.info(
+                f"SandboxExecutor[{task_id}]: preexec_fn rlimit "
+                f"cpu={self.config.max_cpu_seconds}s mem={self.config.max_memory_mb}MB "
+                f"disk={self.config.max_disk_mb}MB nproc={self.config.max_processes}"
+            )
+
         try:
             proc = await _asyncio.create_subprocess_exec(
                 *full_cmd,
                 stdout=_asyncio.subprocess.PIPE,
                 stderr=_asyncio.subprocess.PIPE,
+                preexec_fn=preexec,
             )
             try:
                 stdout, stderr = await _asyncio.wait_for(proc.communicate(), timeout=exec_timeout)

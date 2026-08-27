@@ -21,6 +21,7 @@ env 开关 (默认关, 不破坏现有 http + ASGITransport 测试):
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import ssl
@@ -102,9 +103,11 @@ def client_ssl_context() -> ssl.SSLContext | None:
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
     ctx.load_cert_chain(cert, key)
     ctx.load_verify_locations(ca)
-    ctx.check_hostname = False
+    # P2-1 (审计 §3.4): 叶证书现带 SAN (provision_node 传 ip 后 DNSName+IPAddress),
+    # 故开 hostname 校验 — 防 MITM 改连非集群节点 (旧 check_hostname=False 放弃对端身份校验)。
+    ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
-    logger.info(f"mTLS client 上下文就绪: 带本节点证书, 校验对端 CA={ca}")
+    logger.info(f"mTLS client 上下文就绪: 带本节点证书, 校验对端 CA={ca} (hostname 校验开)")
     return ctx
 
 
@@ -201,8 +204,14 @@ def provision_node(
     ca_cert: str,
     ca_key: str,
     out_dir: str | None = None,
+    ip: str | None = None,
 ) -> tuple[str, str]:
-    """用集群 CA 签发节点叶证书 (CN=node_id, O=role)。返回 (cert_path, key_path)。"""
+    """用集群 CA 签发节点叶证书 (CN=node_id, O=role)。返回 (cert_path, key_path)。
+
+    P2-1 (审计 §3.4): ip 非空时叶证书加 SubjectAlternativeName — DNSName(node_id) +
+    IPAddress(ip), 使 client_ssl_context 可开 check_hostname=True (校验对端身份, 防 MITM)。
+    旧叶证书无 SAN → check_hostname 被迫关 → 对端身份零校验。CA (provision_cluster) 无需 SAN。
+    """
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -226,6 +235,13 @@ def provision_node(
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, role),
         ]
     )
+    # P2-1: SAN 扩展 — DNSName(node_id) + IPAddress(ip) (ip 可解析时), critical=False。
+    san_list = [x509.DNSName(node_id)]
+    if ip:
+        try:
+            san_list.append(x509.IPAddress(ipaddress.ip_address(ip)))
+        except ValueError:
+            logger.warning(f"provision_node ip={ip!r} 非合法 IP, 仅写 DNSName SAN (无 IP SAN)")
     now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
@@ -236,6 +252,7 @@ def provision_node(
         .not_valid_before(now)
         .not_valid_after(now + timedelta(days=365))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.SubjectAlternativeName(san_list), critical=False)
         .sign(ca_key_obj, hashes.SHA256())
     )
     key_path.write_bytes(
@@ -248,5 +265,5 @@ def provision_node(
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     os.chmod(key_path, 0o600)
     os.chmod(cert_path, 0o644)
-    logger.info(f"节点叶证书已签发: node_id={node_id} role={role} → {cert_path}")
+    logger.info(f"节点叶证书已签发: node_id={node_id} role={role} ip={ip} SAN={len(san_list)} → {cert_path}")
     return str(cert_path), str(key_path)
