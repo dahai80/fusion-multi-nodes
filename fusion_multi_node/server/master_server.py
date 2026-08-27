@@ -189,25 +189,15 @@ class LoadUpdateRequest(BaseModel):
     net_rtt_ms: float = 0.0
 
 
-class TaskResponse(BaseModel):
-    task_id: str
-    name: str
-    mode: str
-    model_name: str
-    status: str
-    assigned_nodes: list[str]
-    created_at: float
-    started_at: float
-    completed_at: float
-    error: str
-
-
-class NodeResponse(BaseModel):
+# F4 (#32): /api/v1 契约响应模型 — 对齐 _node_to_resp / _task_to_resp 实际输出。
+# 旧 TaskResponse/NodeResponse (v0.1 时代, 字段过时且未接 response_model) 已删, 统一用 V1*。
+class V1NodeResponse(BaseModel):
     node_id: str
     hostname: str
     ip_address: str
     port: int
     status: str
+    role: str
     total_memory_gb: float
     available_memory_gb: float
     cpu_cores: int
@@ -218,6 +208,103 @@ class NodeResponse(BaseModel):
     max_tasks: int
     score: float
     last_heartbeat: float
+
+
+class V1NodeListResponse(BaseModel):
+    total: int
+    online: int
+    nodes: list[V1NodeResponse]
+
+
+class V1NodeRegisterResponse(BaseModel):
+    status: str
+    node_id: str
+    role: str = "worker"
+
+
+class V1StatusResponse(BaseModel):
+    status: str
+    task_id: str = ""
+    node_id: str = ""
+    action: str = ""
+
+
+class V1TaskResponse(BaseModel):
+    task_id: str
+    name: str
+    mode: str
+    model_name: str
+    status: str
+    assigned_nodes: list[str]
+    created_at: float
+    started_at: float
+    completed_at: float
+    error: str
+    required_capability: str
+    priority: int
+    degraded_from_model: str
+    degradation_count: int
+    cancel_reason: str
+    sub_tasks: list[str]
+    result: dict[str, Any] = {}
+
+
+class V1TaskSubmitResponse(BaseModel):
+    task_id: str
+    name: str
+    mode: str
+    model_name: str
+    status: str
+    assigned_nodes: list[str]
+    created_at: float
+    started_at: float
+    completed_at: float
+    error: str
+    required_capability: str
+    priority: int
+    degraded_from_model: str
+    degradation_count: int
+    cancel_reason: str
+    sub_tasks: list[str]
+    result: dict[str, Any] = {}
+    queued: bool = False
+
+
+class V1TaskProgressResponse(BaseModel):
+    task_id: str
+    name: str
+    status: str
+    progress: float
+    total_shards: int
+    completed_shards: int
+    assigned_nodes: list[str]
+    elapsed_seconds: float
+    remaining_seconds: float
+    model_name: str
+
+
+class V1ClusterStatsResponse(BaseModel):
+    cluster: dict[str, Any]
+    tasks: dict[str, int]
+    load_summary: dict[str, Any]
+
+
+class V1ObservabilitySuggestionsResponse(BaseModel):
+    suggestions: list[dict[str, Any]] = []
+    error: str = ""
+
+
+class V1AutoscalerConfigResponse(BaseModel):
+    enabled: bool
+    min_nodes: int = 0
+    max_nodes: int = 0
+    scale_up_threshold: float = 0.0
+    scale_down_threshold: float = 0.0
+    cooldown_seconds: float = 0.0
+    idle_timeout_seconds: float = 0.0
+    policy: str = ""
+    check_interval: float = 0.0
+    rebalance_threshold: float = 0.0
 
 
 # ── Master Server ──
@@ -1086,7 +1173,7 @@ class MasterServer:
 
         # ── M7-06 监控 API ──
 
-        @app.get("/api/v1/cluster/stats")
+        @app.get("/api/v1/cluster/stats", response_model=V1ClusterStatsResponse)
         async def v1_cluster_stats():
             stats = await self.master.get_stats()
             online = stats.get("online_nodes", 0)
@@ -1149,7 +1236,7 @@ class MasterServer:
                 }
             return result
 
-        @app.get("/api/v1/tasks/{task_id}/progress")
+        @app.get("/api/v1/tasks/{task_id}/progress", response_model=V1TaskProgressResponse)
         async def task_progress(task_id: str):
             task = await self.master.get_task(task_id)
             if not task:
@@ -1252,7 +1339,7 @@ class MasterServer:
         # GAP-5 (审计 §7): autoscaler 模块未接线 (零实例化, _autoscaler 恒 None)。
         # 旧 GET 返回 {"enabled": False} — 歧义 ("禁用" vs "未实现")。改为显式 503 +
         # 明示未接线, 避免误读为已接但关闭。模块保留待迁移 (非生产路径)。
-        @app.get("/api/v1/autoscaler/config")
+        @app.get("/api/v1/autoscaler/config", response_model=V1AutoscalerConfigResponse)
         async def get_autoscaler_config():
             autoscaler = getattr(self.master, "_autoscaler", None)
             if not autoscaler:
@@ -1277,7 +1364,7 @@ class MasterServer:
                 "rebalance_threshold": cfg.rebalance_threshold,
             }
 
-        @app.put("/api/v1/autoscaler/config")
+        @app.put("/api/v1/autoscaler/config", response_model=V1StatusResponse)
         async def update_autoscaler_config(req: dict):
             from fusion_multi_node.autoscaler.autoscaler import (
                 AutoscalerConfig,
@@ -1335,7 +1422,7 @@ class MasterServer:
                 raise HTTPException(status_code=500, detail=str(e))
 
         # M8-03 智能优化建议
-        @app.get("/api/v1/observability/suggestions")
+        @app.get("/api/v1/observability/suggestions", response_model=V1ObservabilitySuggestionsResponse)
         async def get_optimization_suggestions():
             obs = getattr(self.master, "_observability", None)
             if not obs:
@@ -1370,6 +1457,165 @@ class MasterServer:
                 return {"alerts": alerts, "count": len(alerts)}
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
+
+        # ── F4 (#32): /api/v1 集群控制契约 — typed response_model, 覆盖 9 操作 ──
+        # agent-studio cluster_server 可据此桥接真实 multi-node 集群 (替代内存 dev 集群)。
+        # 复用底层 master 方法 + 现有鉴权辅助 (_enforce_user_rbac / _check_permission),
+        # 仅加 response_model 类型化。旧 /api/* 路由保留向后兼容 (raw dict)。
+        @app.get("/api/v1/nodes", response_model=V1NodeListResponse)
+        async def v1_list_nodes():
+            online = await self.master.get_online_nodes()
+            all_nodes = await self.master.snapshot_nodes()
+            return {
+                "total": len(all_nodes),
+                "online": len(online),
+                "nodes": [_node_to_resp(n) for n in all_nodes],
+            }
+
+        @app.get("/api/v1/nodes/{node_id}", response_model=V1NodeResponse)
+        async def v1_get_node(node_id: str):
+            node = await self.master.get_node(node_id)
+            if not node:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            return _node_to_resp(node)
+
+        @app.post("/api/v1/nodes/register", response_model=V1NodeRegisterResponse)
+        async def v1_register_node(req: NodeRegisterRequest, request: Request):
+            # 复用 /api/nodes/register 同源审批 + 协议兼容校验 + ban 拦截逻辑。
+            if not is_safe_path_segment(req.node_id):
+                raise HTTPException(status_code=400, detail="非法 node_id")
+            ok, detail = _check_protocol_compat(req.protocol_version)
+            if not ok:
+                logger.warning(f"v1 节点注册拒 (协议不兼容): {req.node_id} — {detail}")
+                raise HTTPException(status_code=400, detail=detail)
+            if self._approval_manager:
+                approval = self._approval_manager.request_join(
+                    node_id=req.node_id,
+                    hostname=req.hostname,
+                    ip_address=req.ip_address,
+                    port=req.port,
+                    metadata={
+                        "total_memory_gb": req.total_memory_gb,
+                        "available_memory_gb": req.available_memory_gb,
+                        "max_tasks": req.max_tasks,
+                        "cpu_cores": req.cpu_cores,
+                        "gpu_cores": req.gpu_cores,
+                        "arch": req.arch,
+                        "device_model": req.device_model,
+                        "uma_size_gb": req.uma_size_gb,
+                        "mlx_version": req.mlx_version,
+                        "tags": req.tags,
+                    },
+                )
+                if approval.status.value != "approved":
+                    self._audit.log(
+                        actor=req.node_id, action="register", path="/api/v1/nodes/register",
+                        method="POST", node_id=req.node_id, result="denied",
+                        detail=f"未通过审批, 当前状态: {approval.status.value}",
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"节点 {req.node_id} 未通过审批，当前状态: {approval.status.value}",
+                    )
+            assigned_role = NodeRole.WORKER
+            node = NodeInfo(
+                node_id=req.node_id, hostname=req.hostname, ip_address=req.ip_address,
+                port=req.port, arch=req.arch, total_memory_gb=req.total_memory_gb,
+                available_memory_gb=req.available_memory_gb, cpu_cores=req.cpu_cores,
+                gpu_cores=req.gpu_cores, device_model=req.device_model,
+                uma_size_gb=req.uma_size_gb, mlx_version=req.mlx_version,
+                role=assigned_role.value, status=NodeStatus.ONLINE, tags=req.tags,
+                active_tasks=req.active_tasks, max_tasks=req.max_tasks,
+                network_rtt_ms=req.network_rtt_ms, last_heartbeat=time.time(),
+            )
+            allowed = await self.master.register_node(node)
+            if not allowed:
+                self._audit.log(
+                    actor=req.node_id, action="register", path="/api/v1/nodes/register",
+                    method="POST", node_id=req.node_id, result="denied", detail="处于 ban 期, 拒绝注册",
+                )
+                raise HTTPException(status_code=403, detail=f"节点 {req.node_id} 处于 ban 期, 拒绝注册")
+            self._permission_manager.assign_role(req.node_id, assigned_role, "register")
+            logger.info(f"v1 节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={assigned_role.value}")
+            self._audit.log(
+                actor=req.node_id, action="register", path="/api/v1/nodes/register",
+                method="POST", node_id=req.node_id, result="ok",
+                detail=f"role={assigned_role.value} from {req.ip_address}:{req.port}",
+            )
+            return {"status": "ok", "node_id": req.node_id, "role": assigned_role.value}
+
+        @app.delete("/api/v1/nodes/{node_id}", response_model=V1StatusResponse)
+        async def v1_unregister_node(node_id: str):
+            if not await _check_permission("master", "/api/nodes/", "DELETE"):
+                raise HTTPException(status_code=403, detail="权限不足: node delete")
+            await self.master.unregister_node(node_id)
+            return {"status": "ok", "node_id": node_id}
+
+        @app.post("/api/v1/tasks/submit", response_model=V1TaskSubmitResponse)
+        async def v1_submit_task(req: TaskSubmitRequest, request: Request):
+            user_actor = _enforce_user_rbac(request, "/api/tasks/submit", "POST")
+            if not await _check_permission("master", "/api/tasks/submit", "POST"):
+                self._audit.log(
+                    actor="master", action="permission_deny", path="/api/v1/tasks/submit",
+                    method="POST", result="denied", detail="权限不足: task submit",
+                )
+                raise HTTPException(status_code=403, detail="权限不足: task submit")
+            if self.master._election is not None and not self.master._is_leader:
+                raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝任务提交")
+            mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
+            effective_user = user_actor if user_actor else req.user
+            task = ClusterTask(
+                task_id=f"task_{uuid.uuid4().hex[:12]}", name=req.name, mode=mode,
+                model_name=req.model_name, model_id=req.model_id,
+                timeout_seconds=req.timeout_seconds, user=effective_user,
+                created_at=time.time(), required_capability=req.required_capability,
+                preferred_node_id=req.preferred_node_id, exclude_nodes=list(req.exclude_nodes),
+                priority=req.priority, task_type=req.task_type,
+                params={
+                    "prompt": req.prompt, "messages": req.messages,
+                    "max_tokens": req.max_tokens, "temperature": req.temperature,
+                },
+            )
+            self._audit.log(
+                actor=effective_user or "unknown", action="task_submit",
+                path="/api/v1/tasks/submit", method="POST", node_id="", result="ok",
+                detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
+            )
+            ok = await self.master.assign_task(task)
+            if not ok:
+                raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
+            resp = _task_to_resp(task)
+            if task.status == TaskStatus.PENDING and task.task_id in {t.task_id for t in self.master._pending_queue}:
+                resp["queued"] = True
+                return JSONResponse(status_code=202, content=resp)
+            return resp
+
+        @app.post("/api/v1/tasks/{task_id}/migrate", response_model=V1StatusResponse)
+        async def v1_migrate_task(task_id: str, request: Request):
+            user_actor = _enforce_user_rbac(request, "/api/tasks/migrate", "POST")
+            if not await _check_permission("master", "/api/tasks/migrate", "POST"):
+                raise HTTPException(status_code=403, detail="权限不足: task migrate")
+            ok = await self.master.migrate_task(task_id)
+            if not ok:
+                raise HTTPException(status_code=500, detail="任务迁移失败")
+            self._audit.log(
+                actor=user_actor or "master", action="task_migrate",
+                path="/api/v1/tasks/migrate", method="POST", node_id="", result="ok",
+                detail=f"task_id={task_id}",
+            )
+            return {"status": "ok", "task_id": task_id}
+
+        @app.post("/api/v1/tasks/{task_id}/degrade", response_model=V1StatusResponse)
+        async def v1_degrade_task(task_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/tasks/degrade", "POST")
+            ok = await self.master.degrade_task(task_id)
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"任务 {task_id} 降级失败")
+            return {"status": "ok", "task_id": task_id}
+
+        # 旧 /api/v1 路由已 bless 为 typed (response_model) — 见上方 task_progress /
+        # v1_cluster_stats / get_optimization_suggestions / get_autoscaler_config /
+        # update_autoscaler_config。F4 不再新增重复路由 (first-registered-wins 导致后注册被遮蔽)。
 
         # ── GAP-8 (Phase F2): 用户管理 CRUD ──
         # 仅 ADMIN (user:manage 权限, check_user_path_access 把关)。

@@ -5,26 +5,27 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.3-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.6-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1154%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1174%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.5 (2026-08-27) — GAP-8 Phase F3: 统一推理代理 /v1/chat/completions**
+> **📦 v0.10.6 (2026-08-27) — GAP-8 Phase F4: 集群控制 API 契约 /api/v1**
 >
-> master 新增 `/v1/chat/completions` 轻量 pass-through 代理 → `select_nodes` 路由选中节点 agent
-> `/api/v1/chat/completions` → `FusionMLXBackend.chat` (原生 OpenAI 格式, 支持流式 SSE 透传)。
-> 用户令牌经 `chat:complete` RBAC + 租户在途并发配额 (复用 `_tenant_max_concurrent`, 超限 429 +
-> 审计 `chat_quota_exceeded`); 集群令牌内部放行。解决 #27 两套路由分叉 — 客户端经 master 统一推理入口。
-> 详见 [CHANGELOG](docs/CHANGELOG.md)。
+> `/api/v1/*` 路由补齐 typed `response_model=` Pydantic 契约 (V1NodeResponse/V1TaskSubmitResponse/
+> V1TaskProgressResponse/V1ClusterStatsResponse 等 13 模型), 覆盖 9 集群控制操作 (list_nodes/register/
+> remove/submit/migrate/degrade/progress/cluster_stats/observability_suggestions)。旧 `/api/*` raw-dict
+> 路由保留向后兼容; 重复路由遮蔽修复 (first-registered-wins — bless 旧路由加 response_model, 删遮蔽副本)。
+> `docs/API.md` 重写为 HTTP 路由契约表 (9-op), Python 类文档迁出 `docs/PYTHON_API.md`; 新增
+> `tests/test_api_docs_contract.py` 漂移检测 (每 /api/v1 路由须在 API.md)。解决 #32 — fusion-agent-studio
+> 可据此桥接真实集群 (替代内存 dev 集群)。详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 已完成 (Phase A-E + F1-F3): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD → F3 推理代理。
+> 已完成 (Phase A-E + F1-F4): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD → F3 推理代理 → F4 API 契约。
 > 仍待补齐 (Phase F):
-> - **F4 集群控制 API 契约** (#32): /api/v1 响应模型 + HTTP 文档
 > - **F5 令牌轮转** (GAP-8): 多活令牌 + cluster previous-active 滚动重启
 > - **KV no-op** (GAP-7): sync_kv_cache 仅元数据 (张量 KV 上游阻塞, issue #33)
 
