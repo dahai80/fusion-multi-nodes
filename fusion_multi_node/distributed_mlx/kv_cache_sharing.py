@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -44,6 +45,12 @@ ALLOWED_SHARD_KEYS = {
     "is_compressed",
 }
 
+# GAP-7 (#33): KVShard.tensor 序列化键 — 张量负载 base64 (Caveman 压缩后)。
+# ALLOWED_SHARD_KEYS 仅含元数据, tensor 单独经 _serialize_entry/_deserialize_entry 处理
+# (base64 编码 + 压缩标记), 不进 ALLOWED_SHARD_KEYS 白名单 (避免 getattr 直传 bytes)。
+TENSOR_KEY = "tensor"
+COMPRESS_METHOD_KEY = "tensor_compress"
+
 
 @dataclass
 class KVShard:
@@ -59,6 +66,10 @@ class KVShard:
     access_count: int = 0
     last_access: float = 0.0
     is_compressed: bool = False
+    # GAP-7 (#33): 张量负载 — 跨节点 KV 传输的真实张量字节。
+    # 默认 None (纯元数据分片, 向后兼容); 合成/真张量后端填入 (Caveman 压缩后裸 bytes)。
+    # 序列化时经 base64 编码进 JSON, 反序列化时 base64 解码回 bytes。
+    tensor: bytes | None = None
 
 
 @dataclass
@@ -98,6 +109,7 @@ class KVSharingManager:
         enable_compression: bool = True,
         cluster_token: str = "",
         persist_path: str | None = None,
+        transport: Any = None,
     ):
         self.max_local_cache_mb = max_local_cache_mb
         self.max_remote_lookup_ms = max_remote_lookup_ms
@@ -105,6 +117,12 @@ class KVSharingManager:
         # 跨节点 KV HTTP 调用 (lookup/transfer/warm) 需过对端 BearerAuthMiddleware。
         # 缺 token → 全部 401 (生产 agent 默认鉴权)。由 AgentServer 透传集群共享 token。
         self._cluster_token = cluster_token
+        # GAP-7 (#33): KV 张量传输后端 — 合成默认 / MLX env-gated。ctor 注入 (测试可换 stub)。
+        if transport is None:
+            from .kv_tensor_transport import get_kv_transport
+
+            transport = get_kv_transport()
+        self._transport = transport
 
         # 本地缓存
         self._local_cache: OrderedDict[str, KVCacheEntry] = OrderedDict()
@@ -153,6 +171,12 @@ class KVSharingManager:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
             self._http_client = None
+        # GAP-7 (#33): 关张量传输后端 (MLX 后端持有 httpx 客户端)。
+        if self._transport is not None:
+            try:
+                await self._transport.close()
+            except Exception as e:
+                logger.debug(f"KV 张量后端关闭失败 (忽略): {e}")
 
     # ── P1-9 磁盘持久化 ──
 
@@ -445,10 +469,102 @@ class KVSharingManager:
             "remote_indexed_nodes": len(self._remote_cache_index),
             "warm_cache_entries": len(self._warm_cache),
             "compression_enabled": self.enable_compression,
+            "tensor_backend": getattr(self._transport, "name", "unknown"),
         }
 
+    # ── GAP-7 (#33) 张量级 KV 跨节点导出/导入 ──
+
+    async def export_bundle(self, cache_id: str, model_name: str) -> dict[str, Any] | None:
+        """源节点导出 KV 缓存 bundle (含张量) 供跨节点传输。
+
+        查本地缓存 → 经 transport 后端为各分片产出张量 → 序列化含 tensor 的 bundle。
+        返回 None = 本地无此 cache_id。
+        """
+        entry = self.lookup_local_by_id(cache_id)
+        if entry is None:
+            logger.warning(f"GAP-7 KV 导出: cache_id={cache_id} 本地未找到")
+            return None
+        node_id = self._node_id_for_export(entry)
+        # 为缺张量的分片经后端产出 (合成/MLX); 已有张量的分片直传 (避免重复生成)。
+        for shard in entry.shards:
+            if shard.tensor is None:
+                tensor = await self._transport.export_tensor(
+                    cache_id, shard.model_name, node_id
+                )
+                if tensor is not None:
+                    shard.tensor = tensor
+                    shard.is_compressed = self.enable_compression
+                    # 张量字节并入 size_bytes (传输计费)
+                    shard.size_bytes += len(tensor)
+        # 张量并入条目总字节 (传输计费 + 目标内存预算)
+        self._recompute_entry_size(entry)
+        bundle = self._serialize_entry(entry)
+        logger.info(
+            f"GAP-7 KV 导出 bundle: cache_id={cache_id} model={model_name} "
+            f"shards={len(entry.shards)} size={entry.total_size_bytes}B backend={getattr(self._transport,'name','?')}"
+        )
+        return bundle
+
+    async def import_bundle(self, bundle: dict[str, Any]) -> bool:
+        """目标节点导入 KV 缓存 bundle (含张量) 并本地存储。
+
+        反序列化 → 经 transport 后端消费张量 (MLX 装本地引擎 / 合成 no-op) → store_local
+        (LRU + max_local_cache_mb 硬预算门控)。返回 False = 预算超限或解析失败。
+        """
+        try:
+            entry = self._deserialize_entry(bundle)
+        except Exception as e:
+            logger.error(f"GAP-7 KV 导入反序列化失败: {e}")
+            return False
+        node_id = self._node_id_for_export(entry)
+        # 经后端消费张量 (MLX 装本地引擎; 合成 no-op) — 不阻塞存储。
+        for shard in entry.shards:
+            if shard.tensor is not None:
+                await self._transport.import_tensor(
+                    entry.cache_id, shard.model_name, shard.tensor, node_id
+                )
+        stored = self.store_local(entry)
+        if not stored:
+            logger.warning(
+                f"GAP-7 KV 导入 store_local 拒绝 (预算超限): cache_id={entry.cache_id} "
+                f"size={entry.total_size_bytes}B"
+            )
+            return False
+        logger.info(
+            f"GAP-7 KV 导入成功: cache_id={entry.cache_id} model={entry.model_name} "
+            f"shards={len(entry.shards)} size={entry.total_size_bytes}B"
+        )
+        return True
+
+    def _node_id_for_export(self, entry: KVCacheEntry) -> str:
+        """取条目归属节点 id (分片 node_id 优先, 否则首分片, 否则空)。"""
+        for shard in entry.shards:
+            if shard.node_id:
+                return shard.node_id
+        return entry.shards[0].node_id if entry.shards else ""
+
+    def _recompute_entry_size(self, entry: KVCacheEntry) -> None:
+        """重算条目总字节 (张量并入后)。"""
+        total = 0
+        for shard in entry.shards:
+            # size_bytes 已含张量 (export_bundle 并入), 此处汇总
+            total += shard.size_bytes
+        entry.total_size_bytes = total
+
     def _serialize_entry(self, entry: KVCacheEntry) -> dict:
-        """序列化 KV 缓存条目供跨节点传输。"""
+        """序列化 KV 缓存条目供跨节点传输。
+
+        GAP-7 (#33): 张量负载随分片传输 — base64 编码 (Caveman 压缩后) 进 JSON。
+        无 tensor 的分片 (纯元数据) 不写 tensor 键, 向后兼容旧对端。
+        """
+        shards_out = []
+        for s in entry.shards:
+            shard_d = {k: getattr(s, k) for k in ALLOWED_SHARD_KEYS if hasattr(s, k)}
+            if s.tensor is not None:
+                tensor_b64 = base64.b64encode(s.tensor).decode("ascii")
+                shard_d[TENSOR_KEY] = tensor_b64
+                shard_d[COMPRESS_METHOD_KEY] = "caveman" if s.is_compressed else "none"
+            shards_out.append(shard_d)
         return {
             "cache_id": entry.cache_id,
             "model_name": entry.model_name,
@@ -459,16 +575,20 @@ class KVSharingManager:
             "created_at": entry.created_at,
             "ttl_seconds": entry.ttl_seconds,
             "access_count": entry.access_count,
-            "shards": [
-                {k: getattr(s, k) for k in ALLOWED_SHARD_KEYS if hasattr(s, k)}
-                for s in entry.shards
-            ],
+            "shards": shards_out,
         }
 
     def _deserialize_entry(self, data: dict) -> KVCacheEntry:
         shards = []
         for s in data.get("shards", []):
             filtered = {k: v for k, v in s.items() if k in ALLOWED_SHARD_KEYS}
+            # GAP-7 (#33): 张量负载解码 — base64 → bytes。压缩标记 is_compressed 已在元数据。
+            tensor_b64 = s.get(TENSOR_KEY)
+            if tensor_b64:
+                try:
+                    filtered["tensor"] = base64.b64decode(tensor_b64)
+                except Exception as e:
+                    logger.warning(f"KV 张量解码失败, 降级为无张量分片: {e}")
             shards.append(KVShard(**filtered))
         return KVCacheEntry(
             cache_id=data["cache_id"],

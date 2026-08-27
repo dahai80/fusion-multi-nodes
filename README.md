@@ -5,27 +5,27 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.7-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.11.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1181%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1203%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.7 (2026-08-27) — GAP-8 Phase F5: 令牌轮换 + 多租户运维 Runbook**
+> **📦 v0.11.0 (2026-08-27) — GAP-7 KV 张量跨节点传输 (close #33)**
 >
-> 用户令牌多活轮换 (rotate 签新留旧, revoke 另调) + 集群共享令牌零停机滚动
-> (`FUSION_CLUSTER_TOKEN_PREVIOUS` 重叠窗 — current+previous 并存期常量时间比较,
-> 出站始终发 current, 按 master→agent 顺序轮换无 401 离线)。新增 `docs/OPERATIONS.md`
-> 多租户用户令牌运维章节 (bootstrap admin / CRUD / 轮换吊销 / 审计)。新增
-> `tests/test_token_rotation.py` (用户多活+revoke, cluster current+previous, 出站用 current)。
+> `ClusterMaster.sync_kv_cache` 经可插拔张量后端 (合成默认 / MLX 真张量 env-gated
+> `FUSION_KV_TENSOR_BACKEND=mlx`) 编排源 agent `/api/kv/export` → 目标 `/api/kv/import`,
+> 返 `True`。`KVShard` 加 `tensor` 字段 (base64 压缩随 JSON 传输, `store_local` 预算门)。
+> 合成后端满足 #33 验收 (张量 round-trip 跨 2 agent); 真张量待上游 fusion-mlx issue #650
+> 落地激活 (env-gated bonus, 404→降级合成 + warn)。新增 `kv_tensor_transport.py` +
+> 三组测试 (`test_kv_tensor_serialize.py` 11, `test_kv_export_import_routes.py` 6,
+> `test_kv_tensor_e2e.py` 4+1 skip) + 改写 `test_new_features.py` sync 用例。
 > 详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 已完成 (Phase A-E + F1-F5): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD → F3 推理代理 → F4 API 契约 → F5 令牌轮换。
-> 仍待补齐:
-> - **KV no-op** (GAP-7): sync_kv_cache 仅元数据 (张量 KV 上游阻塞, issue #33)
+> 已完成 (Phase A-F + GAP-7): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1-F5 多租户 → GAP-7 KV 张量传输。
 
 ---
 
@@ -853,7 +853,7 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 
 **P2 (H3/R3/R4/R5/R7/E1/E4/E5/E6/E8/E9) — 原型门禁/安全/健壮性**
 - [x] H3 HA 死代码 (StandbyMaster/MasterElection) 文档降级标注
-- [x] R3 `sync_kv_cache` 仅登记元数据, 返回 False (张量迁移待 P3-28 长期; 上游 #621 已交付但无 KV 张量端点)
+- [x] R3 `sync_kv_cache` 经张量后端编排骨跨节点传输, 返 True (P3-28 / GAP-7 / #33 已交付 v0.11.0; 合成默认 + MLX 真张量 env-gated 待上游 #650)
 - [x] R4 `cancel_task` 改 `asyncio.gather` + 复用单 AsyncClient (去顺序通知)
 - [x] R5 agent `_running_tasks` set + 五维负载上报
 - [x] R7 模型大小正则边界匹配 (防 `1b` 误匹配 `10b/100b`)
@@ -1044,7 +1044,8 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 ### P3 — 长期 (审计 §5.9 / 功能完整度)
 
 - [x] **P3-27 PIPELINE 端到端** — 上游 fusion-mlx `/distributed/*` 已交付 (issue #621/#630 closed: load_shard/pipeline_step/decode/sync_weights); 多节点客户端存根 `node_agent.load_shard`/`pipeline_step` + `_execute_pipeline_step` 已接; 真 E2E `tests/test_pipeline_e2e.py` (Llama-3.2-1B 16 层切 [0,8]/[8,16] b64.npy 张量 round-trip) 验证通过
-- [ ] **P3-28 张量级 KV 跨节点传输** — `sync_kv_cache` 仍为 no-op (元数据登记, 返回 False); 上游无 KV 张量迁移端点, 本仓需自建传输通道 → 跟踪 issue #33, 长期
+- [x] **P3-28 张量级 KV 跨节点传输** (GAP-7, #33) — v0.11.0 交付: `sync_kv_cache` 经可插拔张量后端 (合成默认 / MLX 真张量 env-gated `FUSION_KV_TENSOR_BACKEND=mlx`) 编排源 `/api/kv/export` → 目标 `/api/kv/import`, 返 True; `KVShard.tensor` base64 压缩随 JSON 跨节点; 合成后端满足 #33 验收 (张量 round-trip 跨 2 agent); 真张量待上游 fusion-mlx issue #650 落地激活 (404→降级合成 + warn)
+- [x] 1203 tests, 0 ruff errors
 - [x] **P3-29 部分成功语义** (§5.9) — DATA 并行部分节点成功部分失败不再整任务 FAILED: 新增 `TaskStatus.PARTIAL` 终态 (不重试, 保留 `result.outputs` 供客户端取部分结果); `_dispatch_data` 聚合三态 (全成功 COMPLETED / 部分成功 PARTIAL / 全失败 FAILED); `_finalize_task(partial=)` 分支 + 事件总线 emit `partial`; stats `partial_tasks` 计数 + Prometheus gauge `fusion_cluster_tasks_partial`; CLI 🟡 图标; `/api/tasks` 进度事件 `partial`; 崩溃恢复 PARTIAL 终态保持 (不重派); 集成测试 `test_data_parallel_partial_success` (agent-a 成功 + agent-b 失败 → PARTIAL 保留 output)
 - [x] 1036 tests, 0 ruff errors
 

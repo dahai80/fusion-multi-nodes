@@ -8,6 +8,12 @@ from .kv_cache_sharing import (
     KVShard,
     KVSharingManager,
 )
+from .kv_tensor_transport import (
+    KVTransportBackend,
+    MLXKVTransport,
+    SyntheticKVTransport,
+    get_kv_transport,
+)
 
 __all__ = [
     "CavemanCompressor",
@@ -20,5 +26,9 @@ __all__ = [
     "KVCacheWarmScheduler",
     "KVShard",
     "KVSharingManager",
+    "KVTransportBackend",
+    "MLXKVTransport",
     "ModelShard",
+    "SyntheticKVTransport",
+    "get_kv_transport",
 ]

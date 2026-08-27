@@ -538,6 +538,23 @@ class TestMasterServerKVCache:
         resp = await client.get("/api/kv/find/unknown-model", headers=AUTH_HEADERS)
         assert resp.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_kv_sync_route_missing_entry(self, client):
+        # GAP-7 (#33): /api/kv/sync 路由 — 条目缺失返 synced=0 (skip), 非 500。
+        resp = await client.post(
+            "/api/kv/sync",
+            json={
+                "cache_id": "nope",
+                "model_name": "llama-3b",
+                "source_node_id": "n1",
+                "size_mb": 0.1,
+                "target_node_id": "n2",
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["synced"] == 0
+
 
 class TestMasterServerStats:
     @pytest.mark.asyncio

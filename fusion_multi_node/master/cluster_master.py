@@ -1561,8 +1561,21 @@ class ClusterMaster:
                     self.kv_cache.pop(cid, None)
         return None
 
-    async def sync_kv_cache(self, cache_id: str, model_name: str, source_node_id: str, size_mb: float) -> bool:
-        """通过 FMP 协议同步 KV 缓存元数据到集群。"""
+    async def sync_kv_cache(
+        self,
+        cache_id: str,
+        model_name: str,
+        source_node_id: str,
+        size_mb: float,
+        target_node_id: str = "",
+    ) -> bool:
+        """GAP-7 (#33): 跨节点同步 KV 张量 — 源 agent /api/kv/export → 目标 agent /api/kv/import。
+
+        解析注册的 KV 条目 (master 元数据), 选目标节点 (显式 target_node_id 或
+        select_nodes(DATA) 排除源), 经集群 token Bearer + SSRF 守卫驱动两端 agent
+        HTTP 路由。目标 import_bundle store_local 预算硬门 (max_local_cache_mb + LRU)。
+        返回 True = 确认导入; False = 任一跳失败或条目缺失 (不静默部分成功)。
+        """
         from fusion_multi_node.protocol import KVCacheSyncMessage
 
         sync_msg = KVCacheSyncMessage(
@@ -1573,25 +1586,133 @@ class ClusterMaster:
             protocol="fmp",
         )
         logger.info(
-            f"M9-04 FMP KV 缓存同步(元数据): cache_id={cache_id} model={model_name} "
+            f"GAP-7 KV 张量同步: cache_id={cache_id} model={model_name} "
             f"source={source_node_id} size={size_mb:.1f}MB protocol={sync_msg.protocol}"
         )
 
+        # 1. 取注册条目 + 源/目标节点 (锁内快照, 锁外 HTTP 避长持锁)
         async with self._kv_lock:
             entry = self.kv_cache.get(cache_id)
             if not entry:
-                logger.warning(f"M9-04 KV 缓存同步: cache_id={cache_id} 未注册，跳过同步")
+                logger.warning(f"GAP-7 KV 同步: cache_id={cache_id} 未注册，跳过同步")
                 return False
 
-        # R3: 仅登记了 KV 缓存元数据消息, 未实现张量级跨节点传输执行层。
-        # 上游 fusion-mlx /distributed/* 已交付 (issue #621/#630 closed: load_shard/
-        # pipeline_step/decode/sync_weights), 但无 KV 张量迁移端点 → 本仓需自建
-        # 跨节点张量传输通道 (P3-28 长期)。当前真实同步未发生, 返回 False 如实反映。
-        logger.warning(
-            f"M9-04 KV 缓存跨节点传输未实现: cache_id={cache_id} model={model_name} "
-            f"source={source_node_id}。元数据已登记, 张量迁移待 P3-28 长期落地"
+        src_id = source_node_id or entry.node_id
+        nodes_snap = await self._snapshot_nodes([src_id])
+        src_node = nodes_snap.get(src_id)
+        if not src_node:
+            logger.warning(f"GAP-7 KV 同步: 源节点 {src_id} 不存在或已离线")
+            return False
+
+        # 2. 选目标节点
+        if target_node_id:
+            tgt_snap = await self._snapshot_nodes([target_node_id])
+            tgt_node = tgt_snap.get(target_node_id)
+            if not tgt_node:
+                logger.warning(f"GAP-7 KV 同步: 目标节点 {target_node_id} 不存在或已离线")
+                return False
+        else:
+            # 默认选一个非源在线节点 (DATA, 小内存需求)
+            candidates = await self.select_nodes(
+                ParallelMode.DATA,
+                required_memory_gb=0.0,
+                count=1,
+                exclude_nodes=[src_id],
+            )
+            if not candidates:
+                logger.warning(f"GAP-7 KV 同步: 无可用目标节点 (排除源 {src_id})")
+                return False
+            tgt_node = candidates[0]
+
+        # 3. SSRF 守卫两端
+        if not is_safe_peer_host(src_node.ip_address):
+            logger.warning(f"GAP-7 KV 同步: 源节点 {src_id} ip 非安全对端")
+            return False
+        if not is_safe_peer_host(tgt_node.ip_address):
+            logger.warning(f"GAP-7 KV 同步: 目标节点 {tgt_node.node_id} ip 非安全对端")
+            return False
+
+        token = self._get_dispatch_token()
+        client = await self._get_dispatch_http()
+        headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master", "X-Node-Role": "master"}
+        # 超时随张量大小缩放 (P1-13 模式), 下限 30s
+        http_timeout = max(30.0, size_mb * 2.0 + 30.0)
+
+        # 4. 源 agent /api/kv/export 取含张量 bundle
+        src_url = build_safe_url(mtls_scheme(), src_node.ip_address, src_node.port, "/api/kv/export")
+        try:
+            exp_resp = await client.post(
+                src_url,
+                json={"cache_id": cache_id, "model_name": model_name},
+                headers=headers,
+                timeout=http_timeout,
+            )
+            if exp_resp.status_code != 200:
+                logger.warning(
+                    f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: "
+                    f"{exp_resp.text[:200]}"
+                )
+                return False
+            bundle = exp_resp.json().get("bundle")
+            if not bundle:
+                logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 返回空 bundle")
+                return False
+        except Exception as e:
+            logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 异常: {e}")
+            return False
+
+        # 5. 目标 agent /api/kv/import 存入 (预算门在 store_local)
+        tgt_url = build_safe_url(mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import")
+        try:
+            imp_resp = await client.post(
+                tgt_url,
+                json={"bundle": bundle},
+                headers=headers,
+                timeout=http_timeout,
+            )
+            if imp_resp.status_code != 200:
+                logger.warning(
+                    f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import HTTP {imp_resp.status_code}: "
+                    f"{imp_resp.text[:200]}"
+                )
+                return False
+            stored = imp_resp.json().get("stored", 0)
+            if stored != 1:
+                logger.warning(
+                    f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import 预算拒存 (stored=0), "
+                    f"cache_id={cache_id}"
+                )
+                return False
+        except Exception as e:
+            logger.warning(f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import 异常: {e}")
+            return False
+
+        # 6. 更新 master 元数据 — 记录目标节点持有副本
+        async with self._kv_lock:
+            existing = self.kv_cache.get(cache_id)
+            if existing:
+                # 复制条目指向目标节点 (标记张量副本已迁移), 保留原源记录供回溯
+                replica = KVCacheEntry(
+                    cache_id=f"{cache_id}@{tgt_node.node_id}",
+                    model_name=existing.model_name,
+                    node_id=tgt_node.node_id,
+                    created_at=existing.created_at,
+                    size_mb=existing.size_mb,
+                    ttl_seconds=existing.ttl_seconds,
+                    access_count=existing.access_count,
+                )
+                self.kv_cache[replica.cache_id] = replica
+                _trim = len(self.kv_cache) - self._max_kv_cache
+                if _trim > 0:
+                    oldest = sorted(self.kv_cache.items(), key=lambda kv: kv[1].created_at)[:_trim]
+                    for cid, _ in oldest:
+                        del self.kv_cache[cid]
+
+        logger.info(
+            f"GAP-7 KV 张量同步成功: cache_id={cache_id} {src_id}→{tgt_node.node_id} "
+            f"size={size_mb:.1f}MB"
         )
-        return False
+        return True
 
     # ── M3-03 选举配置 ──
     # P4: setup_election 已接 start(ha_config=...) — enabled=True 时启动选举循环。
