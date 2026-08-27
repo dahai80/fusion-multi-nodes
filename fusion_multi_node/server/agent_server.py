@@ -580,7 +580,11 @@ class AgentServer:
 
         @app.get("/api/hardware")
         async def hardware_info():
-            info = self.agent.collect_hardware_info()
+            # P1-2 (审计 §4.5): collect_hardware_info 调 system_profiler/ipconfig (至 5s)
+            # 同步阻塞事件循环 → 经 asyncio.to_thread 移出, 对齐 node_agent.report_hardware 范式。
+            import asyncio
+
+            info = await asyncio.to_thread(self.agent.collect_hardware_info)
             return info
 
     async def start(self, host: str = "127.0.0.1", port: int = 11458, ssl_context=None) -> None:

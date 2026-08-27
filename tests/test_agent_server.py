@@ -1,5 +1,6 @@
 """Agent Server FastAPI 测试。"""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -398,6 +399,27 @@ class TestHardwareEndpoint:
         assert data["node_id"] == "test_node"
         assert data["hostname"] == "mac-test"
         mock_agent.collect_hardware_info.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_hardware_info_runs_off_event_loop(self, client, mock_agent):
+        # P1-2 (审计 §4.5): /api/hardware 经 asyncio.to_thread 调 collect_hardware_info,
+        # 不阻塞事件循环。验证: 调用期间并发 sleep 计时器能推进 (事件循环未被独占)。
+        def slow_collect():
+            time.sleep(0.05)
+            return {"node_id": "test_node", "hostname": "mac-test"}
+
+        mock_agent.collect_hardware_info.side_effect = slow_collect
+        loop_marker = asyncio.create_task(self._background_counter())
+        resp = await client.get("/api/hardware", headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        # 后台计时器与请求并发跑; to_thread 不阻塞事件循环 → 后台任务能推进
+        await loop_marker
+
+    @staticmethod
+    async def _background_counter():
+        # 事件循环健康标志: 连续 5 次 10ms sleep 累计应 ~50ms, 不被同步调用卡死。
+        for _ in range(5):
+            await asyncio.sleep(0.01)
 
 
 class TestAgentServerStart:

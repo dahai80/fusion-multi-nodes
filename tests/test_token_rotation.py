@@ -32,9 +32,7 @@ def _make_user_server(tmp_path, monkeypatch, *, users=None):
 
 
 def _client(server):
-    return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=server.app), base_url="http://test"
-    )
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test")
 
 
 class TestUserTokenRotation:
@@ -63,9 +61,7 @@ class TestUserTokenRotation:
         assert r_new.status_code == 200
 
     async def test_rotate_route_returns_new_keeps_old(self, tmp_path, monkeypatch):
-        server, tok = _make_user_server(
-            tmp_path, monkeypatch, users={"admin": UserRole.ADMIN, "alice": UserRole.USER}
-        )
+        server, tok = _make_user_server(tmp_path, monkeypatch, users={"admin": UserRole.ADMIN, "alice": UserRole.USER})
         old = tok["alice"]
         async with _client(server) as c:
             r = await c.post(
@@ -112,9 +108,7 @@ class TestClusterTokenRotation:
         server = _make_cluster_server(tmp_path, monkeypatch, current=current, previous=None)
         async with _client(server) as c:
             r_cur = await c.get("/api/v1/nodes", headers={"Authorization": f"Bearer {current}"})
-            r_prev = await c.get(
-                "/api/v1/nodes", headers={"Authorization": "Bearer stale-secret"}
-            )
+            r_prev = await c.get("/api/v1/nodes", headers={"Authorization": "Bearer stale-secret"})
         assert r_cur.status_code == 200
         assert r_prev.status_code == 401
 
@@ -125,9 +119,7 @@ class TestClusterTokenRotation:
         server = _make_cluster_server(tmp_path, monkeypatch, current=current, previous=current)
         async with _client(server) as c:
             r_cur = await c.get("/api/v1/nodes", headers={"Authorization": f"Bearer {current}"})
-            r_other = await c.get(
-                "/api/v1/nodes", headers={"Authorization": "Bearer other-secret"}
-            )
+            r_other = await c.get("/api/v1/nodes", headers={"Authorization": "Bearer other-secret"})
         assert r_cur.status_code == 200
         assert r_other.status_code == 401
 

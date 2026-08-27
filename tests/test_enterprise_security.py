@@ -154,6 +154,49 @@ class TestAuditLogger:
         al.log(action="x")
         assert env_path.exists()
 
+    def test_write_failure_threshold_escalates_log_level(self, tmp_path, caplog):
+        # P1-7 (审计 §3.5): 连续写失败达阈值 (3) → 日志升级 error (首两次 warning)。
+        import logging
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x")
+        al = AuditLogger(log_path=str(blocker / "audit.log"))
+        al._WRITE_FAIL_ALERT_THRESHOLD = 3
+        with caplog.at_level(logging.WARNING, logger="fusion_multi_node.security.audit_log"):
+            for _ in range(3):
+                al.log(action="fail")
+        # 前两次 warning, 第三次 error
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) >= 1, "第三次写失败应升级 error"
+        assert any("审计日志写入连续失败" in r.message for r in errors)
+        assert len(warnings) >= 2, "前两次应为 warning"
+
+    def test_write_success_resets_fail_count(self, tmp_path, caplog):
+        # P1-7: 写成功清计数 — 同实例失败两次后写成功 (计数清 0), 再失败一次仍 warning (未达阈值 3)。
+        import logging
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x")
+        good_path = tmp_path / "good.log"
+        al = AuditLogger(log_path=str(blocker / "audit.log"))
+        al._WRITE_FAIL_ALERT_THRESHOLD = 3
+        # 两次失败 (计数到 2)
+        al.log(action="f1")
+        al.log(action="f2")
+        # 切到可写路径写成功 (计数应清 0)
+        al._path = good_path
+        al.log(action="ok")
+        assert good_path.exists()
+        # 切回阻塞路径再失败一次 — 计数从 0 起, 应 warning 不应 error
+        al._path = blocker / "audit.log"
+        with caplog.at_level(logging.WARNING, logger="fusion_multi_node.security.audit_log"):
+            al.log(action="f3")
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(warnings) >= 1, "计数重置后单次失败应 warning"
+        assert errors == [], "计数重置后单次失败不应升级 error"
+
 
 # ── GAP-8: 鉴权失败写审计 (BearerAuthMiddleware) ──
 

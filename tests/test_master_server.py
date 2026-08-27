@@ -1,6 +1,7 @@
 """Master Server FastAPI coverage tests."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -696,8 +697,9 @@ class TestNodeApprovalAPI:
 
     @pytest.mark.asyncio
     async def test_approve_missing_node_id(self, client2):
+        # P1-10: pydantic NodeApproveRequest.node_id 必填, 空 body → 422 (FastAPI validation)
         resp = await client2.post("/api/nodes/approve", json={}, headers=AUTH_HEADERS)
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
     @pytest.mark.asyncio
     async def test_pending_requires_auth(self, client2):
@@ -765,6 +767,32 @@ class TestPrometheusMetrics:
         assert "fusion_cluster_nodes_total 0" in body
         assert "fusion_cluster_dispatch_latency_seconds_count 0" in body
         assert 'fusion_cluster_dispatch_latency_seconds{quantile="0.5"} 0.0000' in body
+
+    @pytest.mark.asyncio
+    async def test_p1_24_node_level_metrics(self, master_server, client):
+        """P1-24: Prometheus 补熔断/限流/节点级指标 — banned/rate_limited/per-node gauges。"""
+        await _register_node(client, node_id="n1")
+        await _register_node(client, node_id="n2")
+        master = master_server.master
+        # 植入限流计数 + ban n2 (直注 _banned_nodes, 模拟 report_fault 达阈值路径 — 节点仍注册)
+        master._rate_limited_total = 7
+        master._banned_nodes["n2"] = time.time() + 300.0
+
+        body = (await client.get("/api/v1/metrics", headers=AUTH_HEADERS)).text
+
+        # 集群级: banned 计数 + rate_limited 累计
+        assert "fusion_cluster_banned_nodes" in body
+        assert "fusion_cluster_banned_nodes 1" in body
+        assert "fusion_cluster_rate_limited_total" in body
+        assert "fusion_cluster_rate_limited_total 7" in body
+        # 节点级: n1 正常 (banned=0), n2 ban 中 (banned=1)
+        assert 'fusion_node_banned{node_id="n1"} 0' in body
+        assert 'fusion_node_banned{node_id="n2"} 1' in body
+        assert 'fusion_node_active_tasks{node_id="n1"}' in body
+        assert 'fusion_node_memory_available_gb{node_id="n1"}' in body
+        # HELP/TYPE 注释齐
+        assert "# HELP fusion_node_banned" in body
+        assert "# TYPE fusion_node_banned gauge" in body
 
 
 class TestMasterServerStartPortConflict:

@@ -281,9 +281,7 @@ class DistributedMLXBridge:
                 processed.append(r)
 
         ok_count = sum(1 for r in processed if "error" not in r)
-        logger.info(
-            f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点, 成功={ok_count}, 分配: {load}"
-        )
+        logger.info(f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点, 成功={ok_count}, 分配: {load}")
         return processed
 
     async def _single_inference(
@@ -332,9 +330,7 @@ class DistributedMLXBridge:
         except Exception as e:
             raise RuntimeError(f"获取模型配置失败({model_name}): fusion-mlx 不可达: {e}") from e
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"获取模型配置失败({model_name}): fusion-mlx 返回 {resp.status_code}: {resp.text[:200]}"
-            )
+            raise RuntimeError(f"获取模型配置失败({model_name}): fusion-mlx 返回 {resp.status_code}: {resp.text[:200]}")
         return resp.json()
 
     async def sync_weights(

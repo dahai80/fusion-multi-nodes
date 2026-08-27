@@ -42,9 +42,7 @@ class FakeMLXBackend(FusionMLXBackend):
     ) -> dict[str, Any]:
         self.chat_calls.append({"model": model, "messages": messages})
         return {
-            "choices": [
-                {"message": {"content": f"echo@{self._node_id}:{messages[0]['content']}"}}
-            ],
+            "choices": [{"message": {"content": f"echo@{self._node_id}:{messages[0]['content']}"}}],
             "usage": {"total_tokens": 10},
         }
 
@@ -58,9 +56,7 @@ class FakeMLXBackend(FusionMLXBackend):
 def _make_server(backend: FakeMLXBackend | None = None) -> tuple[AgentServer, FakeMLXBackend]:
     backend = backend or FakeMLXBackend()
     agent = NodeAgent(
-        config=AgentConfig(
-            node_id="agent-x", cluster_token=TEST_TOKEN, agent_port=22458
-        ),
+        config=AgentConfig(node_id="agent-x", cluster_token=TEST_TOKEN, agent_port=22458),
         backend=backend,
     )
     server = AgentServer(agent=agent, shared_token=TEST_TOKEN)

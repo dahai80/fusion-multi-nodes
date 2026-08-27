@@ -198,6 +198,69 @@ class LoadUpdateRequest(BaseModel):
     net_rtt_ms: float = 0.0
 
 
+# P1-10 (审计 §6.7): 9 raw dict 路由 → pydantic 校验 (类型+默认), 删手动 req.get 校验。
+class IncrementalSyncRequest(BaseModel):
+    model_name: str
+    source_host: str
+    source_port: int = 11452
+    remote_manifest: dict[str, Any] = {}
+
+
+class ManualJoinRequest(BaseModel):
+    node_id: str
+    hostname: str = ""
+    ip_address: str = ""
+    port: int = 11458
+    cluster_secret: str = ""
+    capabilities: list[str] = []
+
+
+class NodeApproveRequest(BaseModel):
+    node_id: str
+    approved_by: str = "admin"
+
+
+class NodeRejectRequest(BaseModel):
+    node_id: str
+    reason: str = ""
+
+
+class AutoscalerConfigUpdateRequest(BaseModel):
+    policy: str = ""
+    min_nodes: int | None = None
+    max_nodes: int | None = None
+    scale_up_threshold: float | None = None
+    scale_down_threshold: float | None = None
+    cooldown_seconds: float | None = None
+    idle_timeout_seconds: float | None = None
+    check_interval: float | None = None
+    rebalance_threshold: float | None = None
+
+
+# HA 路由 — VoteRequest 已在 election.py (dataclass, 非 pydantic), vote 路由用 pydantic HAVoteRequest。
+class HAVoteRequest(BaseModel):
+    term: int = 0
+    candidate_id: str = ""
+    candidate_priority: int = 0
+    last_log_index: int = 0
+    last_log_term: int = 0
+
+
+class HASyncTasksRequest(BaseModel):
+    tasks: list[dict[str, Any]] = []
+
+
+class HASyncStateRequest(BaseModel):
+    nodes: list[dict[str, Any]] = []
+    kv_cache: list[dict[str, Any]] = []
+    banned_nodes: dict[str, Any] = {}
+
+
+class HAHeartbeatRequest(BaseModel):
+    leader_id: str
+    term: int = 0
+
+
 # F4 (#32): /api/v1 契约响应模型 — 对齐 _node_to_resp / _task_to_resp 实际输出。
 # 旧 TaskResponse/NodeResponse (v0.1 时代, 字段过时且未接 response_model) 已删, 统一用 V1*。
 class V1NodeResponse(BaseModel):
@@ -476,11 +539,12 @@ class MasterServer:
             return manifest.to_dict()
 
         @app.post("/api/sync/incremental")
-        async def incremental_sync(req: dict):
-            model_name = req.get("model_name", "")
-            source_host = req.get("source_host", "")
-            source_port = req.get("source_port", 11452)
-            remote_manifest_data = req.get("remote_manifest", {})
+        async def incremental_sync(req: IncrementalSyncRequest, request: Request):
+            _enforce_user_rbac(request, "/api/sync/incremental", "POST")
+            model_name = req.model_name
+            source_host = req.source_host
+            source_port = req.source_port
+            remote_manifest_data = req.remote_manifest
             if not model_name or not source_host:
                 raise HTTPException(status_code=400, detail="model_name and source_host required")
             from fusion_multi_node.master.cluster_sync import ModelManifest
@@ -522,25 +586,27 @@ class MasterServer:
 
         # M1-05 手动 IP 加入 — 走审批门，默认不自动注册
         @app.post("/api/join")
-        async def manual_join(req: dict):
+        async def manual_join(req: ManualJoinRequest, request: Request):
+            _enforce_user_rbac(request, "/api/join", "POST")
             from fusion_multi_node.discovery.manual_join import ManualJoinManager
 
             if not hasattr(self, "_join_manager"):
                 cluster_secret = getattr(self.master, "_cluster_secret", "")
                 self._join_manager = ManualJoinManager(cluster_secret=cluster_secret, auto_approve=False)
-            result = self._join_manager.handle_join_request(req)
+            # P1-10: handle_join_request 取 dict — pydantic model_dump 转回 (含 capabilities 默认)。
+            result = self._join_manager.handle_join_request(req.model_dump())
             if result.get("status") != "ok":
                 raise HTTPException(status_code=400, detail=result.get("detail", "加入失败"))
-            node_id = req.get("node_id", "")
+            node_id = req.node_id
             if not node_id or not is_safe_path_segment(node_id):
                 raise HTTPException(status_code=400, detail="缺少或非法 node_id")
             # 仅当显式自动审批通过才注册；否则进入待审批，等待 /api/nodes/approve
             if result.get("auto_approved", False) and self._approval_manager is None:
                 node = NodeInfo(
                     node_id=node_id,
-                    hostname=req.get("hostname", ""),
-                    ip_address=req.get("ip_address", ""),
-                    port=req.get("port", 11458),
+                    hostname=req.hostname,
+                    ip_address=req.ip_address,
+                    port=req.port,
                     status=NodeStatus.ONLINE,
                     last_heartbeat=time.time(),
                 )
@@ -550,9 +616,9 @@ class MasterServer:
             elif self._approval_manager is not None:
                 self._approval_manager.request_join(
                     node_id=node_id,
-                    hostname=req.get("hostname", ""),
-                    ip_address=req.get("ip_address", ""),
-                    port=req.get("port", 11458),
+                    hostname=req.hostname,
+                    ip_address=req.ip_address,
+                    port=req.port,
                 )
                 result["status"] = "ok"
                 result["auto_approved"] = False
@@ -562,7 +628,8 @@ class MasterServer:
         # ── 节点管理 ──
 
         @app.post("/api/nodes/register")
-        async def register_node(req: NodeRegisterRequest):
+        async def register_node(req: NodeRegisterRequest, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/register", "POST")
             if not is_safe_path_segment(req.node_id):
                 raise HTTPException(status_code=400, detail="非法 node_id")
             # P1-17 (审计 §6.7): 协议版本兼容校验 — 低于最低兼容版本拒注册并给降级指引。
@@ -667,11 +734,12 @@ class MasterServer:
             return {"status": "ok", "node_id": req.node_id}
 
         @app.post("/api/nodes/approve")
-        async def approve_node(req: dict):
+        async def approve_node(req: NodeApproveRequest, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/approve", "POST")
             if not self._approval_manager:
                 raise HTTPException(status_code=400, detail="审批管理器未启用")
-            node_id = req.get("node_id", "")
-            approved_by = req.get("approved_by", "admin")
+            node_id = req.node_id
+            approved_by = req.approved_by
             if not node_id:
                 raise HTTPException(status_code=400, detail="缺少 node_id")
             ok = self._approval_manager.approve(node_id, approved_by)
@@ -720,11 +788,12 @@ class MasterServer:
             return {"status": "ok", "node_id": node_id, "approved_by": approved_by}
 
         @app.post("/api/nodes/reject")
-        async def reject_node(req: dict):
+        async def reject_node(req: NodeRejectRequest, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/reject", "POST")
             if not self._approval_manager:
                 raise HTTPException(status_code=400, detail="审批管理器未启用")
-            node_id = req.get("node_id", "")
-            reason = req.get("reason", "")
+            node_id = req.node_id
+            reason = req.reason
             if not node_id:
                 raise HTTPException(status_code=400, detail="缺少 node_id")
             ok = self._approval_manager.reject(node_id, reason)
@@ -759,7 +828,8 @@ class MasterServer:
             return {"pending": pending}
 
         @app.post("/api/nodes/heartbeat")
-        async def heartbeat(req: HeartbeatRequest):
+        async def heartbeat(req: HeartbeatRequest, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/heartbeat", "POST")
             ok = await self.master.update_heartbeat(
                 req.node_id,
                 total_memory_gb=req.total_memory_gb,
@@ -844,9 +914,16 @@ class MasterServer:
                     detail="权限不足: task submit",
                 )
                 raise HTTPException(status_code=403, detail="权限不足: task submit")
-            # HA standby 守卫: 选举已配置且非 leader → 拒绝提交
+            # HA standby/选举空窗守卫: 选举已配置时, 非 leader → 拒绝提交;
+            # 非 leader 且 leader 未定 (选举空窗) → 拒绝提交 (P1-17, 避免双主脑裂窗口误派)。
             if self.master._election is not None and not self.master._is_leader:
                 raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝任务提交")
+            if (
+                self.master._election is not None
+                and not self.master._is_leader
+                and not self.master._election.leader_known
+            ):
+                raise HTTPException(status_code=503, detail="选举过渡中, leader 未定, 拒绝任务提交")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
             # F2: 用户令牌 → task.user 取已认证身份 (忽略客户端 req.user, 防伪造审计 actor)。
             # 集群令牌 → req.user (内部可信自声明, HA/CLI/agent 路径)。
@@ -991,6 +1068,13 @@ class MasterServer:
                     "stream": req.stream,
                     "extra": req.extra,
                 }
+                # P1-3 (审计 §3.7): chat 代理路径可选 PII 脱敏 (config security.http_pii_scrub, 默认关)。
+                if self.master._is_http_pii_scrub_enabled():
+                    scrubber = self.master._get_pii_scrubber()
+                    scrubbed_msgs, hits = scrubber.scrub_value(payload["messages"])
+                    if hits:
+                        payload["messages"] = scrubbed_msgs
+                        logger.info(f"P1-3 chat 代理 messages 脱敏命中: {hits}")
                 self._audit.log(
                     actor=user_actor or "master",
                     action="chat",
@@ -1001,8 +1085,7 @@ class MasterServer:
                     detail=f"model={req.model} stream={req.stream}",
                 )
                 logger.info(
-                    f"chat 代理转发: user={user_actor!r} → node={node.node_id} "
-                    f"model={req.model} stream={req.stream}"
+                    f"chat 代理转发: user={user_actor!r} → node={node.node_id} model={req.model} stream={req.stream}"
                 )
                 if req.stream:
                     # 流式: 透传 agent SSE 字节流到客户端。stream 生命周期绑生成器 (aiter_raw 消费时才取),
@@ -1020,6 +1103,7 @@ class MasterServer:
                         finally:
                             if user_actor:
                                 await self.master.release_chat_slot(user_actor)
+
                     stream_released = True  # 流式槽交 _relay 释放, 外层 finally 跳过
                     return StreamingResponse(_relay(), media_type="text/event-stream")
                 # 非流式: 同步取 agent 响应, 原生 OpenAI 格式直返。
@@ -1149,7 +1233,8 @@ class MasterServer:
         # ── KV 缓存 ──
 
         @app.post("/api/kv/register")
-        async def register_kv(req: KVRegisterRequest):
+        async def register_kv(req: KVRegisterRequest, request: Request):
+            _enforce_user_rbac(request, "/api/kv/register", "POST")
             entry = KVCacheEntry(
                 cache_id=req.cache_id,
                 model_name=req.model_name,
@@ -1162,7 +1247,8 @@ class MasterServer:
             return {"status": "ok", "cache_id": req.cache_id}
 
         @app.get("/api/kv/find/{model_name}")
-        async def find_kv(model_name: str):
+        async def find_kv(model_name: str, request: Request):
+            _enforce_user_rbac(request, "/api/kv/find", "GET")
             entry = await self.master.find_kv_cache(model_name)
             if not entry:
                 raise HTTPException(status_code=404, detail=f"模型 {model_name} 无可用 KV 缓存")
@@ -1175,7 +1261,8 @@ class MasterServer:
             }
 
         @app.post("/api/kv/sync")
-        async def sync_kv(req: KVSyncRequest):
+        async def sync_kv(req: KVSyncRequest, request: Request):
+            _enforce_user_rbac(request, "/api/kv/sync", "POST")
             # GAP-7 (#33): 跨节点 KV 张量同步 — master 编排源 agent /api/kv/export → 目标 /api/kv/import。
             # standby 守卫 (非 leader 拒绝派发型操作)。
             if self.master._election is not None and not self.master._is_leader:
@@ -1236,14 +1323,16 @@ class MasterServer:
         # 纯文本 0.0.4 exposition, 无外部依赖。Bearer 鉴权不豁免 (内部抓取携带 token)。
 
         @app.get("/api/v1/metrics")
-        async def prometheus_metrics():
+        async def prometheus_metrics(request: Request):
+            _enforce_user_rbac(request, "/api/v1/metrics", "GET")
             from fastapi.responses import PlainTextResponse
 
             body = await self.master.get_prometheus_metrics()
             return PlainTextResponse(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
         @app.get("/api/v1/nodes/{node_id}/metrics")
-        async def node_metrics(node_id: str):
+        async def node_metrics(node_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/v1/nodes/metrics", "GET")
             node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
@@ -1373,7 +1462,8 @@ class MasterServer:
         # 旧 GET 返回 {"enabled": False} — 歧义 ("禁用" vs "未实现")。改为显式 503 +
         # 明示未接线, 避免误读为已接但关闭。模块保留待迁移 (非生产路径)。
         @app.get("/api/v1/autoscaler/config", response_model=V1AutoscalerConfigResponse)
-        async def get_autoscaler_config():
+        async def get_autoscaler_config(request: Request):
+            _enforce_user_rbac(request, "/api/v1/autoscaler/config", "GET")
             autoscaler = getattr(self.master, "_autoscaler", None)
             if not autoscaler:
                 raise HTTPException(
@@ -1398,7 +1488,8 @@ class MasterServer:
             }
 
         @app.put("/api/v1/autoscaler/config", response_model=V1StatusResponse)
-        async def update_autoscaler_config(req: dict):
+        async def update_autoscaler_config(req: AutoscalerConfigUpdateRequest, request: Request):
+            _enforce_user_rbac(request, "/api/v1/autoscaler/config", "PUT")
             from fusion_multi_node.autoscaler.autoscaler import (
                 AutoscalerConfig,
                 ScalePolicy,
@@ -1410,9 +1501,10 @@ class MasterServer:
                     status_code=503,
                     detail="Autoscaler 未接线 (not-wired): 模块存在但未实例化。详见 CLAUDE.md GAP-5。",
                 )
-            if "policy" in req:
+            # P1-10: pydantic 字段 None = 未提供 (走 autoscaler.config 默认); policy 非空串才更新策略。
+            if req.policy:
                 try:
-                    policy = ScalePolicy(req["policy"])
+                    policy = ScalePolicy(req.policy)
                     autoscaler.update_policy(policy)
                     return {
                         "status": "ok",
@@ -1420,18 +1512,30 @@ class MasterServer:
                         "policy": policy.value,
                     }
                 except ValueError:
-                    raise HTTPException(status_code=400, detail=f"无效策略: {req['policy']}")
+                    raise HTTPException(status_code=400, detail=f"无效策略: {req.policy}")
             try:
                 new_config = AutoscalerConfig(
-                    min_nodes=req.get("min_nodes", autoscaler.config.min_nodes),
-                    max_nodes=req.get("max_nodes", autoscaler.config.max_nodes),
-                    scale_up_threshold=req.get("scale_up_threshold", autoscaler.config.scale_up_threshold),
-                    scale_down_threshold=req.get("scale_down_threshold", autoscaler.config.scale_down_threshold),
-                    cooldown_seconds=req.get("cooldown_seconds", autoscaler.config.cooldown_seconds),
-                    idle_timeout_seconds=req.get("idle_timeout_seconds", autoscaler.config.idle_timeout_seconds),
+                    min_nodes=req.min_nodes if req.min_nodes is not None else autoscaler.config.min_nodes,
+                    max_nodes=req.max_nodes if req.max_nodes is not None else autoscaler.config.max_nodes,
+                    scale_up_threshold=req.scale_up_threshold
+                    if req.scale_up_threshold is not None
+                    else autoscaler.config.scale_up_threshold,
+                    scale_down_threshold=req.scale_down_threshold
+                    if req.scale_down_threshold is not None
+                    else autoscaler.config.scale_down_threshold,
+                    cooldown_seconds=req.cooldown_seconds
+                    if req.cooldown_seconds is not None
+                    else autoscaler.config.cooldown_seconds,
+                    idle_timeout_seconds=req.idle_timeout_seconds
+                    if req.idle_timeout_seconds is not None
+                    else autoscaler.config.idle_timeout_seconds,
                     policy=autoscaler.config.policy,
-                    check_interval=req.get("check_interval", autoscaler.config.check_interval),
-                    rebalance_threshold=req.get("rebalance_threshold", autoscaler.config.rebalance_threshold),
+                    check_interval=req.check_interval
+                    if req.check_interval is not None
+                    else autoscaler.config.check_interval,
+                    rebalance_threshold=req.rebalance_threshold
+                    if req.rebalance_threshold is not None
+                    else autoscaler.config.rebalance_threshold,
                 )
                 autoscaler.update_config(new_config)
                 return {"status": "ok", "action": "config_updated"}
@@ -1440,7 +1544,8 @@ class MasterServer:
 
         # M8-02 日志导出
         @app.get("/api/v1/observability/logs/export")
-        async def export_logs(fmt: str = "json", since: float = 0.0, node_id: str = ""):
+        async def export_logs(request: Request, fmt: str = "json", since: float = 0.0, node_id: str = ""):
+            _enforce_user_rbac(request, "/api/v1/observability/logs/export", "GET")
             obs = getattr(self.master, "_observability", None)
             if not obs:
                 raise HTTPException(status_code=503, detail="observability not initialized")
@@ -1515,6 +1620,7 @@ class MasterServer:
         @app.post("/api/v1/nodes/register", response_model=V1NodeRegisterResponse)
         async def v1_register_node(req: NodeRegisterRequest, request: Request):
             # 复用 /api/nodes/register 同源审批 + 协议兼容校验 + ban 拦截逻辑。
+            _enforce_user_rbac(request, "/api/v1/nodes/register", "POST")
             if not is_safe_path_segment(req.node_id):
                 raise HTTPException(status_code=400, detail="非法 node_id")
             ok, detail = _check_protocol_compat(req.protocol_version)
@@ -1542,8 +1648,12 @@ class MasterServer:
                 )
                 if approval.status.value != "approved":
                     self._audit.log(
-                        actor=req.node_id, action="register", path="/api/v1/nodes/register",
-                        method="POST", node_id=req.node_id, result="denied",
+                        actor=req.node_id,
+                        action="register",
+                        path="/api/v1/nodes/register",
+                        method="POST",
+                        node_id=req.node_id,
+                        result="denied",
                         detail=f"未通过审批, 当前状态: {approval.status.value}",
                     )
                     raise HTTPException(
@@ -1552,27 +1662,47 @@ class MasterServer:
                     )
             assigned_role = NodeRole.WORKER
             node = NodeInfo(
-                node_id=req.node_id, hostname=req.hostname, ip_address=req.ip_address,
-                port=req.port, arch=req.arch, total_memory_gb=req.total_memory_gb,
-                available_memory_gb=req.available_memory_gb, cpu_cores=req.cpu_cores,
-                gpu_cores=req.gpu_cores, device_model=req.device_model,
-                uma_size_gb=req.uma_size_gb, mlx_version=req.mlx_version,
-                role=assigned_role.value, status=NodeStatus.ONLINE, tags=req.tags,
-                active_tasks=req.active_tasks, max_tasks=req.max_tasks,
-                network_rtt_ms=req.network_rtt_ms, last_heartbeat=time.time(),
+                node_id=req.node_id,
+                hostname=req.hostname,
+                ip_address=req.ip_address,
+                port=req.port,
+                arch=req.arch,
+                total_memory_gb=req.total_memory_gb,
+                available_memory_gb=req.available_memory_gb,
+                cpu_cores=req.cpu_cores,
+                gpu_cores=req.gpu_cores,
+                device_model=req.device_model,
+                uma_size_gb=req.uma_size_gb,
+                mlx_version=req.mlx_version,
+                role=assigned_role.value,
+                status=NodeStatus.ONLINE,
+                tags=req.tags,
+                active_tasks=req.active_tasks,
+                max_tasks=req.max_tasks,
+                network_rtt_ms=req.network_rtt_ms,
+                last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
             if not allowed:
                 self._audit.log(
-                    actor=req.node_id, action="register", path="/api/v1/nodes/register",
-                    method="POST", node_id=req.node_id, result="denied", detail="处于 ban 期, 拒绝注册",
+                    actor=req.node_id,
+                    action="register",
+                    path="/api/v1/nodes/register",
+                    method="POST",
+                    node_id=req.node_id,
+                    result="denied",
+                    detail="处于 ban 期, 拒绝注册",
                 )
                 raise HTTPException(status_code=403, detail=f"节点 {req.node_id} 处于 ban 期, 拒绝注册")
             self._permission_manager.assign_role(req.node_id, assigned_role, "register")
             logger.info(f"v1 节点注册: {req.node_id} ({req.ip_address}:{req.port}) role={assigned_role.value}")
             self._audit.log(
-                actor=req.node_id, action="register", path="/api/v1/nodes/register",
-                method="POST", node_id=req.node_id, result="ok",
+                actor=req.node_id,
+                action="register",
+                path="/api/v1/nodes/register",
+                method="POST",
+                node_id=req.node_id,
+                result="ok",
                 detail=f"role={assigned_role.value} from {req.ip_address}:{req.port}",
             )
             return {"status": "ok", "node_id": req.node_id, "role": assigned_role.value}
@@ -1589,8 +1719,12 @@ class MasterServer:
             user_actor = _enforce_user_rbac(request, "/api/tasks/submit", "POST")
             if not await _check_permission("master", "/api/tasks/submit", "POST"):
                 self._audit.log(
-                    actor="master", action="permission_deny", path="/api/v1/tasks/submit",
-                    method="POST", result="denied", detail="权限不足: task submit",
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/v1/tasks/submit",
+                    method="POST",
+                    result="denied",
+                    detail="权限不足: task submit",
                 )
                 raise HTTPException(status_code=403, detail="权限不足: task submit")
             if self.master._election is not None and not self.master._is_leader:
@@ -1598,20 +1732,33 @@ class MasterServer:
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
             effective_user = user_actor if user_actor else req.user
             task = ClusterTask(
-                task_id=f"task_{uuid.uuid4().hex[:12]}", name=req.name, mode=mode,
-                model_name=req.model_name, model_id=req.model_id,
-                timeout_seconds=req.timeout_seconds, user=effective_user,
-                created_at=time.time(), required_capability=req.required_capability,
-                preferred_node_id=req.preferred_node_id, exclude_nodes=list(req.exclude_nodes),
-                priority=req.priority, task_type=req.task_type,
+                task_id=f"task_{uuid.uuid4().hex[:12]}",
+                name=req.name,
+                mode=mode,
+                model_name=req.model_name,
+                model_id=req.model_id,
+                timeout_seconds=req.timeout_seconds,
+                user=effective_user,
+                created_at=time.time(),
+                required_capability=req.required_capability,
+                preferred_node_id=req.preferred_node_id,
+                exclude_nodes=list(req.exclude_nodes),
+                priority=req.priority,
+                task_type=req.task_type,
                 params={
-                    "prompt": req.prompt, "messages": req.messages,
-                    "max_tokens": req.max_tokens, "temperature": req.temperature,
+                    "prompt": req.prompt,
+                    "messages": req.messages,
+                    "max_tokens": req.max_tokens,
+                    "temperature": req.temperature,
                 },
             )
             self._audit.log(
-                actor=effective_user or "unknown", action="task_submit",
-                path="/api/v1/tasks/submit", method="POST", node_id="", result="ok",
+                actor=effective_user or "unknown",
+                action="task_submit",
+                path="/api/v1/tasks/submit",
+                method="POST",
+                node_id="",
+                result="ok",
                 detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
             )
             ok = await self.master.assign_task(task)
@@ -1632,8 +1779,12 @@ class MasterServer:
             if not ok:
                 raise HTTPException(status_code=500, detail="任务迁移失败")
             self._audit.log(
-                actor=user_actor or "master", action="task_migrate",
-                path="/api/v1/tasks/migrate", method="POST", node_id="", result="ok",
+                actor=user_actor or "master",
+                action="task_migrate",
+                path="/api/v1/tasks/migrate",
+                method="POST",
+                node_id="",
+                result="ok",
                 detail=f"task_id={task_id}",
             )
             return {"status": "ok", "task_id": task_id}
@@ -1727,10 +1878,7 @@ class MasterServer:
                 "user_id": rec.user_id,
                 "role": rec.role.value,
                 "created_at": rec.created_at,
-                "tokens": [
-                    {"tid": t.tid, "label": t.label, "created_at": t.created_at}
-                    for t in rec.tokens
-                ],
+                "tokens": [{"tid": t.tid, "label": t.label, "created_at": t.created_at} for t in rec.tokens],
             }
 
         @app.delete("/api/v1/users/{user_id}")
@@ -1836,7 +1984,10 @@ class MasterServer:
         # ── P2-20 配置热加载 (审计 §6.8) ──
         # 重读 config.json + 重应用运行时可调字段; 须重启字段 (端口/ha_config/mdns) 仅提示不生效。
         @app.post("/api/v1/config/reload")
-        async def reload_config():
+        async def reload_config(request: Request):
+            # P1-6 (审计 §3.4): config/reload 登记 user:manage — 用户令牌仅 ADMIN 可过;
+            # 集群令牌 (内部可信) → _enforce_user_rbac 返 "" 不拦。
+            _enforce_user_rbac(request, "/api/v1/config/reload", "POST")
             cfg = self._cluster_config
             if cfg is None:
                 raise HTTPException(
@@ -1848,13 +1999,14 @@ class MasterServer:
             except Exception as e:
                 logger.error(f"配置热加载失败: {e}")
                 raise HTTPException(status_code=500, detail=f"配置重载失败: {e}") from e
-            # 运行时可调字段重应用: 租户并发配额 (configure_scheduling)。
+            # 运行时可调字段重应用: 租户并发配额 + 优先级队列上限 (configure_scheduling)。
             tenant_max = cfg.get("scheduling.tenant_max_concurrent", 4)
-            self.master.configure_scheduling(tenant_max)
-            logger.info(f"配置热加载完成: tenant_max_concurrent={tenant_max}")
+            max_pending = cfg.get("scheduling.max_pending_queue", 1000)
+            self.master.configure_scheduling(tenant_max, max_pending_queue=max_pending)
+            logger.info(f"配置热加载完成: tenant_max_concurrent={tenant_max} max_pending_queue={max_pending}")
             return {
                 "status": "ok",
-                "reloaded": ["scheduling.tenant_max_concurrent"],
+                "reloaded": ["scheduling.tenant_max_concurrent", "scheduling.max_pending_queue"],
                 "restart_required": ["cluster.master_host", "cluster.master_port", "ha_config", "mdns"],
                 "config_path": cfg.config_path,
             }
@@ -1865,16 +2017,19 @@ class MasterServer:
         # 单 Master 模式 (无选举配置) 投票拒绝, 同步忽略。
 
         @app.post("/api/ha/vote")
-        async def ha_vote(req: dict):
+        async def ha_vote(req: HAVoteRequest, request: Request):
+            # P1-6 (审计 §3.4): 集群内部路由 — 用户令牌拒 (CLUSTER_INTERNAL),
+            # 仅 cluster_token (leader/standby 互信) 可达。
+            _enforce_user_rbac(request, "/api/ha/vote", "POST")
             from fusion_multi_node.master.election import VoteRequest, VoteResponse
 
             try:
                 vote_req = VoteRequest(
-                    term=int(req.get("term", 0)),
-                    candidate_id=str(req.get("candidate_id", "")),
-                    candidate_priority=int(req.get("candidate_priority", 0)),
-                    last_log_index=int(req.get("last_log_index", 0)),
-                    last_log_term=int(req.get("last_log_term", 0)),
+                    term=req.term,
+                    candidate_id=req.candidate_id,
+                    candidate_priority=req.candidate_priority,
+                    last_log_index=req.last_log_index,
+                    last_log_term=req.last_log_term,
                 )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"非法 VoteRequest: {e}")
@@ -1888,29 +2043,28 @@ class MasterServer:
             }
 
         @app.post("/api/ha/sync-tasks")
-        async def ha_sync_tasks(req: dict):
-            tasks = req.get("tasks", [])
-            if not isinstance(tasks, list):
-                raise HTTPException(status_code=400, detail="tasks 必须为列表")
-            merged = await self.master.receive_synced_tasks(tasks)
+        async def ha_sync_tasks(req: HASyncTasksRequest, request: Request):
+            _enforce_user_rbac(request, "/api/ha/sync-tasks", "POST")
+            # P1-10: pydantic list[dict] 已校验类型, 删手动 isinstance 守卫。
+            merged = await self.master.receive_synced_tasks(req.tasks)
             return {"status": "ok", "merged": merged}
 
         # GAP-1 (Phase C): leader 推送全状态 (nodes/kv/banned) 到 standby — always-on failover。
         @app.post("/api/ha/sync-state")
-        async def ha_sync_state(req: dict):
-            if not isinstance(req, dict):
-                raise HTTPException(status_code=400, detail="sync-state payload 必须为对象")
-            counts = await self.master.receive_synced_state(req)
+        async def ha_sync_state(req: HASyncStateRequest, request: Request):
+            _enforce_user_rbac(request, "/api/ha/sync-state", "POST")
+            # P1-10: receive_synced_state 读 state.get("nodes"/"kv_cache"/"banned_nodes"),
+            # 需 dict → model_dump() 转发。
+            counts = await self.master.receive_synced_state(req.model_dump())
             return {"status": "ok", "counts": counts}
 
         # C1: Leader→Follower 心跳 — 维持 leader 权威, 防 follower 超时误判重选。
         @app.post("/api/ha/heartbeat")
-        async def ha_heartbeat(req: dict):
-            leader_id = str(req.get("leader_id", ""))
-            term = int(req.get("term", 0))
-            if not leader_id:
+        async def ha_heartbeat(req: HAHeartbeatRequest, request: Request):
+            _enforce_user_rbac(request, "/api/ha/heartbeat", "POST")
+            if not req.leader_id:
                 raise HTTPException(status_code=400, detail="缺少 leader_id")
-            await self.master.handle_heartbeat(leader_id, term)
+            await self.master.handle_heartbeat(req.leader_id, req.term)
             return {"status": "ok"}
 
     def _liveness_checks(self) -> dict[str, Any]:

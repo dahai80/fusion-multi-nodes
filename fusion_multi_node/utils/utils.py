@@ -57,6 +57,14 @@ def setup_logger(
             # 落盘 handler 建失败不阻断启动 — 仍返回控制台 logger, 启动后可见此告警。
             sys.stderr.write(f"[setup_logger] RotatingFileHandler 建失败 ({log_file}): {e}\n")
             sys.stderr.flush()
+    else:
+        # P1-27 (审计 §6.4): 未配日志文件 + 命令行直起 (非 start.sh/launchd/docker, 三者均设 LOG_FILE env)
+        # → 仅 stdout 落盘, 崩溃栈无处可查。提示运维设 env 或用受管启动方式。
+        sys.stderr.write(
+            "[setup_logger] 未配 FUSION_MULTINODE_LOG_FILE, 日志仅输出 stdout 不落盘; "
+            "生产建议用 start.sh / launchd / docker-compose (均自动设此 env), 或手动 export 该 env\n"
+        )
+        sys.stderr.flush()
 
     return logger
 

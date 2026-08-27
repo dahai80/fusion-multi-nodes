@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -22,6 +23,15 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# P1-4 (审计 §3.2): 调度路径已切断 (v0.8.2), 模块仅迁移债保留待迁 fusion-gateway #106。
+# import-time 禁用守卫 — 默认拒绝导入, 显式 env FUSION_CLOUD_FALLBACK_ENABLED=1 才放行。
+# 防止误引用重新接回云端调度路径 (违 "100% 本地/离线" 定位)。测试独立验证模块逻辑时设该 env。
+if os.environ.get("FUSION_CLOUD_FALLBACK_ENABLED") != "1":
+    raise ImportError(
+        "cloud_fallback 已迁移 fusion-gateway #106, 调度路径已切断; "
+        "需 FUSION_CLOUD_FALLBACK_ENABLED=1 显式启用 (仅独立验证用)"
+    )
 
 
 class CloudProvider(Enum):

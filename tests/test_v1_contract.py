@@ -52,17 +52,42 @@ def _register_payload(node_id="n1", **kw):
 
 
 _NODE_FIELDS = {
-    "node_id", "hostname", "ip_address", "port", "status", "role",
-    "total_memory_gb", "available_memory_gb", "cpu_cores", "gpu_cores",
-    "device_model", "uma_size_gb", "active_tasks", "max_tasks", "score",
+    "node_id",
+    "hostname",
+    "ip_address",
+    "port",
+    "status",
+    "role",
+    "total_memory_gb",
+    "available_memory_gb",
+    "cpu_cores",
+    "gpu_cores",
+    "device_model",
+    "uma_size_gb",
+    "active_tasks",
+    "max_tasks",
+    "score",
     "last_heartbeat",
 }
 
 _TASK_FIELDS = {
-    "task_id", "name", "mode", "model_name", "status", "assigned_nodes",
-    "created_at", "started_at", "completed_at", "error", "required_capability",
-    "priority", "degraded_from_model", "degradation_count", "cancel_reason",
-    "sub_tasks", "result",
+    "task_id",
+    "name",
+    "mode",
+    "model_name",
+    "status",
+    "assigned_nodes",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "error",
+    "required_capability",
+    "priority",
+    "degraded_from_model",
+    "degradation_count",
+    "cancel_reason",
+    "sub_tasks",
+    "result",
 }
 
 
@@ -169,9 +194,16 @@ class TestV1ContractTasks:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert {
-            "task_id", "name", "status", "progress", "total_shards",
-            "completed_shards", "assigned_nodes", "elapsed_seconds",
-            "remaining_seconds", "model_name",
+            "task_id",
+            "name",
+            "status",
+            "progress",
+            "total_shards",
+            "completed_shards",
+            "assigned_nodes",
+            "elapsed_seconds",
+            "remaining_seconds",
+            "model_name",
         } <= data.keys()
         assert data["progress"] >= 0.0 and data["progress"] <= 1.0
 

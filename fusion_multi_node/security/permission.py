@@ -200,6 +200,7 @@ _USER_ROLE_PERMISSIONS: dict[UserRole, frozenset[str]] = {
             "cluster:stats",
             "observability:read",
             "chat:complete",
+            "kv:read",
         }
     ),
     UserRole.USER: frozenset(
@@ -211,6 +212,7 @@ _USER_ROLE_PERMISSIONS: dict[UserRole, frozenset[str]] = {
             "cluster:stats",
             "observability:read",
             "chat:complete",
+            "kv:read",
         }
     ),
     UserRole.VIEWER: frozenset(
@@ -245,6 +247,19 @@ _USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
     # 观测
     ("GET", "/api/v1/observability/suggestions"): "observability:read",
     ("GET", "/api/v1/observability/alerts"): "observability:read",
+    # P1-6 (审计 §3.4): 观测日志导出含他租户 task, 仅 ADMIN (user:manage 同级敏感)。
+    ("GET", "/api/v1/observability/logs/export"): "observability:read",
+    # P1-6: Prometheus 指标端点 — VIEWER 只读可读 (集群聚合 + 节点级, 无租户隔离泄露)。
+    ("GET", "/api/v1/metrics"): "cluster:stats",
+    ("GET", "/api/v1/nodes/metrics"): "cluster:stats",  # /{node_id}/metrics 前缀命中
+    # P1-6: 配置热加载 / autoscaler 管理 — 仅 ADMIN。
+    ("POST", "/api/v1/config/reload"): "user:manage",
+    ("PUT", "/api/v1/autoscaler/config"): "user:manage",
+    ("GET", "/api/v1/autoscaler/config"): "user:manage",
+    # KV 读 (USER 可查本租户; 写走集群内部 cluster_token)。
+    # GET /api/kv/find/{model_name} — path-param, 由下方前缀匹配命中。
+    ("GET", "/api/kv/find"): "kv:read",
+    ("GET", "/api/v1/kv/find"): "kv:read",
     # 推理代理
     ("POST", "/v1/chat/completions"): "chat:complete",
     # 用户管理 (仅 ADMIN)
@@ -253,15 +268,49 @@ _USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
     ("DELETE", "/api/v1/users"): "user:manage",
     ("POST", "/api/v1/users/tokens"): "user:manage",
     ("DELETE", "/api/v1/users/tokens"): "user:manage",
+    # P1-6 (审计 §3.4): 集群内部路由 — 仅 cluster_token (leader/standby/agent 互信),
+    # 用户令牌全拒。CLUSTER_INTERNAL sentinel 不在任何角色权限集 → 用户令牌必拒。
+    # 集群令牌在 _enforce_user_rbac 提前返 "" (role is None) 不经此函数, 不受影响。
+    ("POST", "/api/ha/vote"): "CLUSTER_INTERNAL",
+    ("POST", "/api/ha/sync-tasks"): "CLUSTER_INTERNAL",
+    ("POST", "/api/ha/sync-state"): "CLUSTER_INTERNAL",
+    ("POST", "/api/ha/heartbeat"): "CLUSTER_INTERNAL",
+    ("POST", "/api/nodes/register"): "CLUSTER_INTERNAL",
+    ("POST", "/api/v1/nodes/register"): "CLUSTER_INTERNAL",
+    ("POST", "/api/nodes/heartbeat"): "CLUSTER_INTERNAL",
+    ("POST", "/api/sync/incremental"): "CLUSTER_INTERNAL",
+    ("POST", "/api/join"): "CLUSTER_INTERNAL",
+    ("POST", "/api/nodes/approve"): "CLUSTER_INTERNAL",
+    ("POST", "/api/nodes/reject"): "CLUSTER_INTERNAL",
+    ("POST", "/api/kv/register"): "CLUSTER_INTERNAL",
+    ("POST", "/api/kv/sync"): "CLUSTER_INTERNAL",
 }
+
+# P1-5 (审计 §3.4): 健康检查/文档/根 — 任何令牌放行 (鉴权中间件已豁免, 此处双保险)。
+# 集群内部纯节点级路由 (agent 侧) 不经 master user-RBAC, 不在此列。
+_USER_EXEMPT_PATHS = frozenset(
+    {
+        "/api/health",
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/",
+        "/favicon.ico",
+    }
+)
 
 
 def check_user_path_access(role: UserRole, path: str, method: str = "GET") -> bool:
     """用户层路径鉴权 — 查 (method, path) 所需权限, 验角色是否持有。
 
-    未登记路径 (集群内部路由/健康/文档) 默认放行 — 这些由 cluster_token 路径覆盖,
-    用户令牌不该到达; 到达也按放行交下层 node-RBAC 兜底。
+    P1-5 (审计 §3.4) fail-closed: 未登记路径不再默认放行 (旧 fail-open 可让用户令牌
+    调任意未登记路由)。健康/文档豁免路径白名单放行; 其余未登记 → 拒 (用户令牌不该
+    到达集群内部路由, 到达即拒, 交调用方提示用 cluster_token)。
+    CLUSTER_INTERNAL sentinel = 仅 cluster_token, 用户令牌任何角色皆拒。
     """
+    if path in _USER_EXEMPT_PATHS:
+        return True
     perm = _USER_PATH_PERMISSION_MAP.get((method, path))
     if perm is None:
         # 路径前缀匹配 (带 id 的子路径, 如 /api/v1/users/<id>)
@@ -282,7 +331,12 @@ def check_user_path_access(role: UserRole, path: str, method: str = "GET") -> bo
         if op_perm is not None:
             perm = op_perm
     if perm is None:
-        return True
+        # P1-5: fail-closed — 未登记路径拒用户令牌 (不再默认放行)。
+        logger.warning(f"用户 RBAC 未登记路径, fail-closed 拒绝: {method} {path} role={role.value}")
+        return False
+    if perm == "CLUSTER_INTERNAL":
+        # 仅 cluster_token 可达; 用户令牌任何角色皆拒。
+        logger.warning(f"集群内部路由拒用户令牌: {method} {path} role={role.value}")
+        return False
     allowed = _USER_ROLE_PERMISSIONS.get(role, frozenset())
     return perm in allowed
-

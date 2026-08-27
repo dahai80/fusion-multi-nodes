@@ -66,8 +66,7 @@ class FaultRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = dict(port_to_app)
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -222,16 +221,12 @@ async def ha_fault_pair(tmp_path, monkeypatch):
     m1.setup_election(
         node_id="master-1",
         priority=10,
-        known_nodes=[
-            {"node_id": "master-2", "priority": 1, "ip_address": "127.0.0.1", "port": M2_PORT}
-        ],
+        known_nodes=[{"node_id": "master-2", "priority": 1, "ip_address": "127.0.0.1", "port": M2_PORT}],
     )
     m2.setup_election(
         node_id="master-2",
         priority=1,
-        known_nodes=[
-            {"node_id": "master-1", "priority": 10, "ip_address": "127.0.0.1", "port": M1_PORT}
-        ],
+        known_nodes=[{"node_id": "master-1", "priority": 10, "ip_address": "127.0.0.1", "port": M1_PORT}],
     )
     # m1 高优先级 → leader; m2 standby
     m1._is_leader = True
@@ -366,9 +361,11 @@ class TestHAFailoverTakeover:
         ok = await m2.assign_task(task_after)
         assert ok is True, "standby 升 leader 后应恢复派发 (非 standby 拒绝 False)"
         # 关键: 不再因 standby 守卫返回 False
-        assert task_after.status != TaskStatus.RUNNING or task_after.task_id in {
-            t.task_id for t in m2._pending_queue
-        } or task_after.status == TaskStatus.RUNNING
+        assert (
+            task_after.status != TaskStatus.RUNNING
+            or task_after.task_id in {t.task_id for t in m2._pending_queue}
+            or task_after.status == TaskStatus.RUNNING
+        )
         logger.info("Phase4(c) standby 升 leader 后 assign_task 恢复派发通过")
 
         # 同步过来的任务在 m2 仍可读 (HA 状态转移不丢任务)

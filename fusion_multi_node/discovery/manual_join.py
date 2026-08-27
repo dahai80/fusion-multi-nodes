@@ -7,11 +7,19 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from fusion_multi_node.security.mtls import (
+    client_kwargs as mtls_client_kwargs,
+)
+from fusion_multi_node.security.mtls import (
+    scheme as mtls_scheme,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +68,9 @@ class ManualJoinClient:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
+            # P1-9 (审计 §3.3): mTLS 开启时传证书校验 kwargs (fail-closed, mtls.client_kwargs),
+            # 不再裸 httpx.AsyncClient 无证书校验 (即 https 也无证书)。
+            self._client = httpx.AsyncClient(timeout=self._timeout, **mtls_client_kwargs())
         return self._client
 
     async def join(
@@ -89,7 +99,8 @@ class ManualJoinClient:
 
         try:
             client = await self._get_client()
-            url = f"http://{master_host}:{master_port}/api/join"
+            # P1-9: 协议随 mTLS 开关 (mtls.scheme() -> "https"/"http"), 不再硬编码 http://。
+            url = f"{mtls_scheme()}://{master_host}:{master_port}/api/join"
             resp = await client.post(
                 url,
                 json={
@@ -130,7 +141,7 @@ class ManualJoinClient:
         """验证 Master 是否可达。"""
         try:
             client = await self._get_client()
-            resp = await client.get(f"http://{master_host}:{master_port}/api/health")
+            resp = await client.get(f"{mtls_scheme()}://{master_host}:{master_port}/api/health")
             data = resp.json()
             return resp.status_code == 200 and data.get("role") == "master"
         except Exception:
@@ -160,6 +171,10 @@ class ManualJoinManager:
     """
 
     def __init__(self, cluster_secret: str = "", auto_approve: bool = True):
+        # P1-8 (审计 §3.3): 空 cluster_secret → 警告 (空密钥等同禁用 join 鉴权, 隐患)。
+        # 不强制 raise (兼容无密钥内网部署), 但 handle_join_request 配空密钥则密钥校验跳过。
+        if not cluster_secret:
+            logger.warning("ManualJoinManager: cluster_secret 为空, join 鉴权禁用 (内网部署可接受, 跨网段须配密钥)")
         self._cluster_secret = cluster_secret
         self._auto_approve = auto_approve
         self._join_history: list[dict[str, Any]] = []
@@ -179,7 +194,8 @@ class ManualJoinManager:
         # 集群密钥验证
         if self._cluster_secret:
             req_secret = request_data.get("cluster_secret", "")
-            if req_secret != self._cluster_secret:
+            # P1-8 (审计 §3.3): 常量时间比较 (secrets.compare_digest) 防 timing attack, 不再 `!=`。
+            if not secrets.compare_digest(str(req_secret), str(self._cluster_secret)):
                 logger.warning(f"手动加入密钥验证失败: {node_id}")
                 return {"status": "error", "detail": "集群密钥验证失败"}
 

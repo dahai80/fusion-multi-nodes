@@ -130,4 +130,6 @@ Leader Master 宕机 (整机/进程)
   启动选举, leader 心跳 + 任务快照 + **全状态** 推 standby。**always-on 空窗 ≤ 选举超时 (~10s)**。
   仍为 opt-in, 默认单 Master 部署不启用。生产 always-on 须 2+ Master 显式配置。
 - 本机崩溃自愈 (launchd + H3) 已覆盖主要故障模式; 跨机故障转移为可选增强 (GAP-1 补齐)。
-- KV 跨节点张量复用仍 no-op (GAP-7, 上游 #33/#650), 全状态同步仅传 KV 元数据。
+- KV 跨节点张量复用已交付 (GAP-7, v0.11.0): `sync_kv_cache` 传输真张量, 默认 `SyntheticKVTransport`
+  合成兜底, `MLXKVTransport` env-gated 待上游 #650 内存直传落地 (未落地 404→降级合成, 不阻断);
+  v0.11.1 起流式传输 (二进制流协议, 不 base64+JSON 物化整 bundle, 大张量可行)。全状态同步亦传 KV 完整条目 (含张量)。

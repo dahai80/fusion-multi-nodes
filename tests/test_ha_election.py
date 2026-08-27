@@ -38,8 +38,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, object]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -131,16 +130,12 @@ async def ha_pair(tmp_path, monkeypatch):
     m1.setup_election(
         node_id="master-1",
         priority=10,
-        known_nodes=[
-            {"node_id": "master-2", "priority": 1, "ip_address": "127.0.0.1", "port": M2_PORT}
-        ],
+        known_nodes=[{"node_id": "master-2", "priority": 1, "ip_address": "127.0.0.1", "port": M2_PORT}],
     )
     m2.setup_election(
         node_id="master-2",
         priority=1,
-        known_nodes=[
-            {"node_id": "master-1", "priority": 10, "ip_address": "127.0.0.1", "port": M1_PORT}
-        ],
+        known_nodes=[{"node_id": "master-1", "priority": 10, "ip_address": "127.0.0.1", "port": M1_PORT}],
     )
 
     try:
@@ -278,6 +273,19 @@ class TestHAStandbyGuard:
         task.preferred_node_id = "n1"
         ok = await m1.assign_task(task)
         assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_standby_leader_unknown_rejects_assign(self, ha_pair):
+        """P1-17: standby 且 leader 未定 (选举空窗) → assign_task 拒绝派发 (返 False)。"""
+        m2 = ha_pair["m2"]
+        m2._is_leader = False
+        # _leader_id 默认 None → leader_known False (选举空窗)
+        assert m2._election.leader_known is False
+        await _register_node(m2, "n1")
+        task = _task("t-window")
+        task.preferred_node_id = "n1"
+        ok = await m2.assign_task(task)
+        assert ok is False
 
 
 class TestSingleMasterUnaffected:
@@ -519,7 +527,7 @@ class TestHAVoteEndpoint:
 
     @pytest.mark.asyncio
     async def test_vote_endpoint_bad_payload(self, tmp_path):
-        """/api/ha/vote 非法 payload 返回 400。"""
+        """/api/ha/vote 非法 payload 返回 422 (P1-10: pydantic 校验接管)。"""
         m = _make_master(tmp_path)
         s = _make_server(m)
         transport = ASGITransport(app=s.app)
@@ -529,5 +537,6 @@ class TestHAVoteEndpoint:
                 json={"term": "not-an-int"},
                 headers=AUTH_HEADERS,
             )
-            assert resp.status_code == 400
+            # P1-10: pydantic HAVoteRequest.term:int 校验 "not-an-int" → 422 (FastAPI validation)
+            assert resp.status_code == 422
         await m.stop()

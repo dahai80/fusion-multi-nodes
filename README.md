@@ -5,24 +5,27 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.11.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.12.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1213%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1262%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.11.1 (2026-08-27) — 审计 0826 P0 热修 (5 阻断项)**
+> **📦 v0.12.0 (2026-08-27) — 审计 0826 P1 整改 (27 项)**
 >
-> 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 5 P0 阻断项 (❌ 不具备企业级
-> 生产商用发布条件) 全部代码修复落地: ① 4 背景循环逐次异常隔离 (防静默杀循环); ②
-> `dedup_blocked`/`sandbox_blocked` 误归 logic_fail + report_fault 修复 (防误 ban 健康节点);
-> ③ KV 张量流式二进制协议 (替代 base64+JSON 单 POST, 消 1.5GB 峰值); ④ `_write_task_store`
-> 移 `asyncio.to_thread` (防 fsync 阻塞事件循环); ⑤ 告警 webhook 出站通道 (env
-> `FUSION_ALERT_WEBHOOK_URL` fire-and-forget)。基线 1203 → 1213 测试全绿。详见
-> [CHANGELOG](docs/CHANGELOG.md)。P1/P2/P3 整改分批续 (v0.12.0/v0.12.1)。
+> 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 27 P1 项全部代码修复落地。
+> 容错调度 (8): H3 RUNNING→PENDING 重派补 `exclude_nodes` / 节点 OFFLINE 自动迁移在途 /
+> `_pending_queue` 上限 503 / 重试指数退避 / agent_server 429 不累熔断 / 增量持久化 /
+> httpx 连接池显式配置 / `sync_kv_cache` 异常分类。KV 张量 (2): `import_tensor` 区分降级
+> vs 真失败 / 跨节点异常分类 + 连续失败告警。安全 (7): HTTP 派发可选 PII 脱敏 / cloud_fallback
+> import-time 禁用守卫 / RBAC fail-closed + 全路由登记 / 审计写失败告警 / `compare_digest` /
+> manual_join mTLS scheme。API 契约 (1): 9 raw dict → pydantic (422 not 400)。Agent (3):
+> `/api/hardware` to_thread / 选举空窗 503 / 本地 `max_tasks` 过载 gate。性能/运维 (6): 真推理
+> 吞吐基准 / Prometheus 节点级指标 / HA doc 校准 / kv+user fsync / 日志文件 stderr 提示。
+> 基线 1213 → 1262 测试全绿。详见 [CHANGELOG](docs/CHANGELOG.md)。P2/P3 整改续 (v0.12.1)。
 
 ---
 

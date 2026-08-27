@@ -967,6 +967,8 @@ class TestP01LoopFaultTolerance:
         cm.asyncio.sleep = fast_sleep
         try:
             await master.start(with_server=False, with_mdns=False)
+            # P1-11: _persist_loop 仅在脏标置位时快照, 无派发 → 须手动置脏触发循环体执行。
+            master._persist_dirty = True
             await orig_sleep(0.05)
             assert master._persist_task is not None
             assert not master._persist_task.done(), "持久化循环不应被异常杀死"
@@ -1060,3 +1062,435 @@ class TestP01LoopFaultTolerance:
         finally:
             cm.asyncio.sleep = orig_sleep
             await master.stop()
+
+
+class TestP1FaultToleranceScheduling:
+    """审计 0826 Batch2 P1 容错/调度组 — cluster_master 9 项修复验证。"""
+
+    def _online_node(self, node_id: str = "n1", port: int = 30001) -> NodeInfo:
+        return NodeInfo(
+            node_id=node_id,
+            hostname=node_id,
+            ip_address="10.0.0.1",
+            port=port,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=48.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+            max_tasks=4,
+        )
+
+    def _task(self, task_id: str = "t1", mode=ParallelMode.DATA) -> ClusterTask:
+        return ClusterTask(
+            task_id=task_id,
+            name=task_id,
+            mode=mode,
+            model_name="qwen-1b",
+            task_type="inference",
+            params={"prompt": "hi", "messages": [], "max_tokens": 8},
+        )
+
+    # ── P1-1: H3 RUNNING→PENDING 重派 — _task_from_dict 转 PENDING + 清 assigned + 并 exclude ──
+
+    def test_p1_1_running_recovery_to_pending(self):
+        master = ClusterMaster()
+        d = {
+            "task_id": "t-run",
+            "name": "t-run",
+            "mode": "data",
+            "model_name": "qwen-1b",
+            "status": "running",
+            "assigned_nodes": ["bad-node"],
+            "started_at": 123.0,
+            "exclude_nodes": [],
+            "params": {},
+            "task_type": "inference",
+            "priority": 1,
+            "user": "",
+            "timeout_seconds": 60,
+            "created_at": 100.0,
+        }
+        t = master._task_from_dict(d)
+        assert t.status == TaskStatus.PENDING, "RUNNING 恢复应转 PENDING"
+        assert t.started_at == 0.0, "恢复清 started_at"
+        assert t.assigned_nodes == [], "恢复清 assigned_nodes"
+        assert "bad-node" in t.exclude_nodes, "原 assigned_nodes 应并入 exclude_nodes 不回坏节点"
+
+    def test_p1_1_migrated_recovery_to_pending(self):
+        master = ClusterMaster()
+        d = {
+            "task_id": "t-mig",
+            "name": "t-mig",
+            "mode": "data",
+            "model_name": "qwen-1b",
+            "status": "migrated",
+            "assigned_nodes": ["n-old"],
+            "started_at": 99.0,
+            "exclude_nodes": ["n-existing"],
+            "params": {},
+            "task_type": "inference",
+            "priority": 1,
+            "user": "",
+            "timeout_seconds": 60,
+            "created_at": 100.0,
+        }
+        t = master._task_from_dict(d)
+        assert t.status == TaskStatus.PENDING
+        assert t.started_at == 0.0
+        assert "n-old" in t.exclude_nodes and "n-existing" in t.exclude_nodes, "assigned 并入既有 exclude 不丢"
+
+    # ── P1-14: 超时重试补 exclude_nodes + 退避 ──
+
+    @pytest.mark.asyncio
+    async def test_p1_14_retry_merges_exclude(self):
+        master = ClusterMaster()
+        task = self._task("t-retry")
+        task.assigned_nodes = ["bad-1"]
+        task.exclude_nodes = []
+        master._enqueue_retry(task)
+        assert task.status == TaskStatus.PENDING
+        assert "bad-1" in task.exclude_nodes, "重试应把 assigned_nodes 并入 exclude"
+        assert task.assigned_nodes == [], "重试清 assigned_nodes"
+        assert task.next_retry_at > 0.0, "P1-21 退避: next_retry_at 已设"
+
+    @pytest.mark.asyncio
+    async def test_p1_14_retry_dedup_exclude(self):
+        master = ClusterMaster()
+        task = self._task("t-dedup")
+        task.assigned_nodes = ["dup"]
+        task.exclude_nodes = ["dup", "other"]
+        master._enqueue_retry(task)
+        assert task.exclude_nodes.count("dup") == 1, "exclude_nodes 不重复"
+
+    # ── P1-21: 重试退避指数 + next_retry_at 持久化 ──
+
+    @pytest.mark.asyncio
+    async def test_p1_21_backoff_exponential(self):
+        master = ClusterMaster()
+        master._max_retry_attempts = 5  # 默认 1 (finalize 路径仅 1 次重试), 抬高以验指数退避
+        task = self._task("t-bo")
+        master._enqueue_retry(task)
+        b1 = task.next_retry_at - time.time()
+        assert 29 <= b1 <= 31, f"第 1 次退避 ~30s, 实际 {b1}"
+        master._enqueue_retry(task)
+        b2 = task.next_retry_at - time.time()
+        assert 59 <= b2 <= 61, f"第 2 次退避 ~60s, 实际 {b2}"
+
+    def test_p1_21_next_retry_at_persisted(self):
+        master = ClusterMaster()
+        task = self._task("t-persist")
+        task.next_retry_at = 12345.0
+        task._retry_count = 2
+        d = master._task_to_dict(task)
+        assert d["next_retry_at"] == 12345.0, "next_retry_at 须持久化"
+        assert d["_retry_count"] == 2, "_retry_count 须持久化"
+
+    # ── P1-23: agent 429 不累熔断 fault (返 rate_limited dict 不 raise) ──
+
+    @pytest.mark.asyncio
+    async def test_p1_23_dispatch_429_no_fault(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+
+        class _429Resp:
+            status_code = 429
+            text = "rate limited"
+            headers = {"Retry-After": "5"}
+
+        class _429Client:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None, timeout=None):
+                return _429Resp()
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _429Client()
+        node = self._online_node("n1", 30001)
+        r = await master._dispatch_to_node(_429Client(), self._task("t-429"), "n1", {"n1": node}, "tok")
+        assert r.get("rate_limited") is True, "429 应返 rate_limited dict (不 raise)"
+        assert "n1" not in master._banned_nodes, "429 不应 ban 节点"
+        assert not master._fault_counts.get("n1"), "429 不应累熔断 fault"
+
+    # ── P1-18: agent overload 不累熔断 fault (transient, 可重试到他节点) ──
+
+    @pytest.mark.asyncio
+    async def test_p1_18_dispatch_overload_no_fault(self, monkeypatch):
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        # _dispatch_data 并发调 _dispatch_to_node; mock 返 overload dict 验分类逻辑
+        fault_calls = []
+
+        async def _fake_dispatch(client, task, nid, nodes, tok):
+            return {"task_id": task.task_id, "error": "节点任务已满", "overload": True}
+
+        monkeypatch.setattr(master, "_dispatch_to_node", _fake_dispatch)
+        original_report_fault = master.report_fault
+
+        async def _spy_fault(node_id, fault_type="", message=""):
+            fault_calls.append((node_id, fault_type))
+            return await original_report_fault(node_id, fault_type, message)
+
+        monkeypatch.setattr(master, "report_fault", _spy_fault)
+        nodes_snap = {"n1": self._online_node("n1", 30001), "n2": self._online_node("n2", 30002)}
+        task = self._task("t-overload")
+        task.assigned_nodes = ["n1", "n2"]
+        await master._dispatch_data(task, ["n1", "n2"], nodes_snap, "tok")
+        # overload = transient, 不调 report_fault, 不 ban
+        assert not fault_calls, "overload 不应累熔断 fault"
+        assert "n1" not in master._banned_nodes and "n2" not in master._banned_nodes, "overload 不应 ban"
+
+    # ── P1-19: 优先级队列上限 — 满则 assign 返 False ──
+
+    @pytest.mark.asyncio
+    async def test_p1_19_pending_queue_cap_rejects(self):
+        master = ClusterMaster()
+        master.configure_scheduling(0, max_pending_queue=3)  # 配额不限, 队列上限 3
+        for i in range(3):
+            ok = await master.assign_task(self._task(f"q-{i}"))
+            assert ok is True, f"前 3 个应入队: q-{i}"
+        rejected = await master.assign_task(self._task("q-3"))
+        assert rejected is False, "队列满第 4 个应返 False (submit 503)"
+        assert len(master._pending_queue) == 3, "队列应保持 3 不超"
+
+    @pytest.mark.asyncio
+    async def test_p1_19_force_requeue_bypasses_cap(self):
+        master = ClusterMaster()
+        master.configure_scheduling(0, max_pending_queue=2)
+        for i in range(2):
+            await master.assign_task(self._task(f"q-{i}"))
+        t = self._task("force-1")
+        ok = master._enqueue_pending(t, force=True)
+        assert ok is True, "force 重入队绕上限"
+        assert len(master._pending_queue) == 3, "force 不受 cap"
+
+    # ── P1-15: 节点 OFFLINE 自动迁移在途任务 (转 MIGRATED→重试) ──
+
+    @pytest.mark.asyncio
+    async def test_p1_15_offline_requeues_running(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+
+        class _HoldResp:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {"status": "ok", "result": {"output": "ok"}}
+
+        class _HoldClient:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None, timeout=None):
+                await asyncio.sleep(30.0)
+                return _HoldResp()
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _HoldClient()
+        node = self._online_node("n1", 30010)
+        await master.register_node(node)
+        task = self._task("t-offline")
+        await master.assign_task(task)
+        await asyncio.sleep(0.05)
+        assert task.status == TaskStatus.RUNNING, f"任务应 RUNNING (派发挂起): {task.status}"
+        assert task.assigned_nodes == ["n1"]
+
+        async with master._nodes_lock:
+            node.last_heartbeat = 0.0  # 心跳超时 → 刷新逻辑标 OFFLINE
+        await master._refresh_node_statuses()
+        assert node.status == NodeStatus.OFFLINE, "心跳超时应标 OFFLINE"
+        assert "n1" in task.exclude_nodes, "OFFLINE 节点应并入 task.exclude_nodes"
+        assert task.status in (TaskStatus.PENDING, TaskStatus.MIGRATED), f"在途任务应转 PENDING/MIGRATED: {task.status}"
+
+    # ── P1-13: httpx.Limits 显式配置 ──
+
+    @pytest.mark.asyncio
+    async def test_p1_13_dispatch_http_limits(self):
+        master = ClusterMaster()
+        client = await master._get_dispatch_http()
+        assert client is not None
+        assert not client.is_closed, "派发 HTTP client 已建"
+
+    @pytest.mark.asyncio
+    async def test_p1_13_dispatch_http_limits_from_config(self, monkeypatch):
+        from fusion_multi_node.config import ClusterConfig
+
+        master = ClusterMaster()
+        master._cluster_config = ClusterConfig.__new__(ClusterConfig)
+        master._cluster_config._data = {
+            "network": {"http_limits": {"max_connections": 8, "max_keepalive_connections": 2}}
+        }
+        master._cluster_config.config_path = ""
+        client = await master._get_dispatch_http()
+        assert not client.is_closed
+        await client.aclose()
+
+    # ── P1-11: 派发热路径落盘节流 — 高频 assign 不每 call 即时写 ──
+
+    @pytest.mark.asyncio
+    async def test_p1_11_dispatch_persist_throttle(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+
+        class _FastResp:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {"status": "ok", "result": {"output": "ok"}}
+
+        class _FastClient:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None, timeout=None):
+                return _FastResp()
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _FastClient()
+        await master.register_node(self._online_node("n1", 30020))
+
+        write_count = 0
+        orig_write = master._write_task_store
+
+        def counting_write(pending):
+            nonlocal write_count
+            write_count += 1
+            orig_write(pending)
+
+        master._write_task_store = counting_write
+        await master.assign_task(self._task("t-a"))
+        first_count = write_count
+        assert first_count >= 1, "首次派发应即时落盘"
+        await master.assign_task(self._task("t-b"))
+        assert write_count == first_count, "节流窗内第二次派发不应即时写 (defer 给 persist_loop)"
+        assert master._persist_dirty is True, "节流 defer 应设脏标"
+
+    # ── P1-16: sync_kv_cache 瞬时失败分类 (记 metric 不静默) ──
+
+    @pytest.mark.asyncio
+    async def test_p1_16_kv_sync_transient_metric(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+
+        class _5xxResp:
+            status_code = 503
+            text = "overloaded"
+
+            def json(self):
+                return {}
+
+        class _FailClient:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None, timeout=None, content=None):
+                return _5xxResp()
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _FailClient()
+        await master.register_kv_cache(
+            KVCacheEntry(
+                cache_id="c-sync",
+                model_name="llama-1b",
+                node_id="src",
+                created_at=time.time(),
+                size_mb=0.1,
+            )
+        )
+        for nid, port in (("src", 30030), ("tgt", 30031)):
+            ni = NodeInfo(
+                node_id=nid,
+                hostname=nid,
+                ip_address="127.0.0.1",
+                port=port,
+                status=NodeStatus.ONLINE,
+                last_heartbeat=time.time(),
+            )
+            async with master._nodes_lock:
+                master.nodes[nid] = ni
+        from fusion_multi_node.observability.observability import ClusterObservability
+
+        master._observability = ClusterObservability()
+        ok = await master.sync_kv_cache("c-sync", "llama-1b", "src", 0.1, target_node_id="tgt")
+        assert ok is False, "5xx 应返 False"
+        found = any(m.metric_name == "kv_sync_transient_fail" for m in master._observability.metrics)
+        assert found, "5xx 瞬时失败应记 kv_sync_transient_fail metric"
+
+    @pytest.mark.asyncio
+    async def test_p1_16_kv_sync_timeout_transient(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        import httpx
+
+        class _TimeoutClient:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None, timeout=None, content=None):
+                raise httpx.ConnectError("connection refused")
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _TimeoutClient()
+        await master.register_kv_cache(
+            KVCacheEntry(
+                cache_id="c-to",
+                model_name="llama-1b",
+                node_id="src",
+                created_at=time.time(),
+                size_mb=0.1,
+            )
+        )
+        for nid, port in (("src", 30040), ("tgt", 30041)):
+            ni = NodeInfo(
+                node_id=nid,
+                hostname=nid,
+                ip_address="127.0.0.1",
+                port=port,
+                status=NodeStatus.ONLINE,
+                last_heartbeat=time.time(),
+            )
+            async with master._nodes_lock:
+                master.nodes[nid] = ni
+        from fusion_multi_node.observability.observability import ClusterObservability
+
+        master._observability = ClusterObservability()
+        ok = await master.sync_kv_cache("c-to", "llama-1b", "src", 0.1, target_node_id="tgt")
+        assert ok is False
+        found = any(m.metric_name == "kv_sync_transient_fail" for m in master._observability.metrics)
+        assert found, "连接拒 (瞬时) 应记 transient metric"

@@ -5,6 +5,134 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-08-27 — 审计 0826 P1 整改 (27 项)
+
+> **企业级生产加固**: 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 27 P1 项
+> (容错调度 / KV 张量 / 安全 / API 契约 / Agent / 性能运维) 全部代码修复落地。P0 热修后
+> 基线 1213 → 1262 测试全绿 (新增 ~49 例)。ruff 净。无 API 破坏 (minor bump)。
+
+### 容错/调度 — cluster_master (8)
+
+- **P1-1 H3 RUNNING→PENDING 重派未实现 → 孤儿任务**: `_restore_tasks` 仅重派 PENDING,
+  RUNNING/MIGRATED 崩溃恢复后 `started_at=0` 永久卡死。修复: RUNNING/MIGRATED 转 PENDING +
+  清 started_at + 清 assigned_nodes + 原节点并入 exclude_nodes (避回坏节点) + retry_count 不增
+  (崩溃非任务失败)。对齐 CLAUDE.md "RUNNING→PENDING 重派" 自述。
+- **P1-14 超时重试不补 `task.exclude_nodes` → 回同坏节点**: `_enqueue_retry` 重置 PENDING 但
+  不动 exclude_nodes。修复: `assigned_nodes` 并入 `exclude_nodes` (去重); `migrate_task` 源
+  节点并入 exclude; P1-1 转换时原 assigned_nodes 亦并入。`assign_task` 用 exclude_nodes 过滤。
+- **P1-15 节点 OFFLINE 不自动迁移在途任务 → 等满 300s timeout**: `_refresh_node_statuses` 标
+  OFFLINE 但不动在途任务。修复: OFFLINE 时该节点所有 RUNNING 任务转 PENDING + 节点并入
+  exclude_nodes + `_enqueue_retry` (走 P1-14 同路径, 避锁嵌套)。限频防抖动雪崩。等价自动迁移
+  (P3-3 语义由此路径 + 手动 `migrate_task` 共同满足)。
+- **P1-16 `sync_kv_cache` 不分类异常 → 一律 False 无重试**: `status_code != 200` + `except`
+  全 False。修复: 区分 transient (429/5xx/超时 — warning + 可重试标记) vs logic (404/逻辑错 —
+  False); P0-3 流式基础上叠加分类。
+- **P1-19 `_pending_queue` 无长度上限 → 过载堆积**: 节点不足入队无上限。修复: `MAX_PENDING_QUEUE`
+  (config `scheduling.max_pending_queue`, 默认 1000); 满则拒入队, `assign_task` 返 False →
+  master_server submit 回 503 `集群队列已满`。
+- **P1-21 `_retry_loop` 无退避无限重试**: assign 失败立即 `_enqueue_retry` 无退避。修复: per-task
+  指数退避 — `next_retry_at = now + backoff` (基 30s, 上限 600s, 确定性无 jitter); `_retry_loop`
+  跳过未到时任务; `_max_retry_loop_attempts` (默认 10) 超限转 FAILED。
+- **P1-23 agent_server 限流 429 累熔断 fault → 高 QPS 健康节点误 ban**: GAP-6 修 fusion-mlx 内部
+  429 漏 agent_server 自身 429。修复: `_dispatch_to_node` 通用 `!= 200` raise 前检测 429 → 归
+  transient (不 report_fault, 读 `Retry-After` 走 P0-2 同分类)。
+- **P1-11 `_persist_tasks_locked` 全量 asdict O(N) 每次派发**: 1000 任务 O(N²)。修复: 增量持久化 —
+  `_dirty_task_ids` 脏标记, 只 asdict 脏任务 + 写增量 patch (周期全量+增量混合)。
+- **P1-13 httpx 连接池无显式配置**: 默认 max_connections=100。修复: 读 config `network.http_limits`
+  构 `httpx.Limits` 传 `_get_dispatch_http`; 默认按集群规模 (节点数×4)。
+
+### KV 张量 — kv_cache_sharing / kv_tensor_transport (2)
+
+- **P1-20 `MLXKVTransport.import_tensor` 失败返 True 掩盖**: `except: return True`。修复: 404
+  (上游未落地) 仍降级返 True (合成兜底 + warning); 其他 `except` 返 False (真装载失败, 调用方
+  知); `SyntheticKVTransport.import_tensor` 保持 True。
+- **P1-22 `KVSharingManager` 跨节点调用静默吞异常**: `lookup_remote` (debug) /
+  `transfer_from_remote` (error+False) / `warm_cache` (warning+failed++)。修复: 分类 — 429/5xx/
+  超时/连接拒 warning + `record_metric` (transient 不计 ban); 连续失败达阈值 (3) 提
+  `create_alert` (warning, node_id); `lookup_remote` 日志 debug→info (网络分区运维须可见)。
+
+### 安全 — security / discovery (7)
+
+- **P1-3 HTTP 派发路径 PII 明文** (校准降级): DataScrubber 仅 FMP 路径。修复: 可选 HTTP 路径脱敏 —
+  `ClusterConfig.security.http_pii_scrub` (默认 False, LAN 可信保留明文)。开启时 `_dispatch_to_node`
+  payload + chat 代理 + warm_cache 经 `DataScrubber.scrub` prompt/messages。文档强制: 跨不可信
+  网络段须 mTLS + 此项。
+- **P1-4 `cloud_fallback` 模块保留含云 API 硬编码** (校准降级): 加 import-time 禁用守卫 — 模块顶部
+  `if FUSION_CLOUD_FALLBACK_ENABLED != "1": raise ImportError(...)`; `__init__.py` 导入处 try/except
+  降级; 测试 stub 设 env。保留模块文件 (迁移债有形化, 待 #106)。
+- **P1-5 RBAC `check_user_path_access` fail-open**: 未登记路径 `perm is None`→`return True`。修复:
+  fail-closed — `perm is None`→`return False`; 显式白名单放行集群内部/健康/文档路由
+  (`_USER_EXEMPT_PATHS` frozenset)。集群令牌走 `role is None` 提前返不经此函数, 不受影响。
+- **P1-6 `_enforce_user_rbac` 覆盖不全** (8 路由无 user-RBAC): config/reload / autoscaler PUT /
+  observability logs export / ha/sync-state / nodes / kv / metrics。修复: 全登记
+  `_USER_PATH_PERMISSION_MAP` (ADMIN: config/autoscaler/ha; VIEWER: metrics; USER: kv read);
+  集群内部路由用 sentinel `CLUSTER_INTERNAL` (仅 cluster_token, 用户令牌全拒)。
+- **P1-7 AuditLogger 写失败静默降级**: `except: warning` 不 raise。修复: `record_metric("audit",
+  "write_failed",1.0)` + `create_alert` (warning, "审计日志写入失败"); 不 raise (鉴权主路径不被
+  拖垮, 运维可见)。`read()` 同理。
+- **P1-8 `manual_join.py` cluster_secret 非常量时间比较**: `!=`。修复:
+  `secrets.compare_digest`; 空 secret → warning + 强制 compare 失败 (拒所有 join)。
+- **P1-9 `manual_join.py` 硬编码 `http://`, mTLS 开启 join 失效**: URL 改
+  `f"{mtls_scheme()}://..."`; `_get_client` 传 `**mtls_client_kwargs()`。
+
+### API 契约 — master_server (1)
+
+- **P1-10 9 路由 raw dict 无 pydantic 校验**: sync/incremental / join / approve / reject /
+  autoscaler PUT / ha/vote / ha/sync-tasks / ha/sync-state / ha/heartbeat。修复: 各建 pydantic
+  `BaseModel` (`IncrementalSyncRequest` / `ManualJoinRequest` / `NodeApproveRequest` /
+  `NodeRejectRequest` / `AutoscalerConfigUpdateRequest` / `VoteRequest` (复用) /
+  `HASyncTasksRequest` / `HASyncStateRequest` / `HAHeartbeatRequest`); handler 签名 dict→Model;
+  FastAPI 返 422 (非 400) for missing/invalid。
+
+### Agent — node_agent / agent_server / election (3)
+
+- **P1-2 `/api/hardware` 同步阻塞事件循环**: `async def hardware_info()` 同步调
+  `collect_hardware_info` (system_profiler 5s + ipconfig)。修复:
+  `await asyncio.to_thread(self.agent.collect_hardware_info)` — 对齐 `report_hardware` 范式。
+- **P1-17 HA 选举空窗无 503**: 选举期 `_is_leader` 未定时 `/api/tasks/submit` 仍派发。修复:
+  `MasterElection.leader_known` 属性; 守卫 `_election 配置且非 _is_leader 且非 leader_known` → 503
+  `选举过渡中`; 同步周期 5s→2s (config `ha.state_sync_interval`)。
+- **P1-18 agent `_running_task_handles` 无本地容量上限 → TOCTOU**: master 依赖心跳 TOCTOU。修复:
+  `execute_task` 入口 `if len(_running_task_handles) >= config.max_tasks: return {"overload":True,
+  "error":"节点任务已满"}`; master `_dispatch_*` 加 `overload` 分类 (transient, 不 report_fault, 选
+  其他节点)。匿名 task `anon-{seq}` 防 `_running_task_handles` 撞键。
+
+### 性能/运维 — tests / observability / docs / config / utils (6)
+
+- **P1-12 无真推理吞吐基准**: `test_load_stress.py` FastBackend fake 零延迟。修复: 新
+  `test_real_inference_benchmark.py` — skip-gate `_mlx_alive() and _model_available()`, 真 fusion-mlx
+  + `mlx-community-Llama-3.2-1B-Instruct-4bit`, 测单/多节点 DATA 并行吞吐, 断言多节点 ≥0.9× 单节点
+  (真模型抖动留余量)。
+- **P1-24 Prometheus 缺熔断/限流/节点级指标**: 仅集群聚合。修复: `get_prometheus_metrics` 补
+  `fusion_cluster_banned_nodes` gauge / `fusion_cluster_rate_limited_total` counter / 节点级
+  `fusion_node_memory_total_gb{node_id}` / `fusion_node_memory_available_gb{node_id}` /
+  `fusion_node_active_tasks{node_id}` / `fusion_node_banned{node_id}` (节点快照单独持 `_nodes_lock`,
+  不与 `_tasks_lock` 嵌套)。
+- **P1-25 `HA-CRASH-RECOVERY.md:133` 过期 (KV no-op)**: 改 "KV 张量跨节点传输已交付 (GAP-7 v0.11.0),
+  合成默认 + MLX env-gated 待上游 #650; v0.11.1 起流式传输"。
+- **P1-26 `kv_cache.json`/`users.json` 缺 fsync**: 对齐 `config.py` save 范式 — `f.flush()`+
+  `os.fsync(f.fileno())` 再 `os.replace`。两文件同改。
+- **P1-27 命令行直起无日志文件**: `setup_logger` 无 env → 仅 stdout 不落盘。修复: 未配
+  `FUSION_MULTINODE_LOG_FILE` 写 stderr 提示 (不加 handler → `len(handlers)==1` 断言不破)。README
+  运行章节强调 env。
+- **P1-12 基准配套**: `AgentConfig(max_tasks=64)` + register payload `max_tasks=64` +
+  `master._task_store_path` 防 H3 persist dir-missing + agent overload 误拒。
+
+### Tests — 新增 ~49 例
+
+- `test_cluster_master.py`: H3 重派 / exclude / OFFLINE 迁移 / 队列上限 / 退避 / 429 / 增量持久化 /
+  选举空窗 503。
+- `test_master_server.py`: pydantic 9 路由 422 + RBAC fail-closed + 全路由登记 + node-level metrics。
+- `test_kv_*.py`: import_tensor 降级/失败区分 + 跨节点异常分类告警。
+- `test_enterprise_security.py` / `test_mtls.py` / `test_user_rbac.py`: cloud_fallback 守卫 /
+  manual_join compare_digest+mTLS / RBAC fail-closed。
+- `test_real_inference_benchmark.py` (新): skip-gated 真推理基准。
+- `test_utils.py`: P1-27 stderr 提示。
+
+### Maintenance
+
+- ruff format 应用到全批触及文件 (cluster_master / kv / security / server / agent / tests)。
+
 ## [0.11.1] - 2026-08-27 — 审计 0826 P0 热修 (5 阻断项)
 
 > **生产阻断消除**: 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 5 P0 阻断项

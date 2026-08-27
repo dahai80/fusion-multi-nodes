@@ -28,5 +28,5 @@ and storage volumes.
   (张量 round-trip), 真张量为 env-gated bonus。
 """
 
-__version__ = "0.11.1"
+__version__ = "0.12.0"
 __app_name__ = "Fusion-Multi-Node"

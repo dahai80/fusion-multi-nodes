@@ -95,9 +95,7 @@ class TestMtlsTransport:
         ca_cert, ca_key = mtls_mod.provision_cluster(str(tmp_path / "ca"))
         assert Path(ca_cert).exists()
         assert Path(ca_key).exists()
-        cert_path, key_path = mtls_mod.provision_node(
-            "node-x", "worker", ca_cert, ca_key, str(tmp_path / "node-x")
-        )
+        cert_path, key_path = mtls_mod.provision_node("node-x", "worker", ca_cert, ca_key, str(tmp_path / "node-x"))
         from cryptography import x509
 
         leaf = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
