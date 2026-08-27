@@ -1651,53 +1651,82 @@ class ClusterMaster:
         # 超时随张量大小缩放 (P1-13 模式), 下限 30s
         http_timeout = max(30.0, size_mb * 2.0 + 30.0)
 
-        # 4. 源 agent /api/kv/export 取含张量 bundle
+        # 4. 源 agent /api/kv/export-stream 流式取含张量 bundle (P0-3 审计 §4.3)
+        #    旧 /api/kv/export base64+JSON 全量物化峰值 1.5GB; 流式元数据头+张量原始字节不物化整 bundle。
+        #    404 (旧对端无流式路由) → 降级 JSON export/import (向后兼容)。
+        src_stream_url = build_safe_url(mtls_scheme(), src_node.ip_address, src_node.port, "/api/kv/export-stream")
         src_url = build_safe_url(mtls_scheme(), src_node.ip_address, src_node.port, "/api/kv/export")
         try:
             exp_resp = await client.post(
-                src_url,
+                src_stream_url,
                 json={"cache_id": cache_id, "model_name": model_name},
                 headers=headers,
                 timeout=http_timeout,
             )
-            if exp_resp.status_code != 200:
-                logger.warning(
-                    f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: "
-                    f"{exp_resp.text[:200]}"
+            if exp_resp.status_code == 404:
+                # 旧对端无流式路由 → 降级 JSON 全量 (向后兼容, 小张量可行)
+                logger.info(f"GAP-7 KV 同步: 源 {src_id} 无流式路由, 降级 JSON export")
+                exp_resp = await client.post(
+                    src_url,
+                    json={"cache_id": cache_id, "model_name": model_name},
+                    headers=headers,
+                    timeout=http_timeout,
                 )
-                return False
-            bundle = exp_resp.json().get("bundle")
-            if not bundle:
-                logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 返回空 bundle")
-                return False
+                if exp_resp.status_code != 200:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: "
+                        f"{exp_resp.text[:200]}"
+                    )
+                    return False
+                bundle = exp_resp.json().get("bundle")
+                if not bundle:
+                    logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 返回空 bundle")
+                    return False
+                # 降级: 目标走 JSON import
+                tgt_url = build_safe_url(mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import")
+                imp_resp = await client.post(
+                    tgt_url,
+                    json={"bundle": bundle},
+                    headers=headers,
+                    timeout=http_timeout,
+                )
+                if imp_resp.status_code != 200 or imp_resp.json().get("stored", 0) != 1:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 目标 {tgt_node.node_id} JSON import 失败: "
+                        f"{imp_resp.status_code} {imp_resp.text[:200]}"
+                    )
+                    return False
+            else:
+                if exp_resp.status_code != 200:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 源 {src_id} export-stream HTTP {exp_resp.status_code}: "
+                        f"{exp_resp.text[:200]}"
+                    )
+                    return False
+                # 5. 二进制中转: 源 export-stream 原始字节 → 目标 import-stream 请求体。
+                #    agent 侧 export_stream 产原始张量字节 (不经 base64+JSON 物化),
+                #    import_stream 流式消费 (不经整 bundle JSON 解析), 降峰值内存。
+                #    master 2 跳 HTTP 中转暂持整段二进制 (无真字节管道原语) — 但已无 base64/JSON 膨胀,
+                #    峰值 = 单份原始字节 (500MB) 而非旧 JSON 解析峰值 (1.5GB)。
+                tgt_stream_url = build_safe_url(
+                    mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import-stream"
+                )
+                src_bytes = await exp_resp.aread()
+
+                imp_resp = await client.post(
+                    tgt_stream_url,
+                    content=src_bytes,
+                    headers={**headers, "Content-Type": "application/octet-stream"},
+                    timeout=http_timeout,
+                )
+                if imp_resp.status_code != 200 or imp_resp.json().get("stored", 0) != 1:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import-stream 失败: "
+                        f"{imp_resp.status_code} {imp_resp.text[:200]}"
+                    )
+                    return False
         except Exception as e:
             logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 异常: {e}")
-            return False
-
-        # 5. 目标 agent /api/kv/import 存入 (预算门在 store_local)
-        tgt_url = build_safe_url(mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import")
-        try:
-            imp_resp = await client.post(
-                tgt_url,
-                json={"bundle": bundle},
-                headers=headers,
-                timeout=http_timeout,
-            )
-            if imp_resp.status_code != 200:
-                logger.warning(
-                    f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import HTTP {imp_resp.status_code}: "
-                    f"{imp_resp.text[:200]}"
-                )
-                return False
-            stored = imp_resp.json().get("stored", 0)
-            if stored != 1:
-                logger.warning(
-                    f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import 预算拒存 (stored=0), "
-                    f"cache_id={cache_id}"
-                )
-                return False
-        except Exception as e:
-            logger.warning(f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import 异常: {e}")
             return False
 
         # 6. 更新 master 元数据 — 记录目标节点持有副本

@@ -531,6 +531,51 @@ class AgentServer:
                 stored = False
             return {"status": "ok" if stored else "skip", "stored": 1 if stored else 0}
 
+        @app.post("/api/kv/export-stream")
+        async def kv_export_stream(req: KVExportRequest):
+            # P0-3 (审计 §4.3): 流式二进制导出 — 替代 base64+JSON 全量物化 (峰值 1.5GB)。
+            # 元数据头 JSON + 各分片原始张量字节拼接, StreamingResponse 逐块输出, 不物化整 bundle。
+            # 旧对端走 /api/kv/export JSON (向后兼容); master sync_kv_cache 优先流式, 404 降级 JSON。
+            gen = self.kv_manager.export_stream(req.cache_id, req.model_name)
+            first = None
+            try:
+                first = await gen.__anext__()
+            except StopAsyncIteration:
+                raise HTTPException(status_code=404, detail=f"KV 缓存未找到: {req.cache_id}")
+
+            async def stream_body():
+                if first is not None:
+                    yield first
+                async for chunk in gen:
+                    yield chunk
+
+            return StreamingResponse(stream_body(), media_type="application/octet-stream")
+
+        @app.post("/api/kv/import-stream")
+        async def kv_import_stream(request: Request):
+            # P0-3: 流式导入 — 读头部 magic+长度+元数据, 剩余张量字节流式消费不物化整 bundle。
+            # 与 export_stream 配对。stored=1 已存 / stored=0 预算拒存或解析失败。
+            body = await request.body()
+            if not body.startswith(self.kv_manager.KV_STREAM_MAGIC):
+                logger.warning("P0-3 KV 流式导入: 请求体 magic 头不匹配")
+                return {"status": "skip", "stored": 0}
+            meta_len = int.from_bytes(body[8:12], "big")
+            header_and_meta = body[: 12 + meta_len]
+
+            async def tensor_aiter():
+                # 剩余张量字节按块产出 (已全量读入 body — 此处逻辑分块, 真流式需上游 #650 端点流式读)
+                rest = body[12 + meta_len :]
+                chunk_size = 65536
+                for i in range(0, len(rest), chunk_size):
+                    yield rest[i : i + chunk_size]
+
+            try:
+                stored = await self.kv_manager.import_stream(header_and_meta, tensor_aiter())
+            except Exception as e:
+                logger.warning(f"P0-3 KV 流式导入异常: {e}")
+                stored = False
+            return {"status": "ok" if stored else "skip", "stored": 1 if stored else 0}
+
         # ── 硬件信息 ──
 
         @app.get("/api/hardware")
