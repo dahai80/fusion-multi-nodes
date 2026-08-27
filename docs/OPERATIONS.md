@@ -16,7 +16,7 @@
 | 指标 | `... /api/v1/metrics` (Prometheus 文本) | — |
 | 告警 | `... /api/v1/observability/alerts` | 空 |
 
-数据目录 `~/.fusion/multi-node/`: `tasks.json` (H3 任务持久化) / `election_state.json` (选举 term/voted_for) / `kv_cache.json` (KV 缓存) / `config.json` / `.cluster_token` (mode 0600)。
+数据目录 `~/.fusion/multi-node/`: `tasks.json` (H3 任务持久化) / `election_state.json` (选举 term/voted_for) / `kv_cache.json` (KV 缓存) / `config.json` / `.cluster_token` (mode 0600) / `users.json` (多租户用户令牌, GAP-8 F1, scrypt 哈希) / `audit.log` (安全审计 JSONL, GAP-8)。
 日志: `FUSION_MULTINODE_LOG_FILE` 指向文件 + RotatingFileHandler 10MB×5; 容器 `docker compose logs`。
 
 ## 节点下线 (node down)
@@ -121,14 +121,61 @@ chmod 600 ~/.fusion/multi-node/.cluster_token
 
 ## Token 轮换 (token rotation)
 
-**场景**: 怀疑 token 泄露 / 定期轮换安全实践。共享 Bearer token = 唯一节点身份, 一处泄露全集群沦陷。
-**处置** (全集群同步, 须短暂停机或滚动):
+### 集群共享令牌 — 零停机滚动 (F5 `FUSION_CLUSTER_TOKEN_PREVIOUS`)
+
+**场景**: 怀疑 cluster token 泄露 / 定期轮换。共享 Bearer token = 节点间唯一身份, 一处泄露全集群沦陷。
+
+**F5 零停机流程** (重叠窗, 无 401 离线窗口, 推荐):
 1. 生成新 token: `python -c "import secrets; print(secrets.token_urlsafe(32))"`。
-2. 全集群节点设 `FUSION_CLUSTER_TOKEN=<新值>` (env 优先于文件, `load_or_create_token` 读 env)。
-   - 裸机: 各 Mac 启动脚本/launchd plist env。
-   - docker-compose: `.env` 文件 `FUSION_CLUSTER_TOKEN` (P2-23, 未设启动失败)。
-3. 滚动重启: 先 master (`./start.sh restart`), 再各 agent。新旧 token 切换期间, 未更新节点鉴权 401 → 短暂离线。
-4. 或全停全启 (更安全, 无 401 窗口): 全节点停 → 设新 token → 全启。
-5. 删旧 token 文件: `rm ~/.fusion/multi-node/.cluster_token` (env 接管后文件不再用)。
-**恢复验证**: `GET /api/health` 带新 token 返 200; 旧 token 返 401; 所有 `/api/nodes` `online`。
+2. **第一步 — 全节点先设 previous** = 当前旧值: `FUSION_CLUSTER_TOKEN_PREVIOUS=<旧值>` (env)。此时各节点入站仍只认 current=旧值, previous 窗尚未生效 (current 未变)。
+3. **第二步 — 逐节点轮换 current**: 设 `FUSION_CLUSTER_TOKEN=<新值>` 并重启该节点 (`./start.sh restart` / launchd / `docker compose up -d`)。
+   - 重启后该节点入站接受 **新值 (current) + 旧值 (previous)** — 重叠窗开启 (`BearerAuthMiddleware` 常量时间比较两值)。
+   - 未重启节点仍持旧值 current, 对已轮换节点发出的 **新值出站请求** 暂时 401 (出站始终发 current, 见下)。
+   - 故按 **先 master 再 agent** 顺序逐节点轮换, 保证派发链上游先就位。
+4. **第三步 — 全节点轮换完毕**: 所有节点 current=新值。此时旧值仅经 previous 窗被接受。
+5. **第四步 — 关闭重叠窗**: 全节点删 `FUSION_CLUSTER_TOKEN_PREVIOUS` (或置空) 并重启 → 旧值彻底失效。
+6. 删旧 token 文件: `rm ~/.fusion/multi-node/.cluster_token` (env 接管后文件不再用)。
+
+**出站语义**: `_get_dispatch_token` 读 `FUSION_CLUSTER_TOKEN` (current) — 出站请求始终发 current, **不发 previous**。故滚动期 "未轮换节点发出旧值 → 已轮换节点经 previous 窗接受", 反之 "已轮换节点发出新值 → 未轮换节点 401 直到它也轮换"。这要求按 master→agent 顺序轮换, 不可乱序。
+
+**全停全启 (更简单, 须停机)**: 全节点停 → 设 `FUSION_CLUSTER_TOKEN=<新值>` (不设 previous) → 全启。无重叠窗, 无 401, 但有停机窗口。
+
+**恢复验证**: `GET /api/health` 带新 token 返 200; 重叠窗内带旧 token 亦 200; 关窗后旧 token 返 401; 所有 `/api/nodes` `online`。
+
 **加固**: 启用 mTLS (`FUSION_MTLS_ENABLED=1` + per-node cert) 减少单 token 依赖 — 见 README 安全边界表。
+
+### 多租户用户令牌 (GAP-8 F1-F5)
+
+**场景**: 多租户/远程接入 — per-user API 令牌 (`fmu_<userid>_<secret>`) 鉴权用户面路由 (master `/v1/chat/completions`、`/api/tasks/*`、`/api/v1/users/*`)。与集群共享令牌正交: 节点间内部流量不走用户令牌。
+
+**首启引导 ADMIN**:
+1. 首次启动设 `FUSION_BOOTSTRAP_ADMIN=admin` (env) → MasterServer 无用户库时自动创建 ADMIN `admin` 并签发首个令牌。
+2. 令牌明文 **仅日志显示一次** (`首启引导 ADMIN 用户已创建 ... 首个令牌已签发`), 妥善保存。后续用户管理走 API。
+
+**用户管理 (ADMIN 令牌)**:
+```bash
+ADMIN_TOK="<首启令牌>"
+# 创建用户 (role: admin|user|viewer)
+curl -sX POST -H "Authorization: Bearer $ADMIN_TOK" \
+  -d '{"user_id":"alice","role":"user"}' http://127.0.0.1:11452/api/v1/users
+# 签发令牌 (明文仅返回一次)
+curl -sX POST -H "Authorization: Bearer $ADMIN_TOK" \
+  -d '{"label":"dev"}' http://127.0.0.1:11452/api/v1/users/alice/tokens
+# 轮换令牌 (签新留旧, 多活 — 旧令牌仍有效, 须另调吊销)
+curl -sX POST -H "Authorization: Bearer $ADMIN_TOK" \
+  -d '{"label":"rotated"}' http://127.0.0.1:11452/api/v1/users/alice/tokens/rotate
+# 吊销旧令牌 (tid 从 list_users 取)
+curl -sX DELETE -H "Authorization: Bearer $ADMIN_TOK" \
+  http://127.0.0.1:11452/api/v1/users/alice/tokens/<tid>
+# 列用户
+curl -sH "Authorization: Bearer $ADMIN_TOK" http://127.0.0.1:11452/api/v1/users
+```
+
+**用户令牌轮换 (多活)**: `POST /api/v1/users/{id}/tokens/rotate` 签发新令牌, **旧令牌保留有效** (多活, 客户端灰度切换无停机)。客户端切到新令牌后, ADMIN 调吊销旧令牌 (`DELETE .../tokens/{tid}`)。密钥只存 scrypt 哈希, 明文仅签发/轮换时返回一次。
+
+**零配置向后兼容**: 无 `users.json` 且无 `FUSION_BOOTSTRAP_ADMIN` → `UserStore is None` → 中间件纯集群令牌路径, 单租户行为不变 (现有部署无需改动)。
+
+**审计**: 所有用户管理动作 (create/delete/issue/rotate/revoke) + 鉴权失败 + 权限拒绝记 `audit.log` JSONL, `actor`=已认证 user_id (非客户端自报, 防伪造)。查审计:
+```bash
+tail -f ~/.fusion/multi-node/audit.log   # 或 FUSION_AUDIT_LOG 覆盖路径
+```

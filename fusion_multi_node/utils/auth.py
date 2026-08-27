@@ -271,6 +271,12 @@ class BearerAuthMiddleware:
         self._expected = shared_token
         self._audit = audit_logger
         self._user_store = user_store
+        # F5 (GAP-8): cluster-token 滚动重启重叠窗 — 接受 current + previous。
+        # FUSION_CLUSTER_TOKEN_PREVIOUS 环境变量注入旧令牌, 零停机灰度切换:
+        # 全节点先设 _PREVIOUS=旧值 再轮换 FUSION_CLUSTER_TOKEN=新值 → 两令牌并存期;
+        # 最后清 _PREVIOUS → 旧令牌失效。空串/未设 → 不开重叠窗 (单令牌, 行为不变)。
+        prev = os.environ.get("FUSION_CLUSTER_TOKEN_PREVIOUS", "").strip()
+        self._expected_previous = prev if prev and prev != shared_token else ""
 
     def _client_ip(self, scope) -> str:
         client = scope.get("client")
@@ -349,13 +355,16 @@ class BearerAuthMiddleware:
             return
 
         # 集群令牌路径 (cluster_token) — 热路径, O(1)
+        # F5: 滚动重启重叠窗内接受 previous-active 令牌 (常量时间比较, 不泄露哪个匹配)。
         if not secrets.compare_digest(token, self._expected):
-            logger.warning(f"认证失败: token 不匹配 ({path})")
-            self._audit_fail(scope, "token 不匹配")
-            from starlette.responses import JSONResponse
+            if not (self._expected_previous and secrets.compare_digest(token, self._expected_previous)):
+                logger.warning(f"认证失败: token 不匹配 ({path})")
+                self._audit_fail(scope, "token 不匹配")
+                from starlette.responses import JSONResponse
 
-            response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-            await response(scope, receive, send)
-            return
+                response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                await response(scope, receive, send)
+                return
+            logger.info(f"集群令牌重叠窗: previous-active 令牌通过 ({path})")
 
         await self.app(scope, receive, send)

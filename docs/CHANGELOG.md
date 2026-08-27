@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.7] - 2026-08-27 — GAP-8 Phase F5: 令牌轮换 + 多租户运维 Runbook
+
+> **用户多活令牌轮换 + 集群共享令牌零停机滚动**: 用户令牌 rotate 签新留旧 (多活, 客户端灰度
+> 切换无停机), revoke 另调。集群共享令牌经 `FUSION_CLUSTER_TOKEN_PREVIOUS` 环境变量开重叠窗 —
+> 入站接受 current + previous (常量时间 `secrets.compare_digest`, 不泄露哪个匹配), 出站始终发
+> current (`_get_dispatch_token` 读 `FUSION_CLUSTER_TOKEN`)。按 master→agent 顺序逐节点轮换,
+> 无 401 离线窗口。补 `docs/OPERATIONS.md` 多租户用户令牌运维章节 (bootstrap admin / CRUD /
+> 轮换吊销 / 审计)。GAP-8 Phase F (多租户/远程接入) 至此完成 (KV no-op 待上游, issue #33)。
+
+### Added
+
+- **集群令牌 previous-active 重叠窗** (`utils/auth.py`) — GAP-8 Phase F5
+  - `BearerAuthMiddleware.__init__` 读 `FUSION_CLUSTER_TOKEN_PREVIOUS` env 注入旧令牌; 空串/未设/与 current 一致 → 不开重叠窗 (单令牌, 行为不变)。
+  - 集群令牌校验路径: current 不中 → 若 previous 存在且匹配则通过 (常量时间比较, info 日志 `集群令牌重叠窗: previous-active 令牌通过`), 否则 401 + 审计 `auth_fail`。
+  - 出站 `_get_dispatch_token` (cluster_master.py) 不变 — 读 `FUSION_CLUSTER_TOKEN` (current), 滚动重启期对端已先接受旧值。
+- **多租户用户令牌运维 Runbook** (`docs/OPERATIONS.md`) — GAP-8 Phase F5
+  - 重写 "Token 轮换" 章节: F5 零停机滚动流程 (设 previous → 逐节点轮换 current → 关窗) + 全停全启备选; 出站语义说明 (master→agent 顺序)。
+  - 新增 "多租户用户令牌" 章节: 首启引导 ADMIN (`FUSION_BOOTSTRAP_ADMIN`) / 用户 CRUD API (create/issue/rotate/revoke/list) / 多活轮换语义 / 零配置向后兼容 / 审计查询。
+  - 诊断入口数据目录表补 `users.json` (多租户 scrypt 哈希) + `audit.log` (安全审计 JSONL)。
+- **令牌轮换测试** (`tests/test_token_rotation.py`, 7 用例) — GAP-8 Phase F5
+  - 用户: rotate 签新留旧 (old+new 均 200); revoke 旧令牌后 old 401 new 200; rotate 路由返回新令牌 + 旧令牌仍有效。
+  - 集群: previous+current 均接受 (200); 未设 env → previous 401; previous==current 不开窗 (另一令牌 401)。
+  - 出站: `_get_dispatch_token` 返 current (非 previous); previous 令牌对入站仍 200 (出/入两端语义分离)。
+
+### Changed
+
+- 版本 0.10.6 → **0.10.7** (`pyproject.toml`, `fusion_multi_node/__init__.py`)。
+- README badge: version 0.10.6→0.10.7, tests 1174→1181; 头部 F4→F5 发布块; 剩余任务删 F5 (已完成), 仅留 KV no-op (#33)。
+
+### Fixed
+
+- 无 (本轮无缺陷修复)。
+
+### Tests
+
+- 全量 `pytest tests/ -q`: **1181 passed**, ruff clean。
+- 新增 `test_token_rotation.py` 7 用例 (+7, 1174→1181)。
+- 注: `test_pipeline_e2e.py::test_pipeline_two_shard_real_tensor` 真 fusion-mlx 张量推理, 全量套件负载下偶现 RUNNING (真模型前向时序竞争); 单独运行通过, 非代码缺陷。
+
 ## [0.10.6] - 2026-08-27 — GAP-8 Phase F4: 集群控制 API 契约 /api/v1
 
 > **/api/v1 typed 契约 + HTTP 文档 + 漂移检测**: `/api/v1/*` 路由补齐 `response_model=` Pydantic 契约,

@@ -5,28 +5,26 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.10.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.10.7-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1174%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1181%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.6 (2026-08-27) — GAP-8 Phase F4: 集群控制 API 契约 /api/v1**
+> **📦 v0.10.7 (2026-08-27) — GAP-8 Phase F5: 令牌轮换 + 多租户运维 Runbook**
 >
-> `/api/v1/*` 路由补齐 typed `response_model=` Pydantic 契约 (V1NodeResponse/V1TaskSubmitResponse/
-> V1TaskProgressResponse/V1ClusterStatsResponse 等 13 模型), 覆盖 9 集群控制操作 (list_nodes/register/
-> remove/submit/migrate/degrade/progress/cluster_stats/observability_suggestions)。旧 `/api/*` raw-dict
-> 路由保留向后兼容; 重复路由遮蔽修复 (first-registered-wins — bless 旧路由加 response_model, 删遮蔽副本)。
-> `docs/API.md` 重写为 HTTP 路由契约表 (9-op), Python 类文档迁出 `docs/PYTHON_API.md`; 新增
-> `tests/test_api_docs_contract.py` 漂移检测 (每 /api/v1 路由须在 API.md)。解决 #32 — fusion-agent-studio
-> 可据此桥接真实集群 (替代内存 dev 集群)。详见 [CHANGELOG](docs/CHANGELOG.md)。
+> 用户令牌多活轮换 (rotate 签新留旧, revoke 另调) + 集群共享令牌零停机滚动
+> (`FUSION_CLUSTER_TOKEN_PREVIOUS` 重叠窗 — current+previous 并存期常量时间比较,
+> 出站始终发 current, 按 master→agent 顺序轮换无 401 离线)。新增 `docs/OPERATIONS.md`
+> 多租户用户令牌运维章节 (bootstrap admin / CRUD / 轮换吊销 / 审计)。新增
+> `tests/test_token_rotation.py` (用户多活+revoke, cluster current+previous, 出站用 current)。
+> 详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 已完成 (Phase A-E + F1-F4): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD → F3 推理代理 → F4 API 契约。
-> 仍待补齐 (Phase F):
-> - **F5 令牌轮转** (GAP-8): 多活令牌 + cluster previous-active 滚动重启
+> 已完成 (Phase A-E + F1-F5): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD → F3 推理代理 → F4 API 契约 → F5 令牌轮换。
+> 仍待补齐:
 > - **KV no-op** (GAP-7): sync_kv_cache 仅元数据 (张量 KV 上游阻塞, issue #33)
 
 ---
