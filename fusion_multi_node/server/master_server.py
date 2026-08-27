@@ -161,6 +161,17 @@ class UserRoleUpdateRequest(BaseModel):
     role: str
 
 
+class ChatCompletionsProxyRequest(BaseModel):
+    # F3 (#27): master /v1/chat/completions 代理体 — 透传到 agent /api/v1/chat/completions。
+    # 字段对齐 OpenAI chat 格式; extra 透传采样参数 (top_p/top_k/...)。
+    model: str
+    messages: list[dict[str, Any]] = []
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    stream: bool = False
+    extra: dict[str, Any] = {}
+
+
 class KVRegisterRequest(BaseModel):
     cache_id: str
     model_name: str
@@ -832,6 +843,105 @@ class MasterServer:
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
             return _task_to_resp(task)
+
+        # F3 (#27): /v1/chat/completions 轻量代理 — 统一推理入口, 走 select_nodes 路由策略。
+        # 非任务流水线 (同步直返, 不进 self.tasks/持久化/优先级队列)。
+        # 流程: 用户令牌鉴权 (chat:complete; VIEWER→403) → 租户在途配额 (429 超限)
+        # → select_nodes(DATA, count=1) → 转发选中节点 agent /api/v1/chat/completions
+        # → agent FusionMLXBackend.chat → 原生 OpenAI 格式直返 / 流式透传。
+        # 集群令牌亦放行 (内部调用, 无用户配额 gate) — 走 node-RBAC (master 全权)。
+        @app.post("/v1/chat/completions")
+        async def chat_completions_proxy(req: ChatCompletionsProxyRequest, request: Request):
+            user_actor = _enforce_user_rbac(request, "/v1/chat/completions", "POST")
+            # 租户在途配额: 仅用户令牌 gate (集群令牌无租户, 不限)。0=不限直接放行。
+            if user_actor:
+                if not await self.master.acquire_chat_slot(user_actor):
+                    self._audit.log(
+                        actor=user_actor,
+                        action="chat_quota_exceeded",
+                        path="/v1/chat/completions",
+                        method="POST",
+                        result="denied",
+                        detail=f"租户在途推理配额满: user={user_actor}",
+                    )
+                    raise HTTPException(status_code=429, detail="租户推理并发配额已满, 稍后重试")
+
+            # 槽已占 (用户令牌)。统一 try/finally 释放: 流式在 _relay 内释放 (生成器生命周期),
+            # 非流式/异常在此处 finally 释放。stream_released 标记避免双重释放。
+            stream_released = False
+            try:
+                # 节点选择: DATA 单节点, 复用现有路由策略 (负载/本地优先/熔断过滤)。
+                nodes = await self.master.select_nodes(ParallelMode.DATA, count=1)
+                if not nodes:
+                    raise HTTPException(status_code=503, detail="无可用推理节点")
+                node = nodes[0]
+                # 出站 SSRF 守卫 — build_safe_url + is_safe_peer_host (与派发一致)。
+                if not is_safe_peer_host(node.ip_address):
+                    raise HTTPException(status_code=503, detail=f"节点 {node.node_id} 非安全对端")
+                url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/v1/chat/completions")
+                # 复用派发连接池 + token (测试 monkeypatch _get_dispatch_http 即可拦截出站)。
+                client = await self.master._get_dispatch_http()
+                token = self.master._get_dispatch_token()
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "X-Node-Id": "master",
+                    "X-Node-Role": "master",
+                }
+                payload = {
+                    "model": req.model,
+                    "messages": req.messages,
+                    "temperature": req.temperature,
+                    "max_tokens": req.max_tokens,
+                    "stream": req.stream,
+                    "extra": req.extra,
+                }
+                self._audit.log(
+                    actor=user_actor or "master",
+                    action="chat",
+                    path="/v1/chat/completions",
+                    method="POST",
+                    node_id=node.node_id,
+                    result="ok",
+                    detail=f"model={req.model} stream={req.stream}",
+                )
+                logger.info(
+                    f"chat 代理转发: user={user_actor!r} → node={node.node_id} "
+                    f"model={req.model} stream={req.stream}"
+                )
+                if req.stream:
+                    # 流式: 透传 agent SSE 字节流到客户端。stream 生命周期绑生成器 (aiter_raw 消费时才取),
+                    # 槽在 _relay finally 释放 (生成器结束/断开均触发)。
+                    async def _relay():
+                        try:
+                            async with client.stream(
+                                "POST", url, json=payload, headers=headers, timeout=None
+                            ) as upstream:
+                                async for chunk in upstream.aiter_raw():
+                                    yield chunk
+                        except Exception as e:
+                            logger.error(f"chat 流式代理失败: {e}")
+                            yield b'data: {"error":"internal"}\n\n'
+                        finally:
+                            if user_actor:
+                                await self.master.release_chat_slot(user_actor)
+                    stream_released = True  # 流式槽交 _relay 释放, 外层 finally 跳过
+                    return StreamingResponse(_relay(), media_type="text/event-stream")
+                # 非流式: 同步取 agent 响应, 原生 OpenAI 格式直返。
+                resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                if resp.status_code == 429:
+                    raise HTTPException(status_code=429, detail="推理后端限流, 稍后重试")
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=502, detail=f"agent 推理失败: {resp.status_code} {resp.text[:200]}")
+                return resp.json()
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"chat 代理失败: {e}")
+                raise HTTPException(status_code=502, detail=f"推理代理失败: {str(e)[:200]}")
+            finally:
+                # 非流式/异常 (含 503/502) 释放槽; 流式槽已在 _relay finally 释放 (跳过防双重)。
+                if user_actor and not stream_released:
+                    await self.master.release_chat_slot(user_actor)
 
         @app.post("/api/tasks/{task_id}/cancel")
         async def cancel_task(task_id: str, req: TaskCancelRequest, request: Request):

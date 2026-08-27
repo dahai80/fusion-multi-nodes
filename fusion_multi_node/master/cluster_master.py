@@ -269,6 +269,11 @@ class ClusterMaster:
         # 任务终态/失败/重试/取消时 _emit_task_event 向所有订阅者非阻塞 put_nowait,
         # /api/tasks/events SSE 端点流式推客户端, 不再纯轮询知 FAILED。
         self._event_subscribers: list[asyncio.Queue] = []
+        # F3 (#27): /v1/chat/completions 轻量代理 — 同步推理不进任务流水线 (不污染
+        # self.tasks/持久化/优先级队列)。用 per-user 在途计数器 gate 租户并发:
+        # _tenant_max_concurrent (0=不限) 复用调度配额, 429 超限。轻量锁独立于三域锁。
+        self._chat_lock = asyncio.Lock()
+        self._inflight_chat: dict[str, int] = {}
 
     # ── 节点管理 ──
 
@@ -706,6 +711,37 @@ class ClusterMaster:
         """P1-H: 设置租户并发配额 (0=不限)。供 CLI 从 ClusterConfig 注入。"""
         self._tenant_max_concurrent = max(0, int(tenant_max_concurrent))
         logger.info(f"P1-H 租户并发配额: {self._tenant_max_concurrent} (0=不限)")
+
+    # ── F3 (#27): /v1/chat/completions 轻量代理租户配额 ──
+
+    async def acquire_chat_slot(self, user: str) -> bool:
+        """尝试占用一租户在途推理槽。超配额返 False (调用方 429)。
+
+        与 _running_count_for_user 不同: chat 代理不建任务 (同步直返), 不进 self.tasks,
+        故用独立计数器。配额复用 _tenant_max_concurrent (0=不限)。锁内纯计数无 await, 安全。
+        """
+        if self._tenant_max_concurrent == 0:
+            return True
+        uid = user or ""
+        async with self._chat_lock:
+            current = self._inflight_chat.get(uid, 0)
+            if current >= self._tenant_max_concurrent:
+                logger.info(f"chat 代理租户配额满: user={uid!r} {current}/{self._tenant_max_concurrent}")
+                return False
+            self._inflight_chat[uid] = current + 1
+            return True
+
+    async def release_chat_slot(self, user: str) -> None:
+        """释放一租户在途推理槽 (finally 调用, 防泄漏)。配额 0=不限时空操作。"""
+        if self._tenant_max_concurrent == 0:
+            return
+        uid = user or ""
+        async with self._chat_lock:
+            current = self._inflight_chat.get(uid, 0)
+            if current <= 1:
+                self._inflight_chat.pop(uid, None)
+            else:
+                self._inflight_chat[uid] = current - 1
 
     def _enqueue_pending(self, task: ClusterTask) -> None:
         """入优先级队列 — 按 priority 降序插入保持队列有序 (稳定排序)。

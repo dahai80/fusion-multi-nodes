@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.5] - 2026-08-27 — GAP-8 Phase F3: 统一推理代理 /v1/chat/completions
+
+> **统一推理入口 + 租户在途配额**: master 新增 `/v1/chat/completions` 轻量 pass-through 代理,
+> 经 `select_nodes(DATA, count=1)` 路由选中节点 agent `/api/v1/chat/completions` →
+> `FusionMLXBackend.chat` (原生 OpenAI 格式, 支持流式 SSE 透传)。用户令牌经 `chat:complete` RBAC +
+> 租户在途并发配额 (复用 `_tenant_max_concurrent`, 超限 429 + 审计 `chat_quota_exceeded`); 集群令牌
+> 内部放行 (无租户 gate)。解决 #27 两套路由分叉 — 客户端经 master 统一推理入口, 非任务流水线 (同步直返,
+> 不进 self.tasks/持久化/优先级队列)。
+
+### Added
+
+- **master `/v1/chat/completions` 代理** (`server/master_server.py`) — GAP-8 Phase F3, issue #27
+  - `ChatCompletionsProxyRequest` (model/messages/temperature/max_tokens/stream/extra)
+  - 流程: `_enforce_user_rbac` (chat:complete; VIEWER→403) → `acquire_chat_slot` (租户配额, 超限 429 +
+    审计 `chat_quota_exceeded`) → `select_nodes(DATA, count=1)` → `build_safe_url` + `is_safe_peer_host`
+    (出站 SSRF 守卫) → 复用 `_get_dispatch_http` 连接池转发 → 原生 OpenAI 格式直返 / 流式 `StreamingResponse`
+  - 槽释放统一 try/finally + `stream_released` 标记 (流式在 `_relay` finally 释放, 非流式/异常外层释放, 防双重)
+  - 审计 `actor=user_id` (用户令牌) / `master` (集群令牌), `action=chat`, `node_id=选中节点`
+- **agent `/api/v1/chat/completions` 透传** (`server/agent_server.py`) — GAP-8 Phase F3
+  - `ChatCompletionsRequest` + `POST /api/v1/chat/completions` → `_check_permission` (TASK_EXECUTE) →
+    `FusionMLXBackend.chat` (429 退避 + api_key Bearer); 非流式直返, 流式 `StreamingResponse` 透传 fusion-mlx SSE
+  - `is_safe_path_segment(model)` 守卫 (防路径穿越, 非法 → 400); 非 FusionMLXBackend → 503
+- **租户在途配额** (`master/cluster_master.py`) — GAP-8 Phase F3
+  - `_chat_lock` + `_inflight_chat: dict[str,int]` 轻量计数器 (独立于三域锁, 不污染 self.tasks)
+  - `acquire_chat_slot` / `release_chat_slot` 复用 `_tenant_max_concurrent` (0=不限); 配额满返 False → 429
+- **node-RBAC 映射** (`security/permission.py`): `/api/v1/chat/completions` → TASK_EXECUTE (集群内部 master 派发)
+
+### Tests
+
+- `tests/test_chat_proxy.py` (8): USER 非流式 200 路由 / 集群令牌放行 / VIEWER 403 / 无节点 503 /
+  租户配额满 429 + 审计 / 审计 actor=chat / 流式 SSE / 槽释放归零
+- `tests/test_agent_chat_passthrough.py` (5): 非流式 / 流式 SSE / 非法 model 400 / 无 token 401 / 空 model 400
+
+**回归**: 1154 tests passed, 0 ruff errors.
+
 ## [0.10.4] - 2026-08-27 — GAP-8 Phase F2: per-user RBAC + user CRUD + tamper-proof audit
 
 > **多租户 RBAC 强制 + 用户管理**: 用户令牌经 `check_user_path_access` 按 UserRole 鉴权 (USER

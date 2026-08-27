@@ -10,11 +10,12 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 from fusion_multi_node.agent import NodeAgent
 from fusion_multi_node.distributed_mlx import KVSharingManager
 from fusion_multi_node.security.permission import NodeRole, PermissionManager
-from fusion_multi_node.utils.auth import BearerAuthMiddleware, load_or_create_token
+from fusion_multi_node.utils.auth import BearerAuthMiddleware, is_safe_path_segment, load_or_create_token
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,17 @@ class ExecuteRequest(BaseModel):
     messages: list[dict[str, Any]] = []
     max_tokens: int = 2048
     temperature: float = 0.7
+    extra: dict[str, Any] = {}
+
+
+class ChatCompletionsRequest(BaseModel):
+    # F3 (#27): OpenAI 兼容 chat 透传体。透传到 fusion-mlx /v1/chat/completions,
+    # 经 FusionMLXBackend.chat (429 退避 + api_key Bearer), 不经任务流水线。
+    model: str
+    messages: list[dict[str, Any]] = []
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    stream: bool = False
     extra: dict[str, Any] = {}
 
 
@@ -364,6 +376,58 @@ class AgentServer:
             except Exception as e:
                 logger.error(f"任务执行失败: {e}")
                 raise HTTPException(status_code=500, detail="内部错误")
+
+        # F3 (#27): chat 透传 — master /v1/chat/completions 转发到此, 直调 fusion-mlx,
+        # 保留原生 OpenAI 格式 (非 /api/execute 扁平 result), 支持流式。
+        # 集群内部鉴权: cluster_token (master 派发) + X-Node-Id=master, node-RBAC TASK_EXECUTE。
+        # fmu_ 用户令牌不应到达 agent (集群内部流量从不携带用户凭据), BearerAuthMiddleware 校验。
+        @app.post("/api/v1/chat/completions")
+        async def chat_completions(req: ChatCompletionsRequest, request: Request):
+            await _check_permission(request, "/api/v1/chat/completions", "POST")
+            from fusion_multi_node.agent.node_agent import FusionMLXBackend
+            from fusion_multi_node.agent.rate_pacer import RateLimitExhausted
+
+            backend = self.agent._backend
+            if not isinstance(backend, FusionMLXBackend):
+                raise HTTPException(status_code=503, detail="chat 透传需 FusionMLXBackend")
+            if not req.model or not is_safe_path_segment(req.model):
+                raise HTTPException(status_code=400, detail=f"非法 model: {req.model!r}")
+            payload = {
+                "model": req.model,
+                "messages": req.messages,
+                "temperature": req.temperature,
+                "max_tokens": req.max_tokens,
+                **{k: v for k, v in req.extra.items() if k in ALLOWED_EXTRA_KEYS},
+            }
+            if req.stream:
+                payload["stream"] = True
+                client = await backend._get_client()
+                url = f"{backend._base_url}/v1/chat/completions"
+                # 流式: 透传 fusion-mlx SSE 字节流到上游 (master StreamingResponse 再透传客户端)。
+                async def _stream():
+                    try:
+                        req_ctx = client.stream(
+                            "POST", url, json=payload, headers=backend._dist_headers()
+                        )
+                        async with req_ctx as upstream:
+                            async for chunk in upstream.aiter_raw():
+                                yield chunk
+                    except Exception as e:
+                        logger.error(f"chat 流式透传失败: {e}")
+                        yield b'data: {"error":"internal"}\n\n'
+                return StreamingResponse(_stream(), media_type="text/event-stream")
+            try:
+                data = await backend.chat(
+                    model=req.model,
+                    messages=req.messages,
+                    temperature=req.temperature,
+                    max_tokens=req.max_tokens,
+                    **{k: v for k, v in req.extra.items() if k in ALLOWED_EXTRA_KEYS},
+                )
+            except RateLimitExhausted as e:
+                logger.warning(f"chat 透传限流未恢复: {e}")
+                raise HTTPException(status_code=429, detail="推理后端限流, 稍后重试")
+            return data
 
         @app.post("/api/tasks/cancel")
         async def cancel_task(req: TaskCancelRequest, request: Request):
