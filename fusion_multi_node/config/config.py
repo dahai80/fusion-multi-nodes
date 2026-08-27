@@ -92,6 +92,7 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "observability.retention_hours": _validate_positive_float,
     "observability.alert_enabled": _validate_bool,
     "observability.log_level": _validate_str,
+    "observability.persist": _validate_bool,
 }
 
 SCHEMA_VERSION = 1
@@ -169,6 +170,9 @@ class ClusterConfig:
             "retention_hours": 24.0,
             "alert_enabled": True,
             "log_level": "info",
+            # P2-12 (审计 §6.5): 可观测 deque 持久化开关 (默认 False, 重启即失维持现状)。
+            # 开则 save()/load() 落盘 ~/.fusion/multi-node/observability.jsonl, 限最近 N 条。
+            "persist": False,
         },
     }
 

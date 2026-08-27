@@ -159,10 +159,15 @@ class MasterElection:
 
                 # P0-1: 逐次异常隔离, 单轮选举/心跳失败不杀循环 (否则 HA 静默停滞零告警)。
                 try:
+                    # P2-6: 锁内仅内存状态判定 + 快照, HTTP I/O (start_election 拉票 /
+                    # broadcast_heartbeat 推送) 移锁外 — 旧实现持 _lock 内 await N 个对端 HTTP。
+                    should_elect = False
+                    should_broadcast = False
+                    broadcast_peers: list[str] = []
                     async with self._lock:
                         if self.state == ElectionState.FOLLOWER:
                             if now - self._last_heartbeat > self._election_timeout:
-                                await self._start_election()
+                                should_elect = True
                         elif self.state == ElectionState.CANDIDATE:
                             pass
                         elif self.state == ElectionState.LEADER:
@@ -171,7 +176,12 @@ class MasterElection:
                             self._last_heartbeat = now
                             if now - self._last_broadcast >= self._heartbeat_interval:
                                 self._last_broadcast = now
-                                await self._broadcast_heartbeat_locked()
+                                should_broadcast = True
+                                broadcast_peers = [nid for nid in self._known_nodes if nid != self.node_id]
+                    if should_elect:
+                        await self._start_election()
+                    if should_broadcast:
+                        await self._broadcast_heartbeat(broadcast_peers)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -179,17 +189,16 @@ class MasterElection:
         except asyncio.CancelledError:
             pass
 
-    async def _broadcast_heartbeat_locked(self) -> None:
-        """已持 _lock 下向所有已知 follower 推 heartbeat (best-effort)。
+    async def _broadcast_heartbeat(self, peers: list[str]) -> None:
+        """P2-6 (审计 §5.10): 锁外向所有已知 follower 推 heartbeat (best-effort)。
 
         C1 修复: 调 send_heartbeat 回调 (HTTP POST /api/ha/heartbeat)。
         回调内自解析对端地址 + best-effort 吞异常, 这里只负责遍历已知节点。
+        peers 由 _election_loop 锁内快照传入, HTTP 不持 _lock (旧实现持锁内 await N 对端)。
         """
         if not self._send_heartbeat:
             return
-        for peer_id in self._known_nodes:
-            if peer_id == self.node_id:
-                continue
+        for peer_id in peers:
             try:
                 if asyncio.iscoroutinefunction(self._send_heartbeat):
                     await self._send_heartbeat(peer_id)
@@ -199,24 +208,29 @@ class MasterElection:
                 logger.debug(f"心跳推送失败: {peer_id}: {e}")
 
     async def _start_election(self) -> None:
-        self.current_term += 1
-        self.state = ElectionState.CANDIDATE
-        self.voted_for = self.node_id
-        self._votes_received = {self.node_id}
-        self._election_timeout = self._random_timeout()
-        self._save_state()
+        # P2-6 (审计 §5.10): 锁内仅改内存状态 (term/state/voted/votes 集) + 快照投票请求,
+        # HTTP send_vote_request 轮询对端 + _save_state (fsync) 移锁外 — 旧实现整段在
+        # _election_loop 持 _lock 内 await N 个对端 HTTP 拉票, 拖慢选举 + 长持锁阻塞
+        # handle_vote_request/receive_heartbeat。快照 vote_req 字段后释放锁, 锁外异步拉票。
+        async with self._lock:
+            self.current_term += 1
+            self.state = ElectionState.CANDIDATE
+            self.voted_for = self.node_id
+            self._votes_received = {self.node_id}
+            self._election_timeout = self._random_timeout()
+            vote_req = VoteRequest(
+                term=self.current_term,
+                candidate_id=self.node_id,
+                candidate_priority=self.priority,
+            )
+            known_peers = [nid for nid in self._known_nodes if nid != self.node_id]
+            majority = (len(self._known_nodes) + 1) // 2 + 1
+        # 锁外落盘 (fsync 不持锁) — 仍属选举关键路径, 单次 to_thread 不显著增延迟。
+        await self._persist_state_async()
+        logger.info(f"发起选举: term={vote_req.term}, node={self.node_id}")
 
-        logger.info(f"发起选举: term={self.current_term}, node={self.node_id}")
-
-        vote_req = VoteRequest(
-            term=self.current_term,
-            candidate_id=self.node_id,
-            candidate_priority=self.priority,
-        )
-
-        for node_id in self._known_nodes:
-            if node_id == self.node_id:
-                continue
+        # 锁外并发拉票: _votes_received 仅本 candidate 自身写 (单选举轮), 无跨任务竞争。
+        for node_id in known_peers:
             if self._send_vote_request:
                 try:
                     if asyncio.iscoroutinefunction(self._send_vote_request):
@@ -229,14 +243,15 @@ class MasterElection:
                 except Exception as e:
                     logger.debug(f"拉票失败: {node_id}: {e}")
 
-        majority = (len(self._known_nodes) + 1) // 2 + 1
         if len(self._votes_received) >= majority:
             await self._become_leader()
 
     async def _handle_vote_response(self, resp: VoteResponse) -> None:
+        # P2-6: _save_state (fsync) 移锁外 — 此函数在 _start_election 锁外调用,
+        # 但 term 跃迁仍经 _persist_state_async 异步落盘 (不阻塞拉票循环)。
         if resp.term > self.current_term:
             self.current_term = resp.term
-            self._save_state()
+            await self._persist_state_async()
             await self._become_follower()
             return
 
@@ -250,10 +265,15 @@ class MasterElection:
                 await self._become_leader()
 
     async def handle_vote_request(self, req: VoteRequest) -> VoteResponse:
+        # P2-6 (审计 §5.10): 锁内仅读写内存状态 (term/voted_for/state), fsync 落盘
+        # (_save_state) 移锁外 — 旧实现持 _lock 内调 _save_state (含 os.fsync 同步写盘),
+        # 拖慢投票应答 + 阻塞选举锁。快照需落盘字段 (term/voted_for), 锁外异步 to_thread 落盘,
+        # 不阻塞事件循环亦不持锁 (沿用 cluster_master 锁内快照锁外 I/O 范式)。
+        need_persist = False
         async with self._lock:
             if req.term > self.current_term:
                 self.current_term = req.term
-                self._save_state()
+                need_persist = True
                 await self._become_follower()
 
             vote_granted = False
@@ -265,24 +285,31 @@ class MasterElection:
                     self.voted_for = req.candidate_id
                     self._last_heartbeat = time.time()
                     self._election_timeout = self._random_timeout()
-                    self._save_state()
+                    need_persist = True
 
-            return VoteResponse(
+            response = VoteResponse(
                 term=self.current_term,
                 vote_granted=vote_granted,
                 voter_id=self.node_id,
             )
+        if need_persist:
+            await self._persist_state_async()
+        return response
 
     async def receive_heartbeat(self, leader_id: str, term: int) -> None:
+        # P2-6: 锁内仅内存状态, _save_state (fsync) 移锁外异步落盘。
+        need_persist = False
         async with self._lock:
             if term >= self.current_term:
                 self.current_term = term
-                self._save_state()
+                need_persist = True
                 self._leader_id = leader_id
                 self._last_heartbeat = time.time()
                 self._election_timeout = self._random_timeout()
                 if self.state != ElectionState.FOLLOWER:
                     await self._become_follower()
+        if need_persist:
+            await self._persist_state_async()
 
     async def _become_leader(self) -> None:
         self.state = ElectionState.LEADER
@@ -328,6 +355,32 @@ class MasterElection:
             tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
             with open(tmp, "w") as f:
                 json.dump({"current_term": self.current_term, "voted_for": self.voted_for}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._state_path)
+        except Exception as e:
+            logger.warning(f"C2 选举状态落盘失败: {e}")
+
+    async def _persist_state_async(self) -> None:
+        """P2-6 (审计 §5.10): term/voted_for 异步落盘 (锁外调) — 快照字段后 to_thread 调
+        _save_state, fsync 不持 _lock 亦不阻塞事件循环。无 state_path (纯内存) 则 no-op。
+        供 handle_vote_request/receive_heartbeat/_start_election/_handle_vote_response 锁外落盘。
+        """
+        if not self._state_path:
+            return
+        term = self.current_term
+        voted = self.voted_for
+        await asyncio.to_thread(self._save_state_snapshot, term, voted)
+
+    def _save_state_snapshot(self, term: int, voted: str | None) -> None:
+        """P2-6: 按快照值落盘 (锁外 to_thread 调, 避读 self 竞态)。"""
+        if not self._state_path:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump({"current_term": term, "voted_for": voted}, f)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._state_path)

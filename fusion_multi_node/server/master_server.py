@@ -1011,7 +1011,9 @@ class MasterServer:
             )
 
         @app.get("/api/tasks/{task_id}")
-        async def get_task(task_id: str):
+        async def get_task(task_id: str, request: Request):
+            # P2-8 (审计 §3.4): 纯 {task_id} 详情读 → task:list (VIEWER 可读)。
+            _enforce_user_rbac(request, "/api/tasks/" + task_id, "GET")
             task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
@@ -1359,7 +1361,9 @@ class MasterServer:
             return result
 
         @app.get("/api/v1/tasks/{task_id}/progress", response_model=V1TaskProgressResponse)
-        async def task_progress(task_id: str):
+        async def task_progress(task_id: str, request: Request):
+            # P2-8 (审计 §3.4): progress 读子路径 → task:list (VIEWER 可读)。
+            _enforce_user_rbac(request, "/api/v1/tasks/" + task_id + "/progress", "GET")
             task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
@@ -1386,7 +1390,9 @@ class MasterServer:
             }
 
         @app.get("/api/v1/tasks/{task_id}/timeline")
-        async def task_timeline(task_id: str):
+        async def task_timeline(task_id: str, request: Request):
+            # P2-8 (审计 §3.4): timeline 读子路径 → task:list (VIEWER 可读)。
+            _enforce_user_rbac(request, "/api/v1/tasks/" + task_id + "/timeline", "GET")
             task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")

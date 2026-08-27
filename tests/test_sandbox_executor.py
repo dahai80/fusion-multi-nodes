@@ -114,3 +114,88 @@ class TestMetalCryptoBackend:
         encrypted = backend.encrypt(key, plaintext)
         decrypted = backend.decrypt(key, encrypted)
         assert decrypted == plaintext
+
+
+class TestP2_9RlimitsSubprocessOnly:
+    """P2-9 (审计 §6.2): apply_limits setrlimit 未调 — 子进程 rlimit 根本未应用。
+
+    修复: SandboxConfig.enforce_rlimits + execute_in_sandbox preexec_fn (仅子进程)。
+    验证: rlimit 加到子进程 (非主进程), 0=不限 no-op, AgentConfig knob 桥接。
+    """
+
+    @pytest.mark.asyncio
+    async def test_rlimits_apply_to_subprocess(self):
+        # enforce_rlimits=True + max_memory_mb=16 → 子进程 RLIMIT_AS=16MB。
+        # 子进程尝试分配 64MB → 应 MemoryError/被限 (exit_code != 0, 非正常 0)。
+        # 仅 python-resource 后端可测 (sandbox-exec/unshare 走 OS profile, 跳过)。
+        cfg = SandboxConfig(max_memory_mb=16, enforce_rlimits=True, execution_timeout=10)
+        ex = SandboxExecutor(cfg)
+        if ex.backend != "python-resource":
+            pytest.skip(f"非 python-resource 后端 ({ex.backend}), rlimit 路径不适用")
+        # 子进程尝试分配超限内存: python -c 分配 64MB, 成功 exit 0, 失败 exit 1。
+        probe_cmd = [
+            "python3",
+            "-c",
+            "import sys; try:  bytearray(64*1024*1024);   sys.exit(0) except MemoryError:  sys.exit(1)",
+        ]
+        result = await ex.execute_in_sandbox("p2-9-mem", probe_cmd)
+        assert result["exit_code"] != 0, f"16MB rlimit 未生效 (子进程分配 64MB 未被限): {result}"
+
+    @pytest.mark.asyncio
+    async def test_rlimits_disabled_no_op(self):
+        # enforce_rlimits=False (默认) → 无 preexec_fn → 子进程无 rlimit → 分配 64MB 成功 exit 0。
+        # 验证默认不误伤 (保既有行为, 0=不限)。
+        cfg = SandboxConfig(max_memory_mb=16, enforce_rlimits=False, execution_timeout=10)
+        ex = SandboxExecutor(cfg)
+        if ex.backend != "python-resource":
+            pytest.skip(f"非 python-resource 后端 ({ex.backend}), rlimit 路径不适用")
+        probe_cmd = [
+            "python3",
+            "-c",
+            "import sys; try:  bytearray(64*1024*1024);   sys.exit(0) except MemoryError:  sys.exit(1)",
+        ]
+        result = await ex.execute_in_sandbox("p2-9-nolimit", probe_cmd)
+        assert result["exit_code"] == 0, f"enforce=False 仍误限 (子进程 64MB 被限): {result}"
+
+    @pytest.mark.asyncio
+    async def test_main_process_not_limited(self):
+        # P2-9 关键约束: rlimit 仅子进程, 不碰主推理进程 (不误杀单长跑 agent)。
+        # 验证: 跑带 rlimit 子进程后, 主进程仍能分配大块 (未被 setrlimit 影响)。
+        cfg = SandboxConfig(max_memory_mb=16, enforce_rlimits=True, execution_timeout=10)
+        ex = SandboxExecutor(cfg)
+        if ex.backend != "python-resource":
+            pytest.skip(f"非 python-resource 后端 ({ex.backend}), rlimit 路径不适用")
+        await ex.execute_in_sandbox("p2-9-main", ["echo", "child-ran"])
+        # 主进程尝试分配 64MB — 应成功 (主进程未受限)。
+        try:
+            _probe = bytearray(64 * 1024 * 1024)
+            del _probe
+        except MemoryError:
+            pytest.fail("主进程被子进程 rlimit 误限 (应仅子进程)")
+
+    def test_agent_config_knob_zero_no_enforce(self):
+        # AgentConfig knob 默认 0 → build_subprocess_sandbox_config: enforce=False (不限)。
+        from fusion_multi_node.agent.node_agent import AgentConfig, NodeAgent
+
+        cfg = AgentConfig()
+        assert cfg.task_mem_limit_mb == 0
+        assert cfg.task_cpu_quota == 0
+        agent = NodeAgent(config=cfg)
+        sb_cfg = agent.build_subprocess_sandbox_config()
+        assert sb_cfg.enforce_rlimits is False
+        assert sb_cfg.max_memory_mb == 0
+        assert sb_cfg.max_cpu_seconds == 0
+
+    def test_agent_config_knob_positive_enforce(self):
+        # AgentConfig knob >0 → enforce=True, 字段桥接对 (仅 mem/cpu, nproc/disk=0)。
+        from fusion_multi_node.agent.node_agent import AgentConfig, NodeAgent
+
+        cfg = AgentConfig(task_mem_limit_mb=512, task_cpu_quota=120)
+        agent = NodeAgent(config=cfg)
+        sb_cfg = agent.build_subprocess_sandbox_config()
+        assert sb_cfg.enforce_rlimits is True
+        assert sb_cfg.max_memory_mb == 512
+        assert sb_cfg.max_cpu_seconds == 120
+        # nproc/disk 不在 AgentConfig 暴露 → 传 0 (_apply_rlimits_in_child 跳过)。
+        assert sb_cfg.max_processes == 0
+        assert sb_cfg.max_disk_mb == 0

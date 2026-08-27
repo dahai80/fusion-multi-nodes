@@ -969,6 +969,55 @@ class TestTaskEventBus:
             resp = await c.get("/api/tasks/events")
             assert resp.status_code == 401
 
+    @pytest.mark.asyncio
+    async def test_p2_7_overflow_drop_records_metric(self, master_server):
+        # P2-7 (审计 §5.5): 满队列丢事件须记 event_dropped 指标, 不静默吞。
+        master = master_server.master
+        master._observability = ClusterObservability()
+        task = ClusterTask(
+            task_id="evt-p2-7",
+            name="p2-7-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            for _ in range(256):
+                master._emit_task_event(task, "running")
+            # 第 257 次 → 丢最旧 1 条 → event_dropped 累 1。
+            master._emit_task_event(task, "running")
+            metrics = master._observability.get_metrics("event_dropped", "cluster")
+            assert len(metrics) == 1
+            assert metrics[0].value == 1.0
+        finally:
+            master.unsubscribe_task_events(q)
+
+    @pytest.mark.asyncio
+    async def test_p2_7_no_drop_no_metric(self, master_server):
+        # 未丢事件 → 无 event_dropped 指标 (只丢才记)。
+        master = master_server.master
+        master._observability = ClusterObservability()
+        task = ClusterTask(
+            task_id="evt-p2-7-ok",
+            name="p2-7-ok-task",
+            mode=ParallelMode.DATA,
+            model_name="m1",
+            status=TaskStatus.RUNNING,
+            assigned_nodes=["n1"],
+        )
+        master.tasks[task.task_id] = task
+        q = master.subscribe_task_events()
+        try:
+            master._emit_task_event(task, "running")
+            master._emit_task_event(task, "completed")
+            metrics = master._observability.get_metrics("event_dropped", "cluster")
+            assert len(metrics) == 0
+        finally:
+            master.unsubscribe_task_events(q)
+
 
 class TestMasterRateLimit:
     """P2-22 (审计 §3.8): Master 限流 — 超阈值返 429, 健康检查豁免。"""

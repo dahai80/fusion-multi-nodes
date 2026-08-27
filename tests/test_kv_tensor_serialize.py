@@ -189,6 +189,103 @@ class TestExportImportBundle:
         assert restored.shards[0].tensor is not None
         assert len(restored.shards[0].tensor) == 256
 
+    def test_p2_4_export_bundle_syncs_local_size_bytes(self):
+        """P2-4 (审计 §6.3): export_bundle 张量并入后 _local_size_bytes 同步补账 —
+        旧实现仅改 entry.total_size_bytes 不调账 → LRU gate 按旧小值减账, 实际占用超 max_local_cache_mb。"""
+        import time
+
+        # 用 total_size_bytes = shard size_bytes 和 (512), 导出张量 512B 并入后 → 1024。
+        entry = KVCacheEntry(
+            cache_id="c-p2",
+            model_name="llama-1b",
+            prompt_hash="h-p2",
+            prompt_prefix="Hi",
+            total_tokens=32,
+            total_size_bytes=512,  # = shard size_bytes 和
+            created_at=time.time(),
+            ttl_seconds=3600.0,
+            shards=[
+                KVShard(
+                    shard_id="s0",
+                    model_name="llama-1b",
+                    layer_index=0,
+                    node_id="node-a",
+                    token_count=32,
+                    size_bytes=512,
+                    created_at=time.time(),
+                    tensor=None,
+                )
+            ],
+        )
+        mgr = KVSharingManager(
+            cluster_token="tok",
+            transport=SyntheticKVTransport(tensor_size=512),
+        )
+        mgr.store_local(entry)
+        assert mgr._local_size_bytes == 512
+
+        async def _run():
+            return await mgr.export_bundle("c-p2", "llama-1b")
+
+        asyncio.run(_run())
+        # 张量 512B 并入: shard.size_bytes 512→1024, total_size_bytes 512→1024,
+        # _local_size_bytes 须同步到 1024 (旧实现停在 512 = 漏账 512)。
+        assert mgr._local_size_bytes == 1024, f"P2-4 漏账: _local_size_bytes={mgr._local_size_bytes} 期望 1024"
+        assert entry.total_size_bytes == 1024
+
+    def test_p2_4_export_stream_syncs_local_size_bytes(self):
+        """P2-4: export_stream 流式导出同样补账 _local_size_bytes (与 export_bundle 一致)。"""
+        import time
+
+        entry = KVCacheEntry(
+            cache_id="c-p2s",
+            model_name="llama-1b",
+            prompt_hash="h-p2s",
+            prompt_prefix="Hi",
+            total_tokens=32,
+            total_size_bytes=512,
+            created_at=time.time(),
+            ttl_seconds=3600.0,
+            shards=[
+                KVShard(
+                    shard_id="s0",
+                    model_name="llama-1b",
+                    layer_index=0,
+                    node_id="node-a",
+                    token_count=32,
+                    size_bytes=512,
+                    created_at=time.time(),
+                    tensor=None,
+                )
+            ],
+        )
+        mgr = KVSharingManager(
+            cluster_token="tok",
+            transport=SyntheticKVTransport(tensor_size=256),
+        )
+        mgr.store_local(entry)
+        assert mgr._local_size_bytes == 512
+
+        async def _run():
+            chunks = []
+            async for chunk in mgr.export_stream("c-p2s", "llama-1b"):
+                chunks.append(chunk)
+            return chunks
+
+        asyncio.run(_run())
+        # 256B 张量并入: shard.size_bytes 512→768, total_size_bytes 512→768,
+        # _local_size_bytes 须同步到 768 (旧实现停在 512 = 漏账 256)。
+        assert mgr._local_size_bytes == 768, f"P2-4 流式漏账: _local_size_bytes={mgr._local_size_bytes} 期望 768"
+
+    def test_p2_4_store_local_dedup_no_double_count(self):
+        """P2-4: 重复 cache_id store_local 先回退旧条目字节, 不累积重复计数。"""
+        mgr = KVSharingManager(cluster_token="tok", max_local_cache_mb=4096.0)
+        mgr.store_local(_make_entry_with_tensor(None))  # total_size_bytes=1024
+        assert mgr._local_size_bytes == 1024
+        # 同 cache_id 再存 (如 import_bundle 重复导入) — 旧 1024 回退 + 新 1024 加, 净 1024。
+        mgr.store_local(_make_entry_with_tensor(None))
+        assert mgr._local_size_bytes == 1024, f"重复存储累积重复计数: {mgr._local_size_bytes}"
+
 
 class TestMLXKVTransportP1:
     """P1-20 (审计 §6.5): MLXKVTransport.import_tensor 区分降级 (404→True) vs 真失败 (其他→False)。"""

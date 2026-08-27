@@ -1494,3 +1494,397 @@ class TestP1FaultToleranceScheduling:
         assert ok is False
         found = any(m.metric_name == "kv_sync_transient_fail" for m in master._observability.metrics)
         assert found, "连接拒 (瞬时) 应记 transient metric"
+
+
+class TestP2_10PartialRecovery:
+    """P2-10 (审计 §5.9): PARTIAL 终态崩溃补全 (env FUSION_PARTIAL_RECOVERY=1)。
+
+    PARTIAL = DATA 并行部分节点成功。旧: PARTIAL 终态不落盘 → 崩溃即失已成功节点工作。
+    修复: env 开 → PARTIAL 落盘; _restore_tasks 转 PENDING + 已成功节点 exclude + 旧 outputs
+    存 _partial_prev_outputs; _dispatch_data 补全重派后合并 outputs (非覆盖)。
+    env 关 → 维持 P3-29 旧行为 (PARTIAL 不存, 不重派)。
+    """
+
+    def _partial_dict(self, succeeded_nodes: list[str]) -> dict:
+        return {
+            "task_id": "t-partial",
+            "name": "t-partial",
+            "mode": "data",
+            "model_name": "qwen-1b",
+            "status": "partial",
+            "assigned_nodes": ["n1", "n2"],
+            "started_at": 99.0,
+            "exclude_nodes": [],
+            "params": {},
+            "task_type": "inference",
+            "priority": 1,
+            "user": "",
+            "timeout_seconds": 60,
+            "created_at": 100.0,
+            "result": {
+                "outputs": [{"node_id": nid, "text": f"out-{nid}"} for nid in succeeded_nodes],
+                "errors": ["n2: agent error"],
+                "node_count": 2,
+            },
+        }
+
+    def test_p2_10_partial_recovery_to_pending(self, monkeypatch):
+        # env 开 → PARTIAL 转 PENDING + 已成功节点 (n1) 并入 exclude + 旧 outputs 存 _partial_prev_outputs。
+        monkeypatch.setenv("FUSION_PARTIAL_RECOVERY", "1")
+        master = ClusterMaster()
+        t = master._task_from_dict(self._partial_dict(["n1"]))
+        assert t.status == TaskStatus.PENDING, "PARTIAL 恢复应转 PENDING 重派"
+        assert t.started_at == 0.0, "恢复清 started_at"
+        assert t.assigned_nodes == [], "恢复清 assigned_nodes"
+        assert "n1" in t.exclude_nodes, "已成功节点应并入 exclude (重派不回跑)"
+        assert "n2" not in t.exclude_nodes, "失败节点不进 exclude (重派目标)"
+        prev = getattr(t, "_partial_prev_outputs", None)
+        assert prev is not None and len(prev) == 1 and prev[0]["node_id"] == "n1"
+
+    def test_p2_10_partial_no_recovery_env_off(self, monkeypatch):
+        # env 关 → 维持 P3-29 旧行为: PARTIAL 保持终态, 不转 PENDING, 不动 exclude。
+        monkeypatch.delenv("FUSION_PARTIAL_RECOVERY", raising=False)
+        master = ClusterMaster()
+        t = master._task_from_dict(self._partial_dict(["n1"]))
+        assert t.status == TaskStatus.PARTIAL, "env 关 PARTIAL 保持终态不重派"
+        assert t.assigned_nodes == ["n1", "n2"], "终态保留 assigned_nodes"
+        assert not hasattr(t, "_partial_prev_outputs") or not getattr(t, "_partial_prev_outputs", None)
+
+    def test_p2_10_partial_persisted_when_env_on(self, monkeypatch):
+        # env 开 → PARTIAL 入 _persist_tasks_locked 快照 (可落盘)。
+        monkeypatch.setenv("FUSION_PARTIAL_RECOVERY", "1")
+        master = ClusterMaster()
+        task = ClusterTask(task_id="t-p", name="t-p", mode=ParallelMode.DATA, model_name="m")
+        task.status = TaskStatus.PARTIAL
+        task.result = {"outputs": [{"node_id": "n1"}], "errors": ["n2: err"], "node_count": 2}
+        master.tasks[task.task_id] = task
+        snap = master._persist_tasks_locked()
+        ids = [d["task_id"] for d in snap]
+        assert "t-p" in ids, "env 开 PARTIAL 应入快照可落盘"
+
+    def test_p2_10_partial_not_persisted_when_env_off(self, monkeypatch):
+        # env 关 → PARTIAL 不入快照 (维持旧行为, 终态不存)。
+        monkeypatch.delenv("FUSION_PARTIAL_RECOVERY", raising=False)
+        master = ClusterMaster()
+        task = ClusterTask(task_id="t-p2", name="t-p2", mode=ParallelMode.DATA, model_name="m")
+        task.status = TaskStatus.PARTIAL
+        master.tasks[task.task_id] = task
+        snap = master._persist_tasks_locked()
+        assert all(d["task_id"] != "t-p2" for d in snap), "env 关 PARTIAL 不应入快照"
+
+    @pytest.mark.asyncio
+    async def test_p2_10_dispatch_data_merges_prev_outputs(self, monkeypatch):
+        # _dispatch_data 补全重派: task 带 _partial_prev_outputs (旧 n1 已成功) + 本次 n2 成功
+        # → result.outputs 含 n1(旧) + n2(新) 合并, 非 n2 单一覆盖。
+        # 直接 mock _dispatch_to_node 返成功 dict, 绕开 SSRF/HTTP (聚焦合并逻辑)。
+        monkeypatch.setenv("FUSION_PARTIAL_RECOVERY", "1")
+        master = ClusterMaster()
+        task = ClusterTask(
+            task_id="t-merge",
+            name="t-merge",
+            mode=ParallelMode.DATA,
+            model_name="qwen-1b",
+            task_type="inference",
+            params={"prompt": "hi", "messages": [], "max_tokens": 8},
+        )
+        task.assigned_nodes = ["n2"]  # 仅未完成节点 (n1 已 exclude)
+        task.status = TaskStatus.RUNNING  # _finalize_task 仅回填 RUNNING 任务
+        task._partial_prev_outputs = [{"node_id": "n1", "text": "out-n1"}]  # 上次已成功
+        master.tasks[task.task_id] = task
+
+        async def _fake_dispatch_to_node(client, t, nid, nodes_snap, token, pipeline_step_params=None):
+            return {"node_id": "n2", "text": "out-n2"}
+
+        master._dispatch_to_node = _fake_dispatch_to_node
+        await master._dispatch_data(task, ["n2"], master.nodes, "tok")
+        # 补全成功 → COMPLETED, outputs 含 n1(旧合并) + n2(本次)
+        assert task.status == TaskStatus.COMPLETED, "补全全成功应 COMPLETED"
+        outputs = task.result.get("outputs", [])
+        node_ids = {o.get("node_id") for o in outputs}
+        assert node_ids == {"n1", "n2"}, f"应合并旧+新 outputs, 实际 {node_ids}"
+
+
+class TestP2_11PipelineCheckpoint:
+    """P2-11 (审计 §6.7): PIPELINE 段级检查点 (env FUSION_PIPELINE_CHECKPOINT=1)。
+
+    各段 hidden_states 落 task.params["_pipeline_ckpt"]; 段失败 retryable=True 重派后
+    从最近完成段续 (跳过已成功段), 避重跑昂贵层前向。语义不变: 任一段失败仍整体失败。
+    """
+
+    def _pipeline_task(self, n_steps: int = 3, ckpt: dict | None = None) -> ClusterTask:
+        task = ClusterTask(
+            task_id="t-pipe",
+            name="t-pipe",
+            mode=ParallelMode.PIPELINE,
+            model_name="big-model",
+            task_type="inference",
+            params={"model_id": "big-model", "input_ids": [1, 2, 3]},
+        )
+        task.model_shards = [{"shard_index": i, "layer_range": [i * 4, i * 4 + 4]} for i in range(n_steps)]
+        if ckpt is not None:
+            task.params["_pipeline_ckpt"] = ckpt
+        return task
+
+    async def _run_pipeline(self, master, task, dispatch_results: dict) -> None:
+        # dispatch_results: node_id → 返回 dict (或 Exception)。按 node 顺序调用。
+        node_ids = task.assigned_nodes or [f"n{i}" for i in range(len(task.model_shards))]
+        task.assigned_nodes = node_ids
+        task.status = TaskStatus.RUNNING
+        master.tasks[task.task_id] = task
+        call_log: list[str] = []
+
+        async def _fake_dispatch(client, t, nid, nodes_snap, token, pipeline_step_params=None):
+            call_log.append(nid)
+            res = dispatch_results[nid]
+            if isinstance(res, Exception):
+                raise res
+            return res
+
+        master._dispatch_to_node = _fake_dispatch
+        await master._dispatch_pipeline(task, node_ids, master.nodes, "tok")
+        return call_log
+
+    @pytest.mark.asyncio
+    async def test_p2_11_checkpoint_resumes_from_ckpt(self, monkeypatch):
+        # env 开 + task 带 ckpt (段 0 已完成, hidden_states=hs0) → 续跑从段 1, 跳过 n0。
+        # n1/n2 成功 → COMPLETED, n0 未被调用。
+        monkeypatch.setenv("FUSION_PIPELINE_CHECKPOINT", "1")
+        master = ClusterMaster()
+        task = self._pipeline_task(
+            n_steps=3,
+            ckpt={
+                "step": 0,
+                "hidden_states": "hs0",
+                "steps": [{"node_id": "n0", "shard_id": "s0"}],
+            },
+        )
+        results = {
+            "n1": {"hidden_states": "hs1", "shard_id": "s1", "shape": [2, 8], "dtype": "float32"},
+            "n2": {"hidden_states": "hs2", "shard_id": "s2", "shape": [2, 8], "dtype": "float32"},
+        }
+        call_log = await self._run_pipeline(master, task, results)
+        assert "n0" not in call_log, "ckpt 段 0 已完成, 重派应跳过 n0"
+        assert call_log == ["n1", "n2"], f"应从段 1 续跑, 实际 {call_log}"
+        assert task.status == TaskStatus.COMPLETED
+        assert "_pipeline_ckpt" not in task.params, "全成功应清检查点"
+
+    @pytest.mark.asyncio
+    async def test_p2_11_no_ckpt_runs_from_start(self, monkeypatch):
+        # env 开 + 无 ckpt → 从段 0 跑全 3 段。
+        monkeypatch.setenv("FUSION_PIPELINE_CHECKPOINT", "1")
+        master = ClusterMaster()
+        task = self._pipeline_task(n_steps=3)
+        results = {
+            "n0": {"hidden_states": "hs0", "shard_id": "s0"},
+            "n1": {"hidden_states": "hs1", "shard_id": "s1"},
+            "n2": {"hidden_states": "hs2", "shard_id": "s2"},
+        }
+        call_log = await self._run_pipeline(master, task, results)
+        assert call_log == ["n0", "n1", "n2"], f"无 ckpt 应从头跑, 实际 {call_log}"
+        assert task.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_p2_11_env_off_no_checkpoint(self, monkeypatch):
+        # env 关 → 即使 task.params 带 _pipeline_ckpt 也不续跑, 从头跑 (保旧行为)。
+        monkeypatch.delenv("FUSION_PIPELINE_CHECKPOINT", raising=False)
+        master = ClusterMaster()
+        task = self._pipeline_task(n_steps=2, ckpt={"step": 0, "hidden_states": "hs0", "steps": []})
+        results = {
+            "n0": {"hidden_states": "hs0", "shard_id": "s0"},
+            "n1": {"hidden_states": "hs1", "shard_id": "s1"},
+        }
+        call_log = await self._run_pipeline(master, task, results)
+        assert call_log == ["n0", "n1"], "env 关应从头跑 (忽略 ckpt)"
+        assert task.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_p2_11_checkpoint_written_per_step(self, monkeypatch):
+        # env 开 + 从头跑全成功 → 每段完成应落 ckpt (末段后清)。
+        # 验证: 跑过程中 ckpt.step 递增; 全成功后清。
+        monkeypatch.setenv("FUSION_PIPELINE_CHECKPOINT", "1")
+        master = ClusterMaster()
+        task = self._pipeline_task(n_steps=3)
+        captured_ckpts: list[int | None] = []
+
+        async def _fake_dispatch(client, t, nid, nodes_snap, token, pipeline_step_params=None):
+            res = {"hidden_states": f"hs-{nid}", "shard_id": f"s-{nid}"}
+            return res
+
+        async def _spy_finalize(task_, success, error, result=None, retryable=False, partial=False):
+            # 捕获 _finalize_task 调用时 ckpt 状态
+            captured_ckpts.append(task_.params.get("_pipeline_ckpt", {}).get("step") if success else None)
+
+        task.assigned_nodes = ["n0", "n1", "n2"]
+        task.status = TaskStatus.RUNNING
+        master.tasks[task.task_id] = task
+        master._dispatch_to_node = _fake_dispatch
+        master._finalize_task = _spy_finalize
+        await master._dispatch_pipeline(task, ["n0", "n1", "n2"], master.nodes, "tok")
+        # 末段后 _dispatch_pipeline 清 ckpt 再调 _finalize_task → 捕获到的 step 应为 None (已清)。
+        assert captured_ckpts == [None], f"全成功后 ckpt 应已清, 实际 {captured_ckpts}"
+        assert "_pipeline_ckpt" not in task.params
+
+
+class TestP2_5BanExpiryProactiveProbe:
+    """审计 0826 Batch3 P2-5 — ban 期满主动健康探测 (cluster_master.py)。
+
+    旧实现 ban 到期仅被动解封 (下次 select_nodes 调 _is_node_banned 才惰性清),
+    持续 ban 的坏节点错过恢复窗。修复: _health_check_loop 调 _probe_banned_nodes
+    对到期 ban 节点 GET /api/health 探测, OK 解封, 失败续 ban。
+    """
+
+    def _online_node(self, node_id: str = "n1", port: int = 30050) -> NodeInfo:
+        return NodeInfo(
+            node_id=node_id,
+            hostname=node_id,
+            ip_address="127.0.0.1",
+            port=port,
+            status=NodeStatus.ONLINE,
+            available_memory_gb=48.0,
+            total_memory_gb=64.0,
+            last_heartbeat=time.time(),
+            max_tasks=4,
+        )
+
+    def _ban_node(self, master: ClusterMaster, node_id: str, expired: bool) -> None:
+        # 直接填 _banned_nodes: expired=True 设过去时刻 (已到期), False 设未来 (未到期)。
+        unban_at = time.time() - 10 if expired else time.time() + 300
+        master._banned_nodes[node_id] = unban_at
+
+    @pytest.mark.asyncio
+    async def test_p2_5_probe_ok_unbans(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+        node = self._online_node("n1", 30050)
+        async with master._nodes_lock:
+            master.nodes["n1"] = node
+        self._ban_node(master, "n1", expired=True)
+
+        class _OKResp:
+            status_code = 200
+            text = "ok"
+
+        class _HealthClient:
+            is_closed = False
+
+            async def get(self, url, headers=None, timeout=None):
+                return _OKResp()
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _HealthClient()
+        await master._probe_banned_nodes()
+        assert "n1" not in master._banned_nodes, "探测 OK 应解封"
+        assert not master._fault_counts.get("n1"), "解封应清故障计数"
+
+    @pytest.mark.asyncio
+    async def test_p2_5_probe_fail_rebans(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+        node = self._online_node("n1", 30051)
+        async with master._nodes_lock:
+            master.nodes["n1"] = node
+        self._ban_node(master, "n1", expired=True)
+
+        class _FailClient:
+            is_closed = False
+
+            async def get(self, url, headers=None, timeout=None):
+                raise ConnectionError("节点不可达")
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _FailClient()
+        await master._probe_banned_nodes()
+        assert "n1" in master._banned_nodes, "探测失败应续 ban"
+        assert master._banned_nodes["n1"] > time.time(), "续 ban 应设未来时刻"
+
+    @pytest.mark.asyncio
+    async def test_p2_5_not_expired_skip_probe(self, monkeypatch):
+        # 未到期 ban 节点不应被探测 (client.get 不应被调)。
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        node = self._online_node("n1", 30052)
+        async with master._nodes_lock:
+            master.nodes["n1"] = node
+        self._ban_node(master, "n1", expired=False)
+
+        calls = []
+
+        class _SpyClient:
+            is_closed = False
+
+            async def get(self, url, headers=None, timeout=None):
+                calls.append(url)
+                raise ConnectionError("不应被调")
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _SpyClient()
+        await master._probe_banned_nodes()
+        assert not calls, "未到期 ban 节点不应探测"
+        assert "n1" in master._banned_nodes, "未到期应保持 ban"
+
+    @pytest.mark.asyncio
+    async def test_p2_5_no_nodeinfo_lazy_clears(self, monkeypatch):
+        # 无 NodeInfo 的 ban 条目 (外部 ban/已清理节点) — 惰性清条目不探测。
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        master._banned_nodes["ghost"] = time.time() - 10
+
+        class _NoCallClient:
+            is_closed = False
+
+            async def get(self, url, headers=None, timeout=None):
+                raise AssertionError("无 NodeInfo 不应探测")
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _NoCallClient()
+        await master._probe_banned_nodes()
+        assert "ghost" not in master._banned_nodes, "无 NodeInfo 到期 ban 应惰性清"
+
+    @pytest.mark.asyncio
+    async def test_p2_5_probe_http_500_rebans(self, monkeypatch):
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        master = ClusterMaster()
+        master._dispatch_token = "tok"
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
+        node = self._online_node("n1", 30053)
+        async with master._nodes_lock:
+            master.nodes["n1"] = node
+        self._ban_node(master, "n1", expired=True)
+
+        class _500Resp:
+            status_code = 500
+            text = "err"
+
+        class _500Client:
+            is_closed = False
+
+            async def get(self, url, headers=None, timeout=None):
+                return _500Resp()
+
+            async def aclose(self):
+                pass
+
+        master._dispatch_http = _500Client()
+        await master._probe_banned_nodes()
+        assert "n1" in master._banned_nodes, "HTTP 500 探测失败应续 ban"

@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import bisect
 import collections
+import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -91,7 +93,7 @@ class LogEntry:
 class ClusterObservability:
     """集群可观测模块 — 监控、日志、告警聚合。"""
 
-    def __init__(self, retention_hours: float = 168.0):
+    def __init__(self, retention_hours: float = 168.0, persist: bool = False):
         self.retention_seconds = retention_hours * 3600
         self.metrics: collections.deque = collections.deque(maxlen=10000)
         self.alerts: collections.deque = collections.deque(maxlen=10000)
@@ -101,6 +103,14 @@ class ClusterObservability:
         self._alert_handlers: list[Callable] = []
         self._running = False
         self._cleanup_task: asyncio.Task | None = None
+        # P2-12 (审计 §6.5): 可观测 deque 持久化 (默认 False 重启即失维持现状)。
+        # persist=True 则 save()/load() 落盘 JSONL, 限最近 maxlen 条 (与 deque 一致)。
+        # FUSION_OBSERVABILITY_FILE 覆盖路径; 默认 ~/.fusion/multi-node/observability.jsonl。
+        self.persist = persist
+        self._persist_path = os.environ.get(
+            "FUSION_OBSERVABILITY_FILE",
+            str(os.path.join(os.path.expanduser("~"), ".fusion", "multi-node", "observability.jsonl")),
+        )
 
     # ── 指标收集 ──
 
@@ -153,6 +163,136 @@ class ClusterObservability:
             if m.metric_name == name and (not node_id or m.node_id == node_id):
                 return m
         return None
+
+    # ── P2-12 持久化 ──
+
+    def save(self) -> bool:
+        """P2-12: 落盘 metrics + alerts + logs (JSONL, 限最近 maxlen 条)。
+        原子 tmp+replace+fsync (对齐 config.py 范式)。事件总线不持久化 (SSE 实时语义)。
+        persist=False → no-op。写失败降级 warning 不拖垮主路径 (审计主路径不被拖垮)。
+        """
+        if not self.persist:
+            return False
+        try:
+            os.makedirs(os.path.dirname(self._persist_path), exist_ok=True)
+            lines: list[str] = []
+            for m in self.metrics:
+                lines.append(
+                    json.dumps(
+                        {
+                            "type": "metric",
+                            "timestamp": m.timestamp,
+                            "node_id": m.node_id,
+                            "metric_name": m.metric_name,
+                            "value": m.value,
+                            "tags": m.tags,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            for a in self.alerts:
+                lines.append(
+                    json.dumps(
+                        {
+                            "type": "alert",
+                            "alert_id": a.alert_id,
+                            "severity": a.severity,
+                            "title": a.title,
+                            "message": a.message,
+                            "node_id": a.node_id,
+                            "created_at": a.created_at,
+                            "resolved": a.resolved,
+                            "resolved_at": a.resolved_at,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            for entry in self.logs:
+                lines.append(
+                    json.dumps(
+                        {
+                            "type": "log",
+                            "timestamp": entry.timestamp,
+                            "node_id": entry.node_id,
+                            "level": entry.level,
+                            "module": entry.module,
+                            "message": entry.message,
+                            "task_id": entry.task_id,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            tmp = self._persist_path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write("\n".join(lines))
+                if lines:
+                    f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._persist_path)
+            logger.info(f"P2-12 可观测数据落盘: {len(lines)} 条 → {self._persist_path}")
+            return True
+        except Exception as e:
+            logger.warning(f"P2-12 可观测数据落盘失败 (继续内存模式): {e}")
+            return False
+
+    def load(self) -> int:
+        """P2-12: 启动恢复 — 从 JSONL 读回 metrics/alerts/logs。
+        persist=False → no-op 返 0。文件不存在 → 0 (首启)。返回恢复条数。
+        """
+        if not self.persist:
+            return 0
+        if not os.path.isfile(self._persist_path):
+            return 0
+        loaded = 0
+        try:
+            with open(self._persist_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    d = json.loads(line)
+                    kind = d.get("type")
+                    if kind == "metric":
+                        self.metrics.append(
+                            MetricPoint(
+                                timestamp=d.get("timestamp", 0.0),
+                                node_id=d.get("node_id", ""),
+                                metric_name=d.get("metric_name", ""),
+                                value=float(d.get("value", 0.0)),
+                                tags=d.get("tags", {}),
+                            )
+                        )
+                        self._metric_times.append(d.get("timestamp", 0.0))
+                    elif kind == "alert":
+                        self.alerts.append(
+                            Alert(
+                                alert_id=d.get("alert_id", ""),
+                                severity=d.get("severity", "info"),
+                                title=d.get("title", ""),
+                                message=d.get("message", ""),
+                                node_id=d.get("node_id", ""),
+                                created_at=d.get("created_at", 0.0),
+                                resolved=d.get("resolved", False),
+                                resolved_at=d.get("resolved_at", 0.0),
+                            )
+                        )
+                    elif kind == "log":
+                        self.logs.append(
+                            LogEntry(
+                                timestamp=d.get("timestamp", 0.0),
+                                node_id=d.get("node_id", ""),
+                                level=d.get("level", "INFO"),
+                                module=d.get("module", ""),
+                                message=d.get("message", ""),
+                                task_id=d.get("task_id", ""),
+                            )
+                        )
+                    loaded += 1
+            logger.info(f"P2-12 可观测数据恢复: {loaded} 条 ← {self._persist_path}")
+        except Exception as e:
+            logger.warning(f"P2-12 可观测数据恢复失败 (继续空内存模式): {e}")
+        return loaded
 
     # ── 日志管理 ──
 

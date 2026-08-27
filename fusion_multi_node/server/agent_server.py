@@ -633,8 +633,29 @@ class AgentServer:
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
         # P1-9: 停服落盘本地 KV 缓存 (审计 §6.3) — 下次启动可恢复。
+        # P3-2 (审计 §6.11): 落盘失败升 critical 告警 (旧仅 warning 易被停服日志淹没) +
+        # 上报 master 故障 (best-effort, 不阻塞停服; report_fault 窗口计数在停服后失效,
+        # 不误 ban 健康节点)。save() 返 bool False 或抛异常均判定失败。
+        kv_save_ok = False
         try:
-            self.kv_manager.save()
+            kv_save_ok = self.kv_manager.save()
         except Exception as e:
-            logger.warning(f"P1-9 Agent 停服落盘 KV 缓存失败: {e}")
+            logger.critical(f"P3-2 Agent 停服落盘 KV 缓存异常 (critical 告警): {e}")
+        if not kv_save_ok:
+            logger.critical("P3-2 Agent 停服落盘 KV 缓存失败 (critical 告警) — 重启将丢失本地 KV, 须运维介入")
+            # best-effort 上报 master (停服期网络/超时容忍, 失败不重试不阻塞)
+            try:
+                await self.agent.report_fault(
+                    fault_type="kv_persist_failed",
+                    message="Agent 停服 KV 缓存落盘失败, 重启将丢失本地 KV",
+                )
+            except Exception as e:
+                logger.warning(f"P3-2 KV 落盘故障上报 master 失败 (best-effort): {e}")
+        # P2-3 (审计 §6.3): 落盘后调 kv_manager.close() 关 httpx 客户端 + 张量传输后端,
+        # 修资源泄漏 (旧 stop 仅 save 不 close → KVSharingManager._http_client + MLXKVTransport
+        # 持有 httpx.AsyncClient 句柄泄漏)。close() 内已有 try/except 容错。
+        try:
+            await self.kv_manager.close()
+        except Exception as e:
+            logger.warning(f"P2-3 Agent 停服关 KV 资源失败: {e}")
         logger.info("Agent 服务已停止")

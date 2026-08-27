@@ -19,7 +19,7 @@ and storage volumes.
 - ast_diff / cluster_sync: 功能归属债 (非云合规债, 均纯本地计算), 计划迁移至
   fusion-gateway / fusion-cowork。ast_diff 被 secure_transfer (PII 脱敏传输) 复用,
   cluster_sync 被 master_server (LAN 模型清单同步) 复用 — 保留至迁移落地。
-- autoscaler: **未接线死代码** (零实例化, /api/v1/autoscaler/* 恒 404)。
+- autoscaler: **未接线死代码** (零实例化, /api/v1/autoscaler/* 恒 503 not-wired, 非 404)。
 - PIPELINE 并行: 接 fusion-mlx `/distributed/*` (上游 issue #621/#630 已交付 closed),
   多节点客户端存根已接 + 真 E2E 验证通过。
 - GAP-7 KV 张量跨节点传输 (v0.11.0, close #33): `sync_kv_cache` 经可插拔张量后端
@@ -28,5 +28,5 @@ and storage volumes.
   (张量 round-trip), 真张量为 env-gated bonus。
 """
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 __app_name__ = "Fusion-Multi-Node"

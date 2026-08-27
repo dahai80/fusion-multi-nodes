@@ -679,3 +679,78 @@ class TestP05AlertWebhook:
             m._observability.create_alert(severity="info", title="t", message="m")
         finally:
             await m.stop()
+
+
+class TestP2_12ObservabilityPersist:
+    """P2-12 (审计 §6.5): 可观测 deque 持久化 (persist=True, env 门控默认关)。
+
+    save() 落盘 JSONL (metrics/alerts/logs); load() 启动恢复; persist=False no-op。
+    事件总线不持久化 (SSE 实时语义, 重连从当前开始)。
+    """
+
+    def test_p2_12_persist_false_no_op(self, tmp_path, monkeypatch):
+        # persist=False → save()/load() no-op, 不读写文件。
+        monkeypatch.setenv("FUSION_OBSERVABILITY_FILE", str(tmp_path / "obs.jsonl"))
+        obs = ClusterObservability(persist=False)
+        assert obs.save() is False
+        assert obs.load() == 0
+        assert not (tmp_path / "obs.jsonl").exists()
+
+    def test_p2_12_save_load_roundtrip(self, tmp_path, monkeypatch):
+        # persist=True → save 落盘 metrics/alerts/logs; 新实例 load 恢复全部。
+        path = tmp_path / "obs.jsonl"
+        monkeypatch.setenv("FUSION_OBSERVABILITY_FILE", str(path))
+        obs = ClusterObservability(persist=True)
+        obs.record_metric("n1", "mem_used_gb", 4.2)
+        obs.create_alert(severity="warning", title="节点内存高", message=">80%", node_id="n1")
+        obs.add_log(LogEntry(timestamp=time.time(), node_id="n1", level="WARN", module="test", message="warn"))
+        assert obs.save() is True
+        assert path.exists()
+
+        obs2 = ClusterObservability(persist=True)
+        loaded = obs2.load()
+        assert loaded == 3, f"应恢复 3 条 (1 metric+1 alert+1 log), 实际 {loaded}"
+        assert len(obs2.metrics) == 1
+        assert obs2.metrics[0].metric_name == "mem_used_gb"
+        assert obs2.metrics[0].value == 4.2
+        assert len(obs2.alerts) == 1
+        assert obs2.alerts[0].title == "节点内存高"
+        assert len(obs2.logs) == 1
+        assert obs2.logs[0].message == "warn"
+
+    def test_p2_12_load_missing_file_zero(self, tmp_path, monkeypatch):
+        # persist=True 但文件不存在 (首启) → load 返 0 不报错。
+        monkeypatch.setenv("FUSION_OBSERVABILITY_FILE", str(tmp_path / "nope.jsonl"))
+        obs = ClusterObservability(persist=True)
+        assert obs.load() == 0
+
+    def test_p2_12_save_atomic_replace(self, tmp_path, monkeypatch):
+        # 原子落盘: .tmp → os.replace, 成功后无残留 .tmp。
+        path = tmp_path / "obs.jsonl"
+        monkeypatch.setenv("FUSION_OBSERVABILITY_FILE", str(path))
+        obs = ClusterObservability(persist=True)
+        obs.record_metric("n1", "x", 1.0)
+        assert obs.save() is True
+        assert path.exists()
+        assert not (tmp_path / "obs.jsonl.tmp").exists(), "原子 replace 后应无残留 .tmp"
+
+    @pytest.mark.asyncio
+    async def test_p2_12_master_lifecycle_persist(self, tmp_path, monkeypatch):
+        # master.start (persist=True) → stop 触发 save; 文件含采样的指标。
+        monkeypatch.setenv("FUSION_OBSERVABILITY_FILE", str(tmp_path / "life.jsonl"))
+        monkeypatch.setenv("FUSION_PARTIAL_RECOVERY", "0")
+        from fusion_multi_node.master.cluster_master import ClusterMaster
+
+        m = ClusterMaster()
+        m._task_store_path = tmp_path / "tasks.json"
+        m._observability = ClusterObservability(persist=True)
+        m._observability._persist_path = str(tmp_path / "life.jsonl")
+        await m.start(with_server=False, with_mdns=False)
+        try:
+            m._observability.record_metric("master", "mem_used_gb", 2.0)
+        finally:
+            await m.stop()
+        assert (tmp_path / "life.jsonl").exists(), "stop 应触发 observability.save()"
+        obs2 = ClusterObservability(persist=True)
+        obs2._persist_path = str(tmp_path / "life.jsonl")
+        assert obs2.load() >= 1, "落盘文件应可 load 恢复"

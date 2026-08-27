@@ -5,12 +5,25 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.12.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.12.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1262%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1317%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **📦 v0.12.1 (2026-08-28) — 审计 0826 P2+P3 整改 (15 项)**
+>
+> 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 12 P2 + 3 P3 项全部代码修复落地
+> (含设计取舍项 env-gated 破开, 非仅文档)。安全/资源 (3): mTLS 证书 SAN + `check_hostname=True` /
+> MLXKVTransport SSRF 守卫 / docker-compose 资源上限。KV 容量 (2): export size 同步 / ban 期满主动探测。
+> 事件/选举 (3): 选举锁外 I/O / 事件丢弃告警 / F2 动态子路径全 op。容器/隔离设计取舍破开 (4):
+> sandbox rlimit / PARTIAL 崩溃补全 / PIPELINE 段级检查点 / observability deque 持久化 (均 env-gated)。
+> 部署/配置 (3): autoscaler 措辞 503 / AgentServer KV 落盘 critical 告警 / MIGRATED 自动语义校准。
+> 资源泄漏 (1): AgentServer.stop 调 kv_manager.close。基线 1262 → 1317 测试全绿。详见
+> [CHANGELOG](docs/CHANGELOG.md)。至此审计 0826 全 47 项 (5 P0 + 27 P1 + 12 P2 + 3 P3) 落地完成。
 
 ---
 
@@ -67,7 +80,7 @@
 | **MCP Cluster Gateway** ⚠️未接线 | Unified MCP endpoint, tool routing, Claude Desktop/Code integration. **当前零路由/零实例化/零 CLI, 死代码, 计划迁移 fusion-gateway #106** |
 | **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, OS-level sandbox-exec, data scrubbing, FMPCrypto (AES-256-GCM + ECDH), Metal AES-GCM acceleration |
 | **Observability** ✅已接线 | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions. **P0-8 接 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集指标/告警 (去重); `/api/v1/observability/{logs/export,suggestions,alerts}` 已返 200; `/api/v1/metrics` (Prometheus) 同样已接。全内存 deque, 重启即失 (P1 同类债)** |
-| **Autoscaler** ⚠️未接线 | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance, hot-reload config. **当前未接入 ClusterMaster 生命周期, `/api/v1/autoscaler/*` 返回 404; 代码留作未来启用** |
+| **Autoscaler** ⚠️未接线 | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance, hot-reload config. **当前未接入 ClusterMaster 生命周期, `/api/v1/autoscaler/*` 返回 503 not-wired (非 404); 代码留作未来启用** |
 | **Storage Volumes** | Volume abstraction, checkpoint persistence, capacity monitoring, LRU eviction. **ShardReplicator / DistributedKVStore / quorum 读写未接线生产路径, 仅库级可用** |
 
 ### Architecture
@@ -549,7 +562,7 @@ freq = diagnoser.analyze_frequency(logs, group_by="source")
 ### 7. Autoscaler (`fusion_multi_node.autoscaler`) ⚠️未接线
 
 > **状态**: 代码完整但**未接入 ClusterMaster 生命周期**。`ClusterMaster._autoscaler` 从未赋值,
-> `/api/v1/autoscaler/config` GET/PUT 返回 404「Autoscaler 未启用」。本节为库级 API 参考,
+> `/api/v1/autoscaler/config` GET/PUT 返回 503「Autoscaler 未接线 (not-wired)」。本节为库级 API 参考,
 > 非现网可用功能。启用需在 `ClusterMaster.start()` 中实例化并启动评估循环。
 
 Conservative/Balanced/Aggressive scale policies.

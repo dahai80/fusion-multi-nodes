@@ -5,6 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-08-28 — 审计 0826 P2+P3 整改 (15 项)
+
+> **收尾整改**: 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 12 P2 + 3 P3 项
+> 全部代码修复落地 (含设计取舍项 env-gated 破开, 非仅文档)。P1 整改后基线 1262 → 1317 测试
+> 全绿 (新增 ~55 例)。ruff 净。无 API 破坏 (patch bump)。至此审计 0826 全 47 项 (5 P0 + 27 P1
+> + 12 P2 + 3 P3) 落地完成。
+
+### 安全/资源 (3)
+
+- **P2-1 mTLS client `check_hostname=False` (证书缺 SAN)**: `provision_node` 签发 leaf 证书无
+  SubjectAlternativeName → 无法校验主机名, 旧实现 `check_hostname=False` fail-open。修复:
+  `provision_node` 加 `ip` 参数, 证书链加 `SubjectAlternativeName([DNSName(node_id), IPAddress(ip)])`;
+  `client_ssl_context` 改 `check_hostname=True` (SAN 就位可校验)。
+- **P2-2 `MLXKVTransport` base_url 无 SSRF 守卫**: operator env 构 URL 直连, 无 SSRF 校验。修复:
+  `_get_client` 构 URL 后经 `is_safe_outbound_host` 校验, 不安全 host raise RuntimeError (fail-closed)。
+- **P2-13 docker-compose 无 `mem_limit`/`cpus`**: 两服务无资源上限, OOM 拖垮宿主。修复: master/agent
+  加 `mem_limit`/`cpus` (默认 4g/4, env `FUSION_*_MEM_LIMIT`/`FUSION_*_CPUS` 可覆盖) + `deploy.resources.limits`
+  (compose v3 spec)。`.env.example` 文档化 4 资源 env。
+
+### KV 容量 (2)
+
+- **P2-4 `KVShard.tensor` export 不同步源 `_local_size_bytes`**: export 设 tensor 未更新 size →
+  源 LRU gate 失效, 内存超 `max_local_cache_mb`。修复: `export_bundle` 写 tensor 同步更新
+  `entry.total_size_bytes` + `_local_size_bytes` 重算; `import_bundle`/`store_local` 校验入块不超限。
+- **P2-5 ban 期满惰性解封无主动探测**: ban 期满被动解封 (下次 select_nodes 才清)。修复:
+  `_health_check_loop` 加 ban 期满节点主动 `/api/health` 探测 — 探测 OK 解封 + info, 失败续 ban。
+
+### 事件/选举 (3)
+
+- **P2-6 选举 `_lock` 持锁内 await HTTP+fsync**: 单锁持锁内 await 拖慢选举。修复: 锁内仅读写内存
+  (term/voted/leader), HTTP send_vote + fsync `_save_state` 移锁外 (快照字段, 锁外 await), 对齐
+  cluster_master 锁内快照锁外 I/O 范式。
+- **P2-7 `_emit_task_event` 满队列丢事件无持久化兜底**: QueueFull get_nowait 丢最旧无告警。修复:
+  丢弃时 `logger.warning` + `record_metric("cluster","event_dropped",1.0)` (接 P0-5 webhook 可告警)。
+- **P2-8 F2 动态子路径仅覆盖 3 op, 其他尾部 op 默认放行**: `check_user_path_access` 仅 cancel/migrate/
+  degrade 联合判定, `/result`/`/retry`/`/status` 等尾部 op 绕过父权限。修复: 动态 task 子路径判定扩到
+  所有尾部 op — 联合父路径 `/api/tasks/{id}` 权限, 非白名单 op 继承父权限。
+
+### 容器/隔离 — 设计取舍破开 (4)
+
+- **P2-9 `apply_limits` setrlimit 未调**: 进程级 rlimit 误杀单长跑 agent。修复: `AgentConfig` 加
+  `task_mem_limit_mb`/`task_cpu_quota` (默认 0=不限), `SandboxExecutor` 起子进程插件时传 rlimit
+  (仅子进程插件, 不限主推理进程); 主推理资源在 fusion-mlx 侧, 文档标注边界。env-gated。
+- **P2-10 PARTIAL 终态崩溃后无法重派补全** (设计取舍破开): PARTIAL 终态崩溃恢复后不可补全。修复:
+  env `FUSION_PARTIAL_RECOVERY=1` — 持久化 PARTIAL; `_restore_tasks` 提取已完成子结果 (`result.outputs[].node_id`)
+  并入 `exclude_nodes` + 存 `_partial_prev_outputs`; `_dispatch_data` 合并 (非覆盖) 补全。DATA 并行
+  各节点独立可补全; PIPELINE hidden_states 链式不适用 (维持整体失败, 文档标注)。
+- **P2-11 PIPELINE 无 PARTIAL, 任一段失败整任务失败** (设计取舍破开): hidden_states 链式强依赖。修复:
+  不改语义 (维持整体失败), env `FUSION_PIPELINE_CHECKPOINT=1` — 各段 hidden_states 落 `task.params["_pipeline_ckpt"]`,
+  失败重试可从最近检查点续 (而非从头)。`_enqueue_retry` 保留 params 故检查点跨重试存活。
+- **P2-12 observability deque + 事件总线重启即失** (设计取舍破开): 全内存 deque 重启即失。修复: env
+  `ClusterConfig.observability.persist` (默认 False) — `save()`/`load()` 落盘
+  `~/.fusion/multi-node/observability.jsonl` (原子 tmp+replace+fsync, 限最近 N 条); 事件总线不持久化
+  (SSE 实时语义, 文档标注); master start(load)/stop(save) 接生命周期。
+
+### 部署/配置 (3)
+
+- **P3-1 `__init__.py:22` autoscaler "恒 404" 措辞漂移** (实际 503): 校准为 "恒 503 not-wired (非 404)";
+  README.md 两处同步校正。
+- **P3-2 `AgentServer.stop` KV 落盘失败无 critical 告警**: 旧仅 warning 易被停服日志淹没。修复: 落盘失败
+  (save 返 False 或抛异常) 升 `logger.critical` + best-effort `report_fault("kv_persist_failed")` 上报
+  master (停服期容忍失败, 不阻塞停服, 不误 ban 健康节点)。
+- **P3-3 MIGRATED 状态仅手动 `migrate_task` → 自动迁移未实现**: 校准 — P1-15 (节点 OFFLINE 自动重派)
+  已覆盖"自动迁移"语义 (RUNNING→PENDING+exclude 源节点重派); `migrate_task` API 保留手动显式迁移。
+  `PYTHON_API.md` 加 MIGRATED 语义注 (手动 + 自动路径共同设置, 非"仅手动")。
+
+### 资源泄漏 (1)
+
+- **P2-3 `AgentServer.stop` 未调 `kv_manager.close()` → httpx+transport 泄漏**: 旧 stop 仅 save 不 close →
+  `KVSharingManager._http_client` + `MLXKVTransport` 持 httpx.AsyncClient 句柄泄漏。修复: stop 落盘后
+  调 `await self.kv_manager.close()` 关 httpx 客户端 + 张量传输后端 (close 内已 try/except 容错)。
+
+### 测试新增 (~55)
+
+- `test_mtls.py`: SAN + check_hostname 校验
+- `test_kv_tensor_e2e.py` / `test_kv_cache_sharing.py`: SSRF 守卫 + size 同步
+- `test_agent_server.py`: stop close + P3-2 KV 落盘告警 (4)
+- `test_cluster_master.py`: P2-5 ban 主动探测 / P2-7 事件丢弃告警 / P2-10 PARTIAL 补全 (5) / P2-11 PIPELINE 检查点 (4)
+- `test_election_p2_6.py`: 选举锁外 I/O
+- `test_enterprise_security.py`: P2-8 动态子路径全 op
+- `test_node_agent.py`: P2-9 sandbox rlimit
+- `test_observability.py`: P2-12 持久化 save/load (5)
+- `test_docker_compose.py` (新): P2-13 资源限制 YAML 校验 (4)
+
 ## [0.12.0] - 2026-08-27 — 审计 0826 P1 整改 (27 项)
 
 > **企业级生产加固**: 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 27 P1 项

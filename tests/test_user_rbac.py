@@ -247,3 +247,56 @@ class TestP15P16RbacFailClosed:
                 headers={"Authorization": f"Bearer {toks['bob']}"},
             )
         assert resp.status_code == 200
+
+
+class TestP2_8DynamicSubpathAllOps:
+    """P2-8 (审计 §3.4): F2 动态子路径全 op — 写 op 各自权限, 读 op 继承父 task:list。
+    旧 F2 仅覆盖 cancel/migrate/degrade, GET 读子路径 (progress/timeline) 无登记。"""
+
+    async def test_viewer_can_read_task_detail(self, tmp_path, monkeypatch):
+        # GET /api/tasks/{id} 详情 → task:list (VIEWER 可读) → 非 403 (任务不存在→404)。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
+        async with _client(server) as c:
+            resp = await c.get(
+                "/api/tasks/ghost",
+                headers={"Authorization": f"Bearer {toks['bob']}"},
+            )
+        assert resp.status_code != 403, "VIEWER 读任务详情被拒 (应 task:list 放行)"
+
+    async def test_viewer_can_read_progress(self, tmp_path, monkeypatch):
+        # GET /api/v1/tasks/{id}/progress → task:list (VIEWER 可读) → 非 403。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
+        async with _client(server) as c:
+            resp = await c.get(
+                "/api/v1/tasks/ghost/progress",
+                headers={"Authorization": f"Bearer {toks['bob']}"},
+            )
+        assert resp.status_code != 403, "VIEWER 读 progress 被拒 (应 task:list 放行)"
+
+    async def test_viewer_can_read_timeline(self, tmp_path, monkeypatch):
+        # GET /api/v1/tasks/{id}/timeline → task:list (VIEWER 可读) → 非 403。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
+        async with _client(server) as c:
+            resp = await c.get(
+                "/api/v1/tasks/ghost/timeline",
+                headers={"Authorization": f"Bearer {toks['bob']}"},
+            )
+        assert resp.status_code != 403, "VIEWER 读 timeline 被拒 (应 task:list 放行)"
+
+    async def test_unknown_write_op_fail_closed(self, tmp_path, monkeypatch):
+        # POST 未知尾部 op (/api/tasks/{id}/result) → fail-closed 403 (非白名单不继承)。
+        from fusion_multi_node.security.permission import check_user_path_access
+
+        assert check_user_path_access(UserRole.ADMIN, "/api/tasks/ghost/result", "POST") is False
+        assert check_user_path_access(UserRole.USER, "/api/tasks/ghost/retry", "POST") is False
+
+    async def test_write_op_still_enforced(self, tmp_path, monkeypatch):
+        # POST cancel 仍走 task:cancel — VIEWER 无 → 403 (回归保护, P2-8 未放松写权限)。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
+        async with _client(server) as c:
+            resp = await c.post(
+                "/api/tasks/ghost/cancel",
+                json={"reason": "x"},
+                headers={"Authorization": f"Bearer {toks['bob']}"},
+            )
+        assert resp.status_code == 403

@@ -29,13 +29,17 @@ def _free_port() -> int:
 
 
 def _provision_cluster(tmpdir: Path) -> dict[str, str]:
-    """生成集群 CA + master/worker 两节点叶证书, 返回 env 映射。"""
+    """生成集群 CA + master/worker 两节点叶证书, 返回 env 映射。
+
+    P2-1: provision_node 传 ip="127.0.0.1" → 叶证书 SAN 含 IPAddress, 使
+    client_ssl_context check_hostname=True 下连 127.0.0.1 可校验对端身份。
+    """
     ca_dir = tmpdir / "ca"
     ca_cert, ca_key = mtls_mod.provision_cluster(str(ca_dir))
     nodes = {}
     for nid, role in [("master-1", "master"), ("worker-1", "worker")]:
         out = tmpdir / nid
-        cert, key = mtls_mod.provision_node(nid, role, ca_cert, ca_key, str(out))
+        cert, key = mtls_mod.provision_node(nid, role, ca_cert, ca_key, str(out), ip="127.0.0.1")
         nodes[nid] = {"cert": cert, "key": key, "role": role}
     return {"ca_cert": ca_cert, "ca_key": ca_key, "nodes": nodes}
 
@@ -103,6 +107,41 @@ class TestMtlsTransport:
         org = leaf.subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)[0].value
         assert cn == "node-x"
         assert org == "worker"
+
+    @pytest.mark.asyncio
+    async def test_p2_1_node_cert_has_san_and_hostname_check(self, tmp_path, monkeypatch):
+        """P2-1: provision_node 传 ip → 叶证书 SAN 含 DNSName+IPAddress;
+        client_ssl_context check_hostname=True 开 (校验对端身份)。无 ip 仅 DNSName SAN。"""
+        import importlib
+        import ipaddress as ipmod
+
+        from cryptography import x509
+
+        ca_cert, ca_key = mtls_mod.provision_cluster(str(tmp_path / "ca"))
+        # 1) 带 ip → SAN 含 DNSName + IPAddress
+        cert_ip, _ = mtls_mod.provision_node(
+            "node-ip", "worker", ca_cert, ca_key, str(tmp_path / "node-ip"), ip="10.0.0.5"
+        )
+        leaf_ip = x509.load_pem_x509_certificate(Path(cert_ip).read_bytes())
+        san_ext = leaf_ip.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        san_names = san_ext.value.get_values_for_type(x509.DNSName)
+        san_ips = san_ext.value.get_values_for_type(x509.IPAddress)
+        assert "node-ip" in san_names
+        assert ipmod.ip_address("10.0.0.5") in san_ips
+        # 2) 无 ip → SAN 仅 DNSName, 无 IPAddress
+        cert_noip, _ = mtls_mod.provision_node("node-noip", "worker", ca_cert, ca_key, str(tmp_path / "node-noip"))
+        leaf_noip = x509.load_pem_x509_certificate(Path(cert_noip).read_bytes())
+        san_noip = leaf_noip.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        assert "node-noip" in san_noip.value.get_values_for_type(x509.DNSName)
+        assert san_noip.value.get_values_for_type(x509.IPAddress) == []
+        # 3) client_ssl_context check_hostname=True (SAN 就位后开, 旧实现 False)
+        _set_mtls_env(monkeypatch, _provision_cluster(tmp_path), "worker-1")
+        importlib.reload(mtls_mod)
+        _set_mtls_env(monkeypatch, _provision_cluster(tmp_path), "worker-1")
+        ctx = mtls_mod.client_ssl_context()
+        assert ctx is not None and ctx.check_hostname is True
+        _clear_mtls_env(monkeypatch)
+        importlib.reload(mtls_mod)
 
     @pytest.mark.asyncio
     async def test_cert_client_connects_no_cert_rejected(self, tmp_path, monkeypatch):
