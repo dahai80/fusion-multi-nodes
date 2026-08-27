@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-08-27 — GAP-8 Phase F2: per-user RBAC + user CRUD + tamper-proof audit
+
+> **多租户 RBAC 强制 + 用户管理**: 用户令牌经 `check_user_path_access` 按 UserRole 鉴权 (USER
+> 可提交/取消, VIEWER 只读, migrate/degrade 仅 ADMIN); `task.user` 取已认证 user_id, 忽略客户端
+> 自报 (防伪造审计 actor); 新增 ADMIN-only 用户 CRUD + 令牌签发/吊销/轮换 API。集群令牌路径不变
+> (内部可信, 用户层鉴权不拦)。修复动态 task 子路径 `/api/tasks/{id}/<op>` 的 RBAC 绕过缺陷。
+
+### Added
+
+- **per-user RBAC 强制** (`server/master_server.py`) — GAP-8 Phase F2
+  - `_resolve_actor` / `_user_token_role` / `_enforce_user_rbac`: 用户令牌按 `check_user_path_access` 鉴权;
+    集群令牌无 `user_role` → 跳过用户层, 落 node-RBAC (内部可信)
+  - `submit_task` / `cancel_task` / `degrade_task` / `migrate_task`: 用户令牌 → per-user RBAC;
+    `task.user=已认证 user_id` (忽略客户端 `req.user`, 防伪造审计 actor)
+  - 审计 `actor=已认证 user_id`; VIEWER/USER 越权 → 403 + 审计 `permission_deny`
+- **用户管理 CRUD** (`server/master_server.py`) — 仅 ADMIN (`user:manage` 权限)
+  - `POST /api/v1/users` (建用户), `GET /api/v1/users[/{id}]` (列表/详情, 不返哈希/salt)
+  - `DELETE /api/v1/users/{id}` (删, 拒自删), `PUT /api/v1/users/{id}/role` (改角色)
+  - `POST /api/v1/users/{id}/tokens` (签发, 明文仅此一次返回), `DELETE /api/v1/users/{id}/tokens/{tid}` (吊销)
+  - `POST /api/v1/users/{id}/tokens/rotate` (轮换, 旧令牌保留多活)
+  - 集群令牌调用户管理 → 403 (须 ADMIN 用户令牌); 无 user_store → 503
+  - 令牌明文不进审计日志 (防日志泄露); `is_safe_path_segment` 守卫 user_id
+- **请求模型**: `UserCreateRequest` / `UserTokenIssueRequest` / `UserRoleUpdateRequest`
+
+### Fixed
+
+- **RBAC 动态 task 子路径绕过** (`security/permission.py`): `check_user_path_access` 前缀匹配够不到
+  `/api/tasks/{task_id}/<op>` (op 在尾部非前缀); 补 task 父路径 + 尾部 op 联合判定
+  (cancel/migrate/degrade), 否则 VIEWER 可绕过 cancel 鉴权
+
+### Tests
+
+- `tests/test_user_rbac.py` (12): USER 提交 OK / VIEWER 只读 403 / migrate·degrade 仅 ADMIN /
+  `task.user`=已认证非伪造 / 审计 actor=已认证 / 集群令牌路径不变
+- `tests/test_user_crud.py` (17): 建查删改/签发吊销轮换 / 非 ADMIN 403 / 集群令牌 403 /
+  令牌明文不入审计 / 持久化跨重启 / 自删拒绝 / 503 无 store
+- 全量 1141 passed (F1 基线 1112 + F2 29)
+
 ## [0.10.3] - 2026-08-27 — GAP-8 Phase F1: per-user token store + dual-token middleware
 
 > **多租户令牌基座**: 引入 per-user API 令牌 (与集群共享令牌正交), BearerAuthMiddleware 按 `fmu_`
