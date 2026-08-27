@@ -116,9 +116,7 @@ class TestSyntheticKVTransport:
         t = SyntheticKVTransport(tensor_size=256)
 
         async def _run():
-            return await t.export_tensor("c1", "llama-1b", "node-a"), await t.export_tensor(
-                "c1", "llama-1b", "node-b"
-            )
+            return await t.export_tensor("c1", "llama-1b", "node-a"), await t.export_tensor("c1", "llama-1b", "node-b")
 
         a, b = asyncio.run(_run())
         assert a != b
@@ -190,3 +188,80 @@ class TestExportImportBundle:
         assert restored is not None
         assert restored.shards[0].tensor is not None
         assert len(restored.shards[0].tensor) == 256
+
+
+class TestMLXKVTransportP1:
+    """P1-20 (审计 §6.5): MLXKVTransport.import_tensor 区分降级 (404→True) vs 真失败 (其他→False)。"""
+
+    def _make_mlx(self, resp_status, body=None, exc=None):
+        t = MLXKVTransport(base_url="http://localhost:11432")
+
+        class _Resp:
+            status_code = resp_status
+
+            def json(self):
+                return body or {}
+
+            @property
+            def text(self):
+                return ""
+
+            def raise_for_status(self):
+                import httpx as _hx
+
+                if resp_status >= 400:
+                    raise _hx.HTTPStatusError("err", request=None, response=self)
+
+        class _Client:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None):
+                if exc is not None:
+                    raise exc
+                return _Resp()
+
+            async def aclose(self):
+                pass
+
+        t._client = _Client()
+        return t
+
+    def test_import_404_degrades_true(self):
+        # 404 = 上游未落地, 降级 store_local 兜底 → True (不阻塞传输)。
+        t = self._make_mlx(404)
+
+        async def _run():
+            return await t.import_tensor("c1", "llama-1b", b"x" * 100, "node-a")
+
+        assert asyncio.run(_run()) is True, "404 降级应返 True"
+
+    def test_import_5xx_returns_false(self):
+        # P1-20: 5xx = 真装载失败, 不再 mask return True → False。
+        t = self._make_mlx(503)
+
+        async def _run():
+            return await t.import_tensor("c1", "llama-1b", b"x" * 100, "node-a")
+
+        assert asyncio.run(_run()) is False, "5xx 真失败应返 False (不掩盖)"
+
+    def test_import_conn_error_returns_false(self):
+        # P1-20: 连接拒 = 真装载失败, 不降级兜底 → False。
+        import httpx
+
+        t = self._make_mlx(None, exc=httpx.ConnectError("connection refused"))
+
+        async def _run():
+            return await t.import_tensor("c1", "llama-1b", b"x" * 100, "node-a")
+
+        assert asyncio.run(_run()) is False, "连接异常真失败应返 False"
+
+    def test_import_timeout_returns_false(self):
+        # P1-20: 超时 = 真装载失败 → False。
+        import httpx
+
+        t = self._make_mlx(None, exc=httpx.TimeoutException("timed out"))
+
+        async def _run():
+            return await t.import_tensor("c1", "llama-1b", b"x" * 100, "node-a")
+
+        assert asyncio.run(_run()) is False, "超时真失败应返 False"

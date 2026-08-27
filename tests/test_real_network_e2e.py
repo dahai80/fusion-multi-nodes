@@ -156,8 +156,9 @@ class _Cluster:
 @pytest.fixture
 async def cluster():
     # 测试仅绑 127.0.0.1; 产品 SSRF 防护拒环回 — 测试放行环回 (测网络/调度, 非 SSRF)。
-    with patch("fusion_multi_node.utils.auth.is_safe_peer_host", return_value=True), patch(
-        "fusion_multi_node.master.cluster_master.is_safe_peer_host", return_value=True
+    with (
+        patch("fusion_multi_node.utils.auth.is_safe_peer_host", return_value=True),
+        patch("fusion_multi_node.master.cluster_master.is_safe_peer_host", return_value=True),
     ):
         c = _Cluster()
         await c.start(n_agents=2)

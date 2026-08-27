@@ -586,6 +586,15 @@ class NodeAgent:
             logger.warning(f"沙箱 gate 拒绝任务 {task_id}: {gate_err}")
             return {"task_id": task_id, "error": gate_err, "sandbox_blocked": True}
 
+        # P1-18 (审计 §6.6): 本地并发容量 gate — _running_task_handles 达 max_tasks 上限拒收。
+        # master 心跳报告 active_tasks 有 TOCTOU, 本地入口强制 gate 兜底防过载。
+        # 返 overload=True (master 归类 transient 不重试不 ban, 选其他节点)。
+        if len(self._running_task_handles) >= self.config.max_tasks:
+            self._current_task = None
+            cur = len(self._running_task_handles)
+            logger.warning(f"P1-18 节点任务已满: {cur}/{self.config.max_tasks}, 拒收 {task_id}")
+            return {"task_id": task_id, "error": "节点任务已满", "overload": True}
+
         # 把执行体包成可取消的 asyncio.Task 并登记, 供 cancel_task 中止
         async def _run():
             try:

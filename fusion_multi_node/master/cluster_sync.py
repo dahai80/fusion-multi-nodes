@@ -345,9 +345,7 @@ class ClusterSyncManager:
                 if not is_safe_path_segment(model_name):
                     raise ValueError(f"非法 model_name: {model_name!r}")
                 client = httpx.AsyncClient(timeout=300.0)
-                url = build_safe_url(
-                    "http", source_host, source_port, f"/api/models/{model_name}/files"
-                )
+                url = build_safe_url("http", source_host, source_port, f"/api/models/{model_name}/files")
                 resp = await client.get(url, params={"path": safe_rel})
                 model_dir = os.path.join(self.model_cache_dir, model_name)
                 dest = os.path.normpath(os.path.join(model_dir, safe_rel))
@@ -381,9 +379,7 @@ class ClusterSyncManager:
                 if not is_safe_path_segment(model_name):
                     raise ValueError(f"非法 model_name: {model_name!r}")
                 client = httpx.AsyncClient(timeout=30.0)
-                url = build_safe_url(
-                    "http", source_host, source_port, f"/api/models/{model_name}/manifest"
-                )
+                url = build_safe_url("http", source_host, source_port, f"/api/models/{model_name}/manifest")
                 resp = await client.get(url)
                 remote_manifest = ModelManifest.from_dict(resp.json())
                 await client.aclose()

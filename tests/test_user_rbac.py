@@ -178,3 +178,72 @@ class TestClusterTokenBypass:
         async with _client(server) as c:
             resp = await c.get("/api/nodes", headers={"Authorization": "Bearer cluster-tok"})
         assert resp.status_code == 200
+
+
+class TestP15P16RbacFailClosed:
+    """P1-5 (审计 §3.4) RBAC fail-closed: 未登记路径拒用户令牌。
+    P1-6: 集群内部路由 (CLUSTER_INTERNAL) 拒用户令牌, 仅 cluster_token 可达;
+    用户面新增路由 (config/autoscaler/metrics/observability-export) 登记鉴权。"""
+
+    async def test_unregistered_path_denies_user_token(self, tmp_path, monkeypatch):
+        # P1-5: 未登记路由 (/api/foobar) → 用户令牌 fail-closed 拒 (旧 fail-open 放行)。
+        from fusion_multi_node.security.permission import check_user_path_access
+
+        assert check_user_path_access(UserRole.ADMIN, "/api/foobar-unknown", "GET") is False
+        assert check_user_path_access(UserRole.VIEWER, "/api/foobar-unknown", "POST") is False
+
+    async def test_exempt_paths_allowed(self, tmp_path, monkeypatch):
+        from fusion_multi_node.security.permission import check_user_path_access
+
+        assert check_user_path_access(UserRole.VIEWER, "/api/health", "GET") is True
+        assert check_user_path_access(UserRole.VIEWER, "/docs", "GET") is True
+
+    async def test_cluster_internal_route_denies_all_user_roles(self, tmp_path, monkeypatch):
+        # P1-6: /api/ha/vote 等 CLUSTER_INTERNAL — 用户令牌任何角色皆拒。
+        from fusion_multi_node.security.permission import check_user_path_access
+
+        for role in (UserRole.ADMIN, UserRole.USER, UserRole.VIEWER):
+            assert check_user_path_access(role, "/api/ha/vote", "POST") is False
+            assert check_user_path_access(role, "/api/ha/sync-state", "POST") is False
+            assert check_user_path_access(role, "/api/nodes/register", "POST") is False
+
+    async def test_admin_can_config_reload(self, tmp_path, monkeypatch):
+        # P1-6: /api/v1/config/reload 登记 user:manage — ADMIN 可过鉴权 (未注 ClusterConfig → 503, 非 403)。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"root": UserRole.ADMIN})
+        async with _client(server) as c:
+            resp = await c.post(
+                "/api/v1/config/reload",
+                headers={"Authorization": f"Bearer {toks['root']}"},
+            )
+        assert resp.status_code != 403, "ADMIN 应过 config/reload 用户层鉴权"
+
+    async def test_viewer_cannot_config_reload(self, tmp_path, monkeypatch):
+        # P1-6: VIEWER 无 user:manage → config/reload 拒 403。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
+        async with _client(server) as c:
+            resp = await c.post(
+                "/api/v1/config/reload",
+                headers={"Authorization": f"Bearer {toks['bob']}"},
+            )
+        assert resp.status_code == 403
+
+    async def test_user_token_denied_ha_vote(self, tmp_path, monkeypatch):
+        # P1-6: 用户令牌调集群内部 /api/ha/vote → 403 (CLUSTER_INTERNAL 仅 cluster_token)。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"alice": UserRole.ADMIN})
+        async with _client(server) as c:
+            resp = await c.post(
+                "/api/ha/vote",
+                json={"term": 1, "candidate_id": "m1", "candidate_priority": 1},
+                headers={"Authorization": f"Bearer {toks['alice']}"},
+            )
+        assert resp.status_code == 403
+
+    async def test_viewer_can_read_metrics(self, tmp_path, monkeypatch):
+        # P1-6: /api/v1/metrics 登记 cluster:stats — VIEWER 可读 (非 403)。
+        server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
+        async with _client(server) as c:
+            resp = await c.get(
+                "/api/v1/metrics",
+                headers={"Authorization": f"Bearer {toks['bob']}"},
+            )
+        assert resp.status_code == 200

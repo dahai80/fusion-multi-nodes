@@ -37,9 +37,7 @@ class TestFusionMLXBackendDecode:
         backend = FusionMLXBackend(base_url="http://127.0.0.1:11432", api_key="dahai168")
         mock_client = AsyncMock()
         mock_client.is_closed = False
-        mock_client.post = AsyncMock(
-            return_value=_mock_resp(200, {"output": "tok", "shard_id": "0"})
-        )
+        mock_client.post = AsyncMock(return_value=_mock_resp(200, {"output": "tok", "shard_id": "0"}))
         with patch.object(backend, "_get_client", AsyncMock(return_value=mock_client)):
             result = await backend.decode(shard_id="0", hidden_states="hs-base64", max_tokens=1)
 
@@ -144,9 +142,7 @@ class TestPipelineDecodeFallback:
         mock_client.is_closed = False
 
         forward_resp = _mock_resp(200, {"output": "hidden_after"})
-        mock_client.post = AsyncMock(
-            side_effect=[forward_resp, httpx.ConnectError("decode endpoint refused")]
-        )
+        mock_client.post = AsyncMock(side_effect=[forward_resp, httpx.ConnectError("decode endpoint refused")])
 
         with patch.object(bridge, "_get_http_client", AsyncMock(return_value=mock_client)):
             result = await bridge.pipeline_inference(

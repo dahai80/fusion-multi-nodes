@@ -62,6 +62,15 @@ class TestRotatingFileHandler:
         assert len(logger.handlers) == 1
         assert not any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
 
+    def test_p1_27_no_env_warns_stderr(self, monkeypatch, capsys):
+        """P1-27: 命令行直起 (无 LOG_FILE env) → stderr 提示未落盘, 仍 1 handler 不阻断。"""
+        monkeypatch.delenv("FUSION_MULTINODE_LOG_FILE", raising=False)
+        logger = setup_logger("test_p1_27_hint")
+        captured = capsys.readouterr()
+        assert "FUSION_MULTINODE_LOG_FILE" in captured.err
+        assert "仅输出 stdout" in captured.err
+        assert len(logger.handlers) == 1
+
     def test_rotating_handler_writes_and_caps(self, tmp_path, monkeypatch):
         log_file = tmp_path / "app.log"
         monkeypatch.setenv("FUSION_MULTINODE_LOG_FILE", str(log_file))

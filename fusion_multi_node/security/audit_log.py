@@ -66,6 +66,10 @@ class AuditLogger:
         else:
             self._path = _DEFAULT_PATH
         self._write_lock = threading.Lock()
+        # P1-7 (审计 §3.5): 写失败本地计数器 — 达阈值 (3 次) 日志升级 error 告警运维。
+        # AuditLogger 无 observability 句柄 (独立模块), 用本地计数 + 日志级别升级 (同 P1-22 范式)。
+        self._write_fail_count = 0
+        self._WRITE_FAIL_ALERT_THRESHOLD = 3
 
     @property
     def path(self) -> Path:
@@ -99,8 +103,18 @@ class AuditLogger:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 with self._path.open("a", encoding="utf-8") as f:
                     f.write(line + "\n")
+            # P1-7: 写成功清计数 (恢复正常)。
+            self._write_fail_count = 0
         except Exception as e:
-            logger.warning(f"审计日志写入失败 (降级, 不影响主路径): {e} event={line}")
+            # P1-7 (审计 §3.5): 写失败不 raise (不拖垮鉴权主路径), 但计数 + 达阈值升级 error。
+            # 首两次 warning (降级可恢复), 第三次起 error (运维须介入, 磁盘满/权限丢)。
+            self._write_fail_count += 1
+            if self._write_fail_count >= self._WRITE_FAIL_ALERT_THRESHOLD:
+                logger.error(
+                    f"审计日志写入连续失败 {self._write_fail_count} 次 (磁盘满/权限丢?), 审计链降级中: {e} event={line}"
+                )
+            else:
+                logger.warning(f"审计日志写入失败 (降级, 不影响主路径): {e} event={line}")
 
     def read(self) -> list[dict]:
         """读全部事件 — 测试校验用。损坏行跳过。"""
@@ -119,5 +133,10 @@ class AuditLogger:
                         except json.JSONDecodeError:
                             continue
         except Exception as e:
-            logger.warning(f"审计日志读取失败: {e}")
+            # P1-7: 读失败同计数 + 阈值升级 error (审计读链降级, 排障/合规取证受阻)。
+            self._write_fail_count += 1
+            if self._write_fail_count >= self._WRITE_FAIL_ALERT_THRESHOLD:
+                logger.error(f"审计日志读取连续失败 {self._write_fail_count} 次: {e}")
+            else:
+                logger.warning(f"审计日志读取失败: {e}")
         return events

@@ -1,14 +1,26 @@
 """Cluster Master module exports."""
 
 from .ast_diff import apply_ast_diff, compute_ast_diff
-from .cloud_fallback import (
-    AVAILABLE_MODELS,
-    CloudConfig,
-    CloudFallbackClient,
-    CloudModel,
-    CloudProvider,
-    CloudUsage,
-)
+
+# P1-4 (审计 §3.2): cloud_fallback 已加 import-time 禁用守卫 (调度路径切断, 待迁 #106)。
+# 默认 ImportError → 降级不导出 (类/常量置 None), 不破包级导入。
+# 显式 FUSION_CLOUD_FALLBACK_ENABLED=1 (独立验证) 时正常导出。
+try:
+    from .cloud_fallback import (
+        AVAILABLE_MODELS,
+        CloudConfig,
+        CloudFallbackClient,
+        CloudModel,
+        CloudProvider,
+        CloudUsage,
+    )
+except ImportError:
+    AVAILABLE_MODELS = None  # type: ignore[assignment]
+    CloudConfig = None  # type: ignore[assignment,misc]
+    CloudFallbackClient = None  # type: ignore[assignment,misc]
+    CloudModel = None  # type: ignore[assignment,misc]
+    CloudProvider = None  # type: ignore[assignment,misc]
+    CloudUsage = None  # type: ignore[assignment,misc]
 from .cluster_master import (
     ClusterMaster,
     ClusterTask,

@@ -133,11 +133,13 @@ class TestConfigValidationE4:
         path = str(tmp_path / "batch.json")
         config = ClusterConfig(config_path=path)
         # 批量写多个已知键, 单次落盘
-        config.set_many({
-            "cluster.master_port": 11460,
-            "cluster.heartbeat_interval": 5.0,
-            "mcp.enabled": False,
-        })
+        config.set_many(
+            {
+                "cluster.master_port": 11460,
+                "cluster.heartbeat_interval": 5.0,
+                "mcp.enabled": False,
+            }
+        )
         assert config.get("cluster.master_port") == 11460
         assert config.get("cluster.heartbeat_interval") == 5.0
         assert config.get("mcp.enabled") is False
@@ -151,15 +153,18 @@ class TestConfigValidationE4:
         config.set("cluster.master_port", 11470)
         # 批量中混入脏值, 整批校验在 set 前抛出, 不落盘
         with pytest.raises(ConfigValidationError):
-            config.set_many({
-                "cluster.master_port": 11480,
-                "cluster.heartbeat_interval": -2,  # 脏
-            })
+            config.set_many(
+                {
+                    "cluster.master_port": 11480,
+                    "cluster.heartbeat_interval": -2,  # 脏
+                }
+            )
         assert config.get("cluster.master_port") == 11470
 
     def test_load_repairs_dirty_persisted_port(self, tmp_path):
         # 手写一份脏 port 落盘, 加载应回退默认并修复
         import json
+
         path = str(tmp_path / "dirty.json")
         with open(path, "w") as f:
             json.dump({"cluster": {"master_port": "not-a-port"}}, f)

@@ -39,8 +39,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:

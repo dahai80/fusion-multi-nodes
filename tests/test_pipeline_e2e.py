@@ -54,9 +54,7 @@ def _mlx_alive() -> bool:
 
 
 def _model_present() -> bool:
-    return os.path.isdir(_MODEL_PATH) and any(
-        f.endswith(".safetensors") for f in os.listdir(_MODEL_PATH)
-    )
+    return os.path.isdir(_MODEL_PATH) and any(f.endswith(".safetensors") for f in os.listdir(_MODEL_PATH))
 
 
 def _mlx_lib_present() -> bool:
@@ -81,8 +79,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -220,9 +217,7 @@ class TestPipelineE2E:
             await self._drain_dispatch(master)
             final = await master.get_task(task.task_id)
 
-        assert final.status == TaskStatus.COMPLETED, (
-            f"期望 COMPLETED 实得 {final.status}: {final.error}"
-        )
+        assert final.status == TaskStatus.COMPLETED, f"期望 COMPLETED 实得 {final.status}: {final.error}"
         assert final.error == ""
         result = final.result
         # 两段都跑通, 末段出口 hidden_states 非空 + 形状 (1,4,2048)

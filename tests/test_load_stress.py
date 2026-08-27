@@ -62,8 +62,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -102,7 +101,8 @@ async def stress_cluster(monkeypatch):
     for nid, port in NODE_PORTS.items():
         backend = FastBackend(nid)
         agent = NodeAgent(
-            config=AgentConfig(node_id=nid, cluster_token=TEST_TOKEN, agent_port=port),
+            # P1-18: 压测放开 agent 本地并发槽 (默认 4), 与 master max_tasks=200 对齐, 测调度吞吐非容量上限。
+            config=AgentConfig(node_id=nid, cluster_token=TEST_TOKEN, agent_port=port, max_tasks=200),
             backend=backend,
         )
         server = AgentServer(agent=agent, shared_token=TEST_TOKEN)
@@ -125,6 +125,7 @@ async def stress_cluster(monkeypatch):
     # 注册四节点 (直接 register_node, 免 HTTP 注册开销)
     for nid, port in NODE_PORTS.items():
         from fusion_multi_node.master import NodeInfo
+
         await master.register_node(
             NodeInfo(
                 node_id=nid,

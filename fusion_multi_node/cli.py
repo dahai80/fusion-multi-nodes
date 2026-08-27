@@ -313,7 +313,11 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
             port=_get_config().get("cluster.master_port", 11452),
         )
         # P1-H 注入租户并发配额 (DEFAULT_CONFIG scheduling.tenant_max_concurrent)。
-        _master.configure_scheduling(_get_config().get("scheduling.tenant_max_concurrent", 4))
+        # P1-19: 注入优先级队列上限 (scheduling.max_pending_queue, 0=不限, 默认 1000)。
+        _master.configure_scheduling(
+            _get_config().get("scheduling.tenant_max_concurrent", 4),
+            max_pending_queue=_get_config().get("scheduling.max_pending_queue", 1000),
+        )
         # P0-8: 注入带配置 retention 的 Observability (master.start 接生命周期 + 路由)。
         # 原独立 _observability 全局不挂 master → /api/v1/observability/* 恒 503。
         _master._observability = ClusterObservability(

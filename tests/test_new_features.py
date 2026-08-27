@@ -157,6 +157,12 @@ class TestMasterElection:
 
 
 class TestCloudFallback:
+    # P1-4: cloud_fallback import-time 禁用守卫 — 测试独立验证模块逻辑, 需显式开 env。
+    # autouse 在 in-body import 前设 env, 首次 import 放行后模块缓存, 后续测试复用。
+    @pytest.fixture(autouse=True)
+    def _enable_cloud_fallback(self, monkeypatch):
+        monkeypatch.setenv("FUSION_CLOUD_FALLBACK_ENABLED", "1")
+
     def test_cloud_provider_enum(self):
         from fusion_multi_node.master.cloud_fallback import CloudProvider
 
@@ -1370,6 +1376,136 @@ class TestManualJoin:
         assert req.node_id == "n1"
         resp = JoinResponse(success=True, master_host="1.2.3.4", master_port=11452)
         assert resp.success is True
+
+    # P1-8 (审计 §3.3): 集群密钥常量时间比较 — 空 secret 拒非空 req_secret (防绕过)。
+    def test_manual_join_empty_req_secret_rejected(self):
+        from fusion_multi_node.discovery.manual_join import ManualJoinManager
+
+        mgr = ManualJoinManager(cluster_secret="real-secret", auto_approve=True)
+        result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": ""})
+        assert result["status"] == "error"
+        assert "密钥" in result["detail"]
+
+    # P1-9 (审计 §3.3): join URL 协议随 mTLS 开关 (mtls.scheme), 默认 http, mTLS 开则 https。
+    def test_manual_join_client_url_uses_mtls_scheme(self, monkeypatch):
+        from fusion_multi_node.discovery.manual_join import ManualJoinClient
+        from fusion_multi_node.security import mtls
+
+        monkeypatch.delenv("FUSION_MTLS_ENABLED", raising=False)
+        assert mtls.scheme() == "http"
+        client = ManualJoinClient(node_id="n1", cluster_secret="s")
+        # monkeypatch client.post 捕 URL 验协议前缀。
+        captured = {}
+
+        class _FakeClient:
+            is_closed = False
+
+            async def post(self, url, json=None):
+                captured["url"] = url
+                return _FakeResp()
+
+            async def get(self, url):
+                captured["health_url"] = url
+                return _FakeResp()
+
+            async def aclose(self):
+                pass
+
+        class _FakeResp:
+            status_code = 200
+
+            def json(self):
+                # join 返 {status,node_id}; verify_master (/api/health) 返 {role:master}。
+                return {"status": "ok", "node_id": "n1", "role": "master"}
+
+        client._client = _FakeClient()
+
+        async def _run():
+            result = await client.join("192.168.1.10", 11452)
+            assert result.success is True
+            assert captured["url"].startswith("http://"), "默认无 mTLS 应走 http"
+            ok = await client.verify_master("192.168.1.10", 11452)
+            assert ok is True
+            assert captured["health_url"].startswith("http://")
+
+        asyncio.run(_run())
+
+
+# ── P1-3 (审计 §3.7) HTTP 派发路径 PII 可选脱敏 ──
+
+
+class TestHttpPiiScrub:
+    def test_config_default_off(self):
+        # P1-3: 默认 False (LAN 明文), 校验器接纳 bool。
+        from fusion_multi_node.config import ClusterConfig
+
+        cfg = ClusterConfig(config_path="/tmp/_test_pii_cfg_default.json")
+        assert cfg.get("security.http_pii_scrub") is False
+
+    def test_master_scrub_off_by_default(self):
+        # P1-3: 无 config 注入 → _is_http_pii_scrub_enabled 返 False (明文)。
+        from fusion_multi_node.master import ClusterMaster
+
+        master = ClusterMaster()
+        assert master._is_http_pii_scrub_enabled() is False
+        payload = {"prompt": "联系 13912345678", "messages": []}
+        out = master._scrub_payload_text_fields(payload)
+        assert out["prompt"] == "联系 13912345678", "默认关不应脱敏"
+
+    def test_master_scrub_on_when_config_enabled(self, tmp_path):
+        # P1-3: config security.http_pii_scrub=True → dispatch payload prompt/messages 脱敏。
+        import json
+
+        from fusion_multi_node.config import ClusterConfig
+        from fusion_multi_node.master import ClusterMaster
+
+        cfg_path = tmp_path / "pii_cfg.json"
+        cfg_path.write_text(json.dumps({"security": {"http_pii_scrub": True}}))
+        cfg = ClusterConfig(config_path=str(cfg_path))
+        assert cfg.get("security.http_pii_scrub") is True
+        master = ClusterMaster()
+        master._cluster_config = cfg
+        assert master._is_http_pii_scrub_enabled() is True
+        payload = {
+            "prompt": "我的手机 13912345678, 邮箱 a@b.com",
+            "messages": [{"role": "user", "content": "sk-1234567890abcdefghijklmnopqrst"}],
+        }
+        out = master._scrub_payload_text_fields(payload)
+        assert "13912345678" not in out["prompt"], "prompt 手机号应脱敏"
+        assert "a@b.com" not in out["prompt"], "prompt 邮箱应脱敏"
+        assert "***OPENAIKEY***" in out["messages"][0]["content"], "messages sk- key 应脱敏"
+
+    def test_warm_cache_scrub_env_gated(self, tmp_path, monkeypatch):
+        # P1-3: warm_cache (agent 侧 KVSharingManager) env FUSION_HTTP_PII_SCRUB=1 → prompt 脱敏。
+        import asyncio
+
+        from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
+
+        captured = {}
+
+        class _FakeResp:
+            status_code = 200
+
+        class _FakeClient:
+            is_closed = False
+
+            async def post(self, url, json=None, headers=None):
+                captured["json"] = json
+                return _FakeResp()
+
+            async def aclose(self):
+                pass
+
+        mgr = KVSharingManager(persist_path=str(tmp_path / "kv.json"))
+        mgr._http_client = _FakeClient()
+
+        async def _run():
+            await mgr.warm_cache("m", ["请联系 13912345678"], ["127.0.0.1"])
+
+        monkeypatch.setenv("FUSION_HTTP_PII_SCRUB", "1")
+        asyncio.run(_run())
+        assert "13912345678" not in captured["json"]["prompt"], "env 开启 warm prompt 应脱敏"
+        assert "***PHONE***" in captured["json"]["prompt"]
 
 
 # ── M4-01 LoadMetrics + LoadRouter Tests ──

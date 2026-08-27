@@ -296,6 +296,28 @@ class TestNodeAgentExecuteTask:
         assert "已运行" in result.get("error", "") or "重复" in result.get("error", "")
 
     @pytest.mark.asyncio
+    async def test_execute_task_overload_rejects_at_capacity(self):
+        # P1-18 (审计 §6.6): _running_task_handles 达 max_tasks 上限 → 拒收 overload=True。
+        cfg = AgentConfig()
+        cfg.max_tasks = 1
+        agent = NodeAgent(config=cfg)
+        # 植入 1 个占位运行句柄填满容量 (max_tasks=1)
+        placeholder = asyncio.sleep(100)
+        agent._running_task_handles["running-1"] = asyncio.create_task(placeholder)
+        try:
+            result = await agent.execute_task(
+                {"task_id": "overload-t", "type": "inference", "model": "test", "params": {"prompt": "x"}}
+            )
+        finally:
+            agent._running_task_handles["running-1"].cancel()
+            try:
+                await agent._running_task_handles["running-1"]
+            except (asyncio.CancelledError, Exception):
+                pass
+        assert result.get("overload") is True
+        assert "已满" in result.get("error", "")
+
+    @pytest.mark.asyncio
     async def test_execute_task_anon_id_no_collision(self):
         # P1-14: 无 task_id 的直接调用分配匿名 id, 多次顺序调用序号递增不撞键。
         agent = NodeAgent()
@@ -411,18 +433,14 @@ class TestNodeAgentSandboxGate:
     async def test_plugin_rejects_traversal_plugin(self):
         # E5: plugin 含 ../ 应被拒, 不转发到 fusion-desk
         agent = NodeAgent()
-        result = await agent._execute_plugin(
-            {"task_id": "e5a", "plugin": "../../../admin", "action": "shutdown"}
-        )
+        result = await agent._execute_plugin({"task_id": "e5a", "plugin": "../../../admin", "action": "shutdown"})
         assert "error" in result
         assert "非法 plugin" in result["error"]
 
     @pytest.mark.asyncio
     async def test_plugin_rejects_traversal_action(self):
         agent = NodeAgent()
-        result = await agent._execute_plugin(
-            {"task_id": "e5b", "plugin": "ok", "action": "../../etc/passwd"}
-        )
+        result = await agent._execute_plugin({"task_id": "e5b", "plugin": "ok", "action": "../../etc/passwd"})
         assert "error" in result
         assert "非法 action" in result["error"]
 
@@ -430,9 +448,7 @@ class TestNodeAgentSandboxGate:
     async def test_plugin_rejects_slash_in_segment(self):
         # E5: plugin 含分隔符 / 应被拒 (拼接 URL 会越段)
         agent = NodeAgent()
-        result = await agent._execute_plugin(
-            {"task_id": "e5c", "plugin": "x/y", "action": "z"}
-        )
+        result = await agent._execute_plugin({"task_id": "e5c", "plugin": "x/y", "action": "z"})
         assert "error" in result
         assert "非法 plugin" in result["error"]
 

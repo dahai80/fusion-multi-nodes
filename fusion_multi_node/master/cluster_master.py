@@ -37,6 +37,7 @@ from fusion_multi_node.master.load_metrics import (
 )
 from fusion_multi_node.master.task_spec import TaskSpec
 from fusion_multi_node.observability import ClusterObservability
+from fusion_multi_node.security.data_scrubber import DataScrubber
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.utils.auth import (
@@ -213,7 +214,8 @@ class ClusterMaster:
         self.kv_cache: dict[str, KVCacheEntry] = {}
         # P2-20 (审计 §6.8): ClusterConfig 实例 (start() 注入), 供 MasterServer 热加载。
         self._cluster_config: ClusterConfig | None = None
-
+        # P1-3 (审计 §3.7): HTTP 派发路径 PII 脱敏器 — 懒加载, 仅 security.http_pii_scrub 开时构造。
+        self._pii_scrubber = None
         # M4-01 负载感知路由
         self.load_router = LoadRouter(strategy=RoutingStrategy.BALANCED)
 
@@ -251,10 +253,16 @@ class ClusterMaster:
         # report_fault 窗口内达阈值自动 ban; register_node 拒绝 ban 内节点。
         self._banned_nodes: dict[str, float] = {}
         self._fault_counts: dict[str, list[float]] = defaultdict(list)
+        # P1-24: 限流派发累计计数器 (rate_limited 分类累加), 供 Prometheus 节点级指标暴露。
+        self._rate_limited_total = 0
         # H3 任务持久化: 非终态任务落盘 + 启动恢复, Master 崩溃不丢 RUNNING/PENDING。
         # 原子写 (tmp + os.replace), 与 config.py 同范式。终态任务 (COMPLETED/FAILED/
         # CANCELLED/TIMEOUT) 不持久化 — 一次性结果, 恢复时按 RUNNING 重新派发。
         self._task_store_path = Path.home() / ".fusion" / "multi-node" / "tasks.json"
+        # P1-11: 派发热路径即时落盘节流 — 距上次即时写 < _PERSIST_THROTTLE_S 则设脏标,
+        # 由 _persist_loop (15s) 兜底; 终态转换不节流 (耐久性关键)。
+        self._last_persist_ts: float = 0.0
+        self._persist_dirty: bool = False
         # C2: 选举状态持久化路径 (term/voted_for), 与 tasks.json 同目录。
         self._election_state_path = Path.home() / ".fusion" / "multi-node" / "election_state.json"
         self._persist_task: asyncio.Task | None = None
@@ -364,14 +372,27 @@ class ClusterMaster:
         # P2-26 (审计 §5.7): _retry_count 是动态属性 (非 dataclass 字段), asdict 不序列化 →
         # master 崩溃恢复后归 0, 允许超 _max_retry_attempts 的额外重试。显式持久化恢复。
         d["_retry_count"] = getattr(task, "_retry_count", 0)
+        # P1-21 (审计 §5.4): next_retry_at 是动态属性, 显式持久化避崩溃后丢失退避状态立即重派。
+        d["next_retry_at"] = float(getattr(task, "next_retry_at", 0.0) or 0.0)
         return d
 
     def _task_from_dict(self, d: dict[str, Any]) -> ClusterTask:
-        # RUNNING 恢复为 PENDING 重派 (派发中的任务崩溃后须重新调度)
+        # RUNNING/MIGRATED 恢复为 PENDING 重派 (派发中的任务崩溃后须重新调度)
         # P3-29: PARTIAL 是终态, 恢复时保持不变 (不重派, 保留部分结果)
         st = d.get("status", "pending")
-        if st in ("running", "migrated"):
+        was_running = st in ("running", "migrated")
+        if was_running:
             st = "pending"
+        # P1-1 (审计 §4.6): 崩溃前已派发的节点并入 exclude_nodes, 避重派回原坏节点 (与 P1-14 协同);
+        # 清 started_at (重派时 assign_task 重设), 不增 retry_count (崩溃非任务失败)。
+        recovered_exclude = list(d.get("exclude_nodes", []))
+        recovered_assigned = list(d.get("assigned_nodes", []))
+        if was_running and recovered_assigned:
+            seen = set(recovered_exclude)
+            for nid in recovered_assigned:
+                if nid not in seen:
+                    recovered_exclude.append(nid)
+                    seen.add(nid)
         t = ClusterTask(
             task_id=d["task_id"],
             name=d.get("name", ""),
@@ -379,16 +400,18 @@ class ClusterMaster:
             model_name=d.get("model_name", ""),
             model_id=d.get("model_id"),
             model_shards=d.get("model_shards", []),
-            assigned_nodes=d.get("assigned_nodes", []),
+            # P1-1: RUNNING/MIGRATED 恢复后清空 assigned_nodes (PENDING 无派发), 原节点已并入 exclude。
+            assigned_nodes=[] if was_running else recovered_assigned,
             status=TaskStatus(st),
             created_at=d.get("created_at", 0.0),
-            started_at=d.get("started_at", 0.0),
+            # P1-1: RUNNING/MIGRATED 恢复后 started_at 清 0 (重派时 assign_task 重设, 防永久卡死孤儿)。
+            started_at=0.0 if was_running else d.get("started_at", 0.0),
             timeout_seconds=d.get("timeout_seconds", 300.0),
             error=d.get("error", ""),
             user=d.get("user", ""),
             required_capability=d.get("required_capability", ""),
             preferred_node_id=d.get("preferred_node_id", ""),
-            exclude_nodes=d.get("exclude_nodes", []),
+            exclude_nodes=recovered_exclude,
             priority=d.get("priority", 0),
             degraded_from_model=d.get("degraded_from_model", ""),
             degradation_count=d.get("degradation_count", 0),
@@ -401,6 +424,8 @@ class ClusterMaster:
         )
         # P2-26 (审计 §5.7): 恢复 _retry_count, 避崩溃后重试预算被重置 (允许超限重试)。
         t._retry_count = int(d.get("_retry_count", 0) or 0)
+        # P1-21 (审计 §5.4): 恢复 next_retry_at, 崩溃前已退避的任务恢复后不立即重派。
+        t.next_retry_at = float(d.get("next_retry_at", 0.0) or 0.0)
         return t
 
     def _persist_tasks_locked(self) -> list[dict[str, Any]]:
@@ -430,6 +455,9 @@ class ClusterMaster:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._task_store_path)
+            # P1-11: 落盘成功 — 记时刻 + 清脏标 (失败则保持脏, _persist_loop 下轮重试)。
+            self._last_persist_ts = time.time()
+            self._persist_dirty = False
             logger.debug(f"H3 任务持久化: {len(pending)} 非终态任务落盘")
         except Exception as e:
             # P1-15 (审计 §5.6): 持久化失败不静默吞 — 任务落盘是崩溃恢复根基, 失败则
@@ -547,13 +575,20 @@ class ClusterMaster:
         return online
 
     async def _refresh_node_statuses(self) -> None:
-        """统一状态跃迁 — 仅在 _health_check_loop 调用, 不在读取路径。"""
+        """统一状态跃迁 — 仅在 _health_check_loop 调用, 不在读取路径。
+
+        P1-15 (审计 §4.8): 节点 OFFLINE 时对在途 RUNNING 任务触发快速重试 — 节点并入
+        task.exclude_nodes (P1-14) + 转 PENDING + _enqueue_retry, 避等满 300s timeout。
+        限频: 单节点一次刷新一批 (本周期所有刚 OFFLINE 的节点一并处理, 不反复迁移抖动)。
+        """
         now = time.time()
+        offline_nodes: list[str] = []
         async with self._nodes_lock:
             for node in self.nodes.values():
                 if node.status == NodeStatus.ONLINE:
                     if now - node.last_heartbeat >= self.heartbeat_timeout:
                         node.status = NodeStatus.OFFLINE
+                        offline_nodes.append(node.node_id)
                         logger.warning(f"节点心跳超时: {node.hostname}")
                     elif node.active_tasks >= node.max_tasks:
                         node.status = NodeStatus.BUSY
@@ -561,10 +596,39 @@ class ClusterMaster:
                 elif node.status == NodeStatus.BUSY:
                     if now - node.last_heartbeat >= self.heartbeat_timeout:
                         node.status = NodeStatus.OFFLINE
+                        offline_nodes.append(node.node_id)
                         logger.warning(f"节点心跳超时(BUSY): {node.hostname}")
                     elif node.active_tasks < node.max_tasks:
                         node.status = NodeStatus.ONLINE
                         logger.info(f"节点恢复空闲: {node.hostname}")
+        # P1-15: OFFLINE 节点的在途任务转重试 (锁外取 _tasks_lock, 不与 _nodes_lock 嵌套)。
+        if not offline_nodes:
+            return
+        offline_set = set(offline_nodes)
+        _snapshot: list[dict[str, Any]] | None = None
+        async with self._tasks_lock:
+            affected = [
+                t
+                for t in self.tasks.values()
+                if t.status == TaskStatus.RUNNING and any(nid in offline_set for nid in t.assigned_nodes)
+            ]
+            if not affected:
+                return
+            for task in affected:
+                # 源 (OFFLINE) 节点并入 exclude_nodes (与 P1-14 重试同路径), 清 assigned_nodes,
+                # 走 _enqueue_retry (退避 + 重试预算, 不直接 assign 避锁嵌套)。
+                seen = set(task.exclude_nodes)
+                for nid in task.assigned_nodes:
+                    if nid in offline_set and nid not in seen:
+                        task.exclude_nodes.append(nid)
+                        seen.add(nid)
+                task.assigned_nodes = []
+                task.status = TaskStatus.MIGRATED  # 短暂标记, _enqueue_retry 转 PENDING
+                self._enqueue_retry(task)
+            _snapshot = self._persist_tasks_locked()
+        if _snapshot is not None:
+            await asyncio.to_thread(self._write_task_store, _snapshot)
+        logger.warning(f"P1-15 OFFLINE 节点在途任务迁移: nodes={offline_nodes} tasks={len(affected)}")
 
     async def check_heartbeat(self, node_id: str) -> bool:
         """检查节点心跳是否超时。"""
@@ -707,10 +771,21 @@ class ClusterMaster:
             user = ""
         return sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING and (t.user or "") == user)
 
-    def configure_scheduling(self, tenant_max_concurrent: int) -> None:
-        """P1-H: 设置租户并发配额 (0=不限)。供 CLI 从 ClusterConfig 注入。"""
+    def configure_scheduling(
+        self,
+        tenant_max_concurrent: int,
+        max_pending_queue: int | None = None,
+    ) -> None:
+        """P1-H: 设置租户并发配额 (0=不限)。供 CLI 从 ClusterConfig 注入。
+
+        P1-19: max_pending_queue = 优先级队列长度上限 (0=不限), 满则 submit 拒入队。
+        None = 保持当前值 (向后兼容旧调用只传 tenant_max_concurrent)。
+        """
         self._tenant_max_concurrent = max(0, int(tenant_max_concurrent))
         logger.info(f"P1-H 租户并发配额: {self._tenant_max_concurrent} (0=不限)")
+        if max_pending_queue is not None:
+            self._MAX_PENDING_QUEUE = max(0, int(max_pending_queue))
+            logger.info(f"P1-19 优先级队列上限: {self._MAX_PENDING_QUEUE} (0=不限)")
 
     # ── F3 (#27): /v1/chat/completions 轻量代理租户配额 ──
 
@@ -743,12 +818,19 @@ class ClusterMaster:
             else:
                 self._inflight_chat[uid] = current - 1
 
-    def _enqueue_pending(self, task: ClusterTask) -> None:
+    def _enqueue_pending(self, task: ClusterTask, *, force: bool = False) -> bool:
         """入优先级队列 — 按 priority 降序插入保持队列有序 (稳定排序)。
 
         同时登记到 self.tasks — 队列任务须可被 cancel_task/list_tasks/H3 持久化找到
         (PENDING 属非终态, _persist_tasks_locked 会落盘)。
+
+        P1-19 (审计 §4.7): 队列达 _MAX_PENDING_QUEUE 上限拒入队 (force=True 例外 —
+        内部排空重入队/重试回填不经上限, 避已入队任务丢失)。返 False → 调用方 (assign_task
+        首入口) 回 False → master_server submit 503 集群队列已满。
         """
+        if not force and len(self._pending_queue) >= self._MAX_PENDING_QUEUE:
+            logger.warning(f"P1-19 待派发队列已满 ({self._MAX_PENDING_QUEUE}), 拒入队: {task.name} ({task.task_id})")
+            return False
         task.status = TaskStatus.PENDING
         task.assigned_nodes = []
         self.tasks[task.task_id] = task
@@ -762,6 +844,7 @@ class ClusterMaster:
             f"P1-H 任务入队: {task.name} ({task.task_id}) user={task.user} "
             f"priority={task.priority} 队列长度={len(self._pending_queue)}"
         )
+        return True
 
     async def _drain_pending_locked(self) -> None:
         """派发队列中可调度的任务 — 节点空闲/配额释放后调用。
@@ -779,7 +862,8 @@ class ClusterMaster:
             ok = await self.assign_task(task)
             if not ok:
                 # 仍派不出去 (节点不足/配额满) → 重新入队, 保持优先级序。
-                self._enqueue_pending(task)
+                # P1-19: force=True — 内部排空重入队不经队列上限 (任务本在队列中, 非新提交)。
+                self._enqueue_pending(task, force=True)
 
     async def complete_task(self, task_id: str, error: str = "") -> None:
         """完成任务。"""
@@ -810,6 +894,11 @@ class ClusterMaster:
         if self._election is not None and not self._is_leader:
             logger.warning(f"standby 模式拒绝派发任务: {task.task_id} (非 leader)")
             return False
+        # P1-17: 选举空窗期 (本节点非 leader 且 leader 未定) → 拒绝派发, 避免双主脑裂窗口误派。
+        # 注: _is_leader=True 时本节点自认 leader, 不经此守卫 (leader 自派不拦)。
+        if self._election is not None and not self._is_leader and not self._election.leader_known:
+            logger.warning(f"选举过渡中拒绝派发任务: {task.task_id} (leader 未定)")
+            return False
         # P1-11: 锁内仅快照, 落盘 (fsync) 移出锁外 (审计 §4.2)。
         _snapshot: list[dict[str, Any]] | None = None
         async with self._tasks_lock:
@@ -825,8 +914,9 @@ class ClusterMaster:
                     if task.task_id in {t.task_id for t in self._pending_queue}:
                         logger.debug(f"P1-H 任务已在队列, 跳过重复入队: {task.task_id}")
                         return True
-                    self._enqueue_pending(task)
-                    return True
+                    # P1-19: 队列已满 → 返 False (submit 503); 入队成功返 True。
+                    enqueued = self._enqueue_pending(task)
+                    return bool(enqueued)
 
         required_mem = self._estimate_memory(task)
 
@@ -888,8 +978,8 @@ class ClusterMaster:
             async with self._tasks_lock:
                 if task.task_id in {t.task_id for t in self._pending_queue}:
                     return True
-                self._enqueue_pending(task)
-            return True
+                # P1-19: 队列已满 → 返 False (submit 503)。
+                return bool(self._enqueue_pending(task))
 
         async with self._nodes_lock:
             async with self._tasks_lock:
@@ -927,8 +1017,8 @@ class ClusterMaster:
                 if len(confirmed) < need:
                     # P1-H: 并发抢占后仍不足 → 入优先级队列 (锁内, _enqueue_pending 无锁需求)。
                     logger.warning(f"并发抢占后可用节点不足: 需要 {need}, 确认 {len(confirmed)} → 入队等待")
-                    self._enqueue_pending(task)
-                    return True
+                    # P1-19: 队列已满 → 返 False (submit 503)。
+                    return bool(self._enqueue_pending(task))
                 task.assigned_nodes = [n.node_id for n in confirmed]
                 task.status = TaskStatus.RUNNING
                 task.started_at = time.time()
@@ -941,7 +1031,12 @@ class ClusterMaster:
                 self._emit_task_event(task, "running")
 
         # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。P0-4: fsync 阻塞事件循环, 移 to_thread。
-        await asyncio.to_thread(self._write_task_store, _snapshot)
+        # 派发热路径节流 — 距上次即时写 < _PERSIST_THROTTLE_S 则设脏标 defer 给 _persist_loop,
+        # 降 O(N) 全量快照频率 (高派发率防 O(N²))。RUNNING→PENDING 恢复已由 P1-1 兜底。
+        if time.time() - self._last_persist_ts >= self._PERSIST_THROTTLE_S:
+            await asyncio.to_thread(self._write_task_store, _snapshot)
+        else:
+            self._persist_dirty = True
         logger.info(f"任务分配: {task.name} → {[n.hostname for n in nodes]}")
         self._trigger_dispatch(task)
         return True
@@ -954,11 +1049,29 @@ class ClusterMaster:
             logger.error(f"任务重试放弃: {task.name} ({task.task_id})")
             self._emit_task_event(task, "failed", error=task.error)
             return
+        # P1-14 (审计 §5.3): 重试前把已派发的 assigned_nodes 并入 exclude_nodes (去重),
+        # 避重派回原失败节点 (与 P1-1 崩溃恢复协同, 与 #31 重试黑名单对齐)。
+        if task.assigned_nodes:
+            seen = set(task.exclude_nodes)
+            for nid in task.assigned_nodes:
+                if nid not in seen:
+                    task.exclude_nodes.append(nid)
+                    seen.add(nid)
         task._retry_count = retry_count + 1
         task.status = TaskStatus.PENDING
         task.assigned_nodes = []
+        # P1-21 (审计 §5.4): 指数退避 next_retry_at — retry_loop 跳过未到期的任务, 避无限立即重派。
+        # 基 30s, 上限 600s, 确定性无 jitter (Rule 5)。retry_count 已 +1, 退避按当前重试次数算。
+        backoff = min(
+            self._RETRY_BACKOFF_BASE_S * (2 ** max(0, task._retry_count - 1)),
+            self._RETRY_BACKOFF_MAX_S,
+        )
+        task.next_retry_at = time.time() + backoff
         self._pending_retry.append(task)
-        logger.info(f"任务入重试队列: {task.name} ({task.task_id}), 第 {task._retry_count} 次重试")
+        logger.info(
+            f"任务入重试队列: {task.name} ({task.task_id}), 第 {task._retry_count} 次重试, "
+            f"退避 {backoff:.0f}s, exclude={task.exclude_nodes}"
+        )
         self._emit_task_event(task, "retry")
 
     # ── P1 Master→Agent 任务派发 ──
@@ -988,8 +1101,51 @@ class ClusterMaster:
 
     async def _get_dispatch_http(self) -> httpx.AsyncClient:
         if self._dispatch_http is None or self._dispatch_http.is_closed:
-            self._dispatch_http = httpx.AsyncClient(timeout=300.0, **mtls_client_kwargs())
+            # P1-13: 显式 httpx.Limits — 读 config network.http_limits (默认 100/20)。
+            # 0 = 不限; None (无 config) 退 httpx 默认。防高并发派发耗尽默认池。
+            max_conn = 100
+            max_keepalive = 20
+            if self._cluster_config is not None:
+                max_conn = int(self._cluster_config.get("network.http_limits.max_connections", 100) or 100)
+                max_keepalive = int(self._cluster_config.get("network.http_limits.max_keepalive_connections", 20) or 20)
+            limits = httpx.Limits(
+                max_connections=max_conn if max_conn > 0 else None,
+                max_keepalive_connections=max_keepalive if max_keepalive > 0 else None,
+            )
+            logger.info(f"P1-13 派发 HTTP 连接池: max_connections={max_conn} max_keepalive={max_keepalive}")
+            self._dispatch_http = httpx.AsyncClient(timeout=300.0, limits=limits, **mtls_client_kwargs())
         return self._dispatch_http
+
+    def _is_http_pii_scrub_enabled(self) -> bool:
+        # P1-3 (审计 §3.7): HTTP 派发/chat/warm_cache 路径 PII 脱敏开关 — 读 config, 默认关 (LAN 明文)。
+        if self._cluster_config is None:
+            return False
+        return bool(self._cluster_config.get("security.http_pii_scrub", False))
+
+    def _get_pii_scrubber(self) -> DataScrubber:
+        # P1-3: 懒加载共享 DataScrubber 实例 (chat 代理/warm_cache 复用同一 scrubber)。
+        if self._pii_scrubber is None:
+            self._pii_scrubber = DataScrubber()
+        return self._pii_scrubber
+
+    def _scrub_payload_text_fields(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # P1-3: 开启时对 dispatch payload 的 prompt/messages 做 PII 脱敏 (DataScrubber)。
+        # 默认关 — LAN 可信保留明文; 跨不可信网络段须开 + mTLS。脱敏仅在明文推理字段, 不动 task_id/结构。
+        if not self._is_http_pii_scrub_enabled():
+            return payload
+        if self._pii_scrubber is None:
+            self._pii_scrubber = DataScrubber()
+        scrubbed, hits = self._pii_scrubber.scrub_value(payload.get("prompt", ""))
+        if hits:
+            payload["prompt"] = scrubbed
+            logger.info(f"P1-3 dispatch prompt 脱敏命中: {hits}")
+        messages = payload.get("messages")
+        if messages:
+            scrubbed_msgs, mhits = self._pii_scrubber.scrub_value(messages)
+            if mhits:
+                payload["messages"] = scrubbed_msgs
+                logger.info(f"P1-3 dispatch messages 脱敏命中: {mhits}")
+        return payload
 
     async def _dispatch_task(self, task: ClusterTask) -> None:
         """派发任务到 assigned_nodes — DATA 并发各节点 / PIPELINE 顺序链式。
@@ -1038,7 +1194,14 @@ class ClusterMaster:
                 # 不进 logic_fail (不 ban 健康节点), 不累加熔断器故障计数。
                 errors.append(f"{nid}: 限流 (rate_limited): {r.get('error', '')}")
                 transient_fail = True
+                self._rate_limited_total += 1  # P1-24: 限流计数供 Prometheus 暴露
                 logger.info(f"节点 {nid} 限流瞬时失败 (可重试, 不计熔断): {r.get('error', '')[:120]}")
+            elif isinstance(r, dict) and r.get("overload"):
+                # P1-18: 节点任务已满 (本地 max_tasks gate) = 瞬时失败, 可重试到其他节点;
+                # 不进 logic_fail (不 ban 健康节点), 不累加熔断器故障计数。
+                errors.append(f"{nid}: 节点任务已满 (overload): {r.get('error', '')}")
+                transient_fail = True
+                logger.info(f"节点 {nid} 任务已满瞬时失败 (可重试, 不计熔断): {r.get('error', '')[:120]}")
             elif isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
                 # P0-2: 去重/沙箱阻塞 = master 自身重派或配置问题, 非节点故障;
                 # 不 report_fault (健康节点不误 ban), 不进 logic_fail/transient_fail (不重试回同节点)。
@@ -1123,8 +1286,15 @@ class ClusterMaster:
                 return
             if isinstance(r, dict) and r.get("rate_limited"):
                 # GAP-6: 流水线段限流 = 瞬时可重试, 不 ban 节点。
+                self._rate_limited_total += 1  # P1-24: 限流计数供 Prometheus 暴露
                 await self._finalize_task(
                     task, success=False, error=f"流水线步骤 {nid} 限流: {r.get('error', '')}", retryable=True
+                )
+                return
+            if isinstance(r, dict) and r.get("overload"):
+                # P1-18: 流水线段节点任务已满 = 瞬时可重试, 不 ban 节点。
+                await self._finalize_task(
+                    task, success=False, error=f"流水线步骤 {nid} 节点任务已满: {r.get('error', '')}", retryable=True
                 )
                 return
             if isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
@@ -1212,6 +1382,8 @@ class ClusterMaster:
                     "temperature": params.get("temperature", 0.7),
                     "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
                 }
+                # P1-3 (审计 §3.7): HTTP 派发路径可选 PII 脱敏 (config security.http_pii_scrub, 默认关)。
+                payload = self._scrub_payload_text_fields(payload)
             url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/execute")
             headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master", "X-Node-Role": "master"}
             # P1-13 (审计 §5.4): 单请求 HTTP 超时随 task.timeout_seconds, 不再用客户端默认固定 300s。
@@ -1220,6 +1392,18 @@ class ClusterMaster:
             http_timeout = max(30.0, float(task.timeout_seconds) + 30.0)
             resp = await client.post(url, json=payload, headers=headers, timeout=http_timeout)
             if resp.status_code != 200:
+                # P1-23 (审计 §5.4): agent_server 自身 429 限流 = 瞬时失败 (健康节点高峰被限流),
+                # 与 GAP-6 (fusion-mlx 内部 429) 同分类 — 不 report_fault (不 ban 健康节点),
+                # 返 rate_limited dict 供 _dispatch_data/_dispatch_pipeline 既有限流分支处理 (可重试)。
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After", "")
+                    logger.info(f"节点 {node_id} agent 限流 429 (可重试, 不计熔断): {resp.text[:120]}")
+                    return {
+                        "rate_limited": True,
+                        "error": f"agent {node_id} 限流 429: {resp.text[:200]}",
+                        "retry_after": retry_after,
+                        "node_id": node_id,
+                    }
                 raise RuntimeError(f"agent {node_id} HTTP {resp.status_code}: {resp.text[:200]}")
             data = resp.json()
             if data.get("status") != "ok":
@@ -1315,7 +1499,12 @@ class ClusterMaster:
 
                 logger.info(f"迁移任务: {task.name} ({task_id})")
                 task.status = TaskStatus.MIGRATED
+                # P1-14 (审计 §5.3): 迁移前把源节点并入 exclude_nodes, 避迁回原节点。
+                seen = set(task.exclude_nodes)
                 for nid in task.assigned_nodes:
+                    if nid not in seen:
+                        task.exclude_nodes.append(nid)
+                        seen.add(nid)
                     node = self.nodes.get(nid)
                     if node:
                         node.active_tasks = max(0, node.active_tasks - 1)
@@ -1508,6 +1697,19 @@ class ClusterMaster:
     _FAULT_WINDOW_S = 60.0
     _FAULT_THRESHOLD = 3
     _BAN_DURATION_S = 300.0
+    # P1-19 (审计 §4.7): 待派发队列上限 — 防过载堆积。满则 assign_task 返 False → submit 503。
+    # configure_scheduling 从 config scheduling.max_pending_queue 注入 (默认 1000)。
+    _MAX_PENDING_QUEUE = 1000
+    # P1-21 (审计 §5.4): 重试退避 — 指数基 30s 上限 600s, 确定性无 jitter (Rule 5)。
+    # _max_retry_loop_attempts 区别 _max_retry_attempts (=1 finalize 路径): retry_loop 独立预算 (默认 10),
+    # 超限转 FAILED (不再无限重试)。next_retry_at > now 的任务 retry_loop 跳过本轮。
+    _RETRY_BACKOFF_BASE_S = 30.0
+    _RETRY_BACKOFF_MAX_S = 600.0
+    _max_retry_loop_attempts = 10
+    # P1-11 (审计 §4.2): 派发热路径即时落盘节流 — assign_task 每 N 秒最多即时写一次,
+    # 超频设 _persist_dirty=True 由 _persist_loop (15s) 兜底。终态转换 (finalize/cancel)
+    # 不节流 (崩溃恢复耐久性关键)。降 O(N) 全量快照频率, 防 1000 任务高派发率 O(N²)。
+    _PERSIST_THROTTLE_S = 5.0
 
     def _is_local_force(self, task: ClusterTask, required_mem: float) -> bool:
         """M4-02 判断是否强制本地执行 (R7: 正则边界匹配)。"""
@@ -1571,6 +1773,25 @@ class ClusterMaster:
                 if now - entry.created_at > entry.ttl_seconds:
                     self.kv_cache.pop(cid, None)
         return None
+
+    def _kv_sync_fail_classify(self, node_id: str, status_code: int, body: str, hop: str) -> None:
+        """P1-16: KV 同步 HTTP 失败分类 — 429/5xx 瞬时 (记 metric 不 report_fault),
+        其他 (4xx 逻辑错) 仅 warning。bool 返回契约由调用方维持 (统一 return False)。
+        """
+        if status_code == 429 or status_code >= 500:
+            logger.warning(f"GAP-7 KV 同步: {hop} 瞬时失败 node={node_id} HTTP {status_code} (可重试): {body[:200]}")
+            self._kv_sync_transient_metric(node_id)
+        else:
+            logger.warning(f"GAP-7 KV 同步: {hop} 逻辑失败 node={node_id} HTTP {status_code}: {body[:200]}")
+
+    def _kv_sync_transient_metric(self, node_id: str) -> None:
+        """P1-16: 瞬时失败记观测性 metric — 不 report_fault (KV 同步非节点逻辑错, 不累熔断窗口)。"""
+        obs = self._observability
+        if obs is not None:
+            try:
+                obs.record_metric(node_id, "kv_sync_transient_fail", 1.0)
+            except Exception as metric_err:
+                logger.debug(f"KV 同步瞬时 metric 记录异常: {metric_err}")
 
     async def sync_kv_cache(
         self,
@@ -1671,9 +1892,8 @@ class ClusterMaster:
                     timeout=http_timeout,
                 )
                 if exp_resp.status_code != 200:
-                    logger.warning(
-                        f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: {exp_resp.text[:200]}"
-                    )
+                    # P1-16: 分类 — 429/5xx 瞬时 (记 metric 不静默), 其他逻辑错。
+                    self._kv_sync_fail_classify(src_id, exp_resp.status_code, exp_resp.text, "export JSON")
                     return False
                 bundle = exp_resp.json().get("bundle")
                 if not bundle:
@@ -1688,16 +1908,11 @@ class ClusterMaster:
                     timeout=http_timeout,
                 )
                 if imp_resp.status_code != 200 or imp_resp.json().get("stored", 0) != 1:
-                    logger.warning(
-                        f"GAP-7 KV 同步: 目标 {tgt_node.node_id} JSON import 失败: "
-                        f"{imp_resp.status_code} {imp_resp.text[:200]}"
-                    )
+                    self._kv_sync_fail_classify(tgt_node.node_id, imp_resp.status_code, imp_resp.text, "import JSON")
                     return False
             else:
                 if exp_resp.status_code != 200:
-                    logger.warning(
-                        f"GAP-7 KV 同步: 源 {src_id} export-stream HTTP {exp_resp.status_code}: {exp_resp.text[:200]}"
-                    )
+                    self._kv_sync_fail_classify(src_id, exp_resp.status_code, exp_resp.text, "export-stream")
                     return False
                 # 5. 二进制中转: 源 export-stream 原始字节 → 目标 import-stream 请求体。
                 #    agent 侧 export_stream 产原始张量字节 (不经 base64+JSON 物化),
@@ -1716,11 +1931,13 @@ class ClusterMaster:
                     timeout=http_timeout,
                 )
                 if imp_resp.status_code != 200 or imp_resp.json().get("stored", 0) != 1:
-                    logger.warning(
-                        f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import-stream 失败: "
-                        f"{imp_resp.status_code} {imp_resp.text[:200]}"
-                    )
+                    self._kv_sync_fail_classify(tgt_node.node_id, imp_resp.status_code, imp_resp.text, "import-stream")
                     return False
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            # P1-16: 瞬时网络异常 (超时/连接拒/协议断) — 记 warning + metric, 不 report_fault (非节点逻辑错)。
+            logger.warning(f"GAP-7 KV 同步: 源 {src_id} 瞬时网络异常 ({type(e).__name__}): {e}")
+            self._kv_sync_transient_metric(src_id)
+            return False
         except Exception as e:
             logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 异常: {e}")
             return False
@@ -2146,10 +2363,16 @@ class ClusterMaster:
             await self._push_sync_state_to_standbys(targets)
 
     async def _state_sync_loop(self) -> None:
-        """GAP-1: 周期全状态同步 (5s) — leader 推 nodes/kv/banned 到 standby, best-effort。"""
+        """GAP-1: 周期全状态同步 — leader 推 nodes/kv/banned 到 standby, best-effort。
+
+        P1-17: 周期读 config ha.state_sync_interval (默认 2s, 旧 5s), 减 standby 滞后。
+        """
         try:
             while self._running:
-                await asyncio.sleep(5)
+                interval = 2.0
+                if self._cluster_config is not None:
+                    interval = float(self._cluster_config.get("ha.state_sync_interval", 2.0))
+                await asyncio.sleep(interval)
                 if self._election and self._is_leader:
                     try:
                         await self._sync_state_to_standbys()
@@ -2237,7 +2460,8 @@ class ClusterMaster:
                     if task.status == TaskStatus.PENDING and task.task_id not in {
                         t.task_id for t in self._pending_queue
                     }:
-                        self._enqueue_pending(task)
+                        # P1-19: 恢复重入队走 force=True — 崩溃恢复不丢任务 (上限仅限 submit 路径防过载)。
+                        self._enqueue_pending(task, force=True)
             await self._drain_pending_locked()
 
         self._health_task = asyncio.create_task(self._health_check_loop())
@@ -2384,12 +2608,18 @@ class ClusterMaster:
             self._mdns = None
 
     async def _persist_loop(self) -> None:
-        """H3 周期快照兜底 (15s) — 关键状态写点已即时落盘, 此处防漏写。"""
+        """H3 周期快照兜底 (15s) — 关键状态写点已即时落盘, 此处防漏写。
+
+        P1-11: 仅当脏标置位 (派发节流 defer 或前次写失败) 才快照, 避免每 15s 无变更全量 O(N)。
+        """
         try:
             while self._running:
                 await asyncio.sleep(15)
                 # P0-1: 逐次异常隔离, 单轮写盘失败不杀整个循环 (违 Rule 12 静默停滞)。
                 try:
+                    # P1-11: 无脏标跳过 (节流期未落盘的变更由脏标触发)。
+                    if not self._persist_dirty:
+                        continue
                     await self._persist_tasks()
                 except asyncio.CancelledError:
                     raise
@@ -2409,7 +2639,20 @@ class ClusterMaster:
                 try:
                     retry_tasks = self._pending_retry[:]
                     self._pending_retry.clear()
+                    now = time.time()
                     for task in retry_tasks:
+                        # P1-21 (审计 §5.4): 退避未到期 → 回队列跳过本轮 (不立即重派)。
+                        if getattr(task, "next_retry_at", 0.0) > now:
+                            self._pending_retry.append(task)
+                            continue
+                        # P1-21: retry_loop 独立预算超限 → FAILED (不再无限重试)。
+                        loop_retries = getattr(task, "_retry_count", 0)
+                        if loop_retries >= self._max_retry_loop_attempts:
+                            task.status = TaskStatus.FAILED
+                            task.error = f"重试队列次数超限 ({self._max_retry_loop_attempts})"
+                            logger.error(f"重试队列放弃: {task.name} ({task.task_id})")
+                            self._emit_task_event(task, "failed", error=task.error)
+                            continue
                         ok = await self.assign_task(task)
                         if not ok:
                             self._enqueue_retry(task)
@@ -2630,6 +2873,15 @@ class ClusterMaster:
             idx = min(n - 1, max(0, int(q * n)))
             return lat_sorted[idx]
 
+        # P1-24: 节点级指标快照 — 单独持 _nodes_lock (不与 _tasks_lock 嵌套, 顺序释放避死锁)。
+        # 取注册节点 mem/active + 当前 ban 期节点集合, 供 Prometheus 节点级 gauge 暴露。
+        async with self._nodes_lock:
+            node_snapshot = [
+                (nd.node_id, nd.total_memory_gb, nd.available_memory_gb, nd.active_tasks) for nd in self.nodes.values()
+            ]
+            now = time.time()
+            banned_ids = {nid for nid, unban_at in self._banned_nodes.items() if now < unban_at}
+
         lines = [
             "# HELP fusion_cluster_nodes_total 集群注册节点总数",
             "# TYPE fusion_cluster_nodes_total gauge",
@@ -2674,6 +2926,27 @@ class ClusterMaster:
             f'fusion_cluster_dispatch_latency_seconds{{quantile="0.99"}} {_pctl(0.99):.4f}',
             f"fusion_cluster_dispatch_latency_seconds_sum {sum(latencies):.4f}",
             f"fusion_cluster_dispatch_latency_seconds_count {n}",
-            "",
+            # P1-24: 熔断/限流/节点级指标 — 运维须见单节点过载与限流计数。
+            "# HELP fusion_cluster_banned_nodes 当前 ban 期节点数",
+            "# TYPE fusion_cluster_banned_nodes gauge",
+            f"fusion_cluster_banned_nodes {len(banned_ids)}",
+            "# HELP fusion_cluster_rate_limited_total 限流派发累计计数 (rate_limited 分类)",
+            "# TYPE fusion_cluster_rate_limited_total counter",
+            f"fusion_cluster_rate_limited_total {self._rate_limited_total}",
+            "# HELP fusion_node_memory_total_gb 节点总内存 GB",
+            "# TYPE fusion_node_memory_total_gb gauge",
+            "# HELP fusion_node_memory_available_gb 节点可用内存 GB",
+            "# TYPE fusion_node_memory_available_gb gauge",
+            "# HELP fusion_node_active_tasks 节点运行中任务数",
+            "# TYPE fusion_node_active_tasks gauge",
+            "# HELP fusion_node_banned 节点是否 ban 中 (1=ban, 0=正常)",
+            "# TYPE fusion_node_banned gauge",
         ]
+        for nid, total_mem, avail_mem, active in node_snapshot:
+            banned_flag = 1 if nid in banned_ids else 0
+            lines.append(f'fusion_node_memory_total_gb{{node_id="{nid}"}} {total_mem:.2f}')
+            lines.append(f'fusion_node_memory_available_gb{{node_id="{nid}"}} {avail_mem:.2f}')
+            lines.append(f'fusion_node_active_tasks{{node_id="{nid}"}} {active}')
+            lines.append(f'fusion_node_banned{{node_id="{nid}"}} {banned_flag}')
+        lines.append("")
         return "\n".join(lines)

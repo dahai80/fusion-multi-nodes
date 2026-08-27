@@ -78,6 +78,10 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "parallel.caveman_compress": _validate_bool,
     "parallel.communication": _validate_str,
     "scheduling.tenant_max_concurrent": _validate_nonneg_int,
+    "scheduling.max_pending_queue": _validate_nonneg_int,
+    "security.http_pii_scrub": _validate_bool,
+    "network.http_limits.max_connections": _validate_nonneg_int,
+    "network.http_limits.max_keepalive_connections": _validate_nonneg_int,
     "mlx.fusion_mlx_port": _validate_port,
     "mlx.fusion_kb_port": _validate_port,
     "mlx.fusion_desk_port": _validate_port,
@@ -117,6 +121,8 @@ class ClusterConfig:
             "node_id": "",
             "priority": 0,
             "peers": [],
+            # P1-17: leader→standby 全状态同步周期 (秒)。5s→2s 减滞后, 平衡负载。
+            "state_sync_interval": 2.0,
         },
         "parallel": {
             "default_mode": "pipeline",
@@ -129,6 +135,17 @@ class ClusterConfig:
         # 0 = 不限。高优先级任务 (priority 数值大) 排队时优先获得空闲节点。
         "scheduling": {
             "tenant_max_concurrent": 4,
+            # P1-19: 优先级队列长度上限 — 满则 submit 拒入队 (503 集群队列已满)。
+            # 0 = 不限 (向后兼容旧行为); 默认 1000 防过载堆积。
+            "max_pending_queue": 1000,
+        },
+        # P1-13: httpx 连接池限制 — Master 派发/同步 HTTP client 显式 max_connections/max_keepalive。
+        # 0 = 不限 (httpx 默认)。默认按集群规模: max_connections=100, max_keepalive=20。
+        "network": {
+            "http_limits": {
+                "max_connections": 100,
+                "max_keepalive_connections": 20,
+            },
         },
         "mlx": {
             "fusion_mlx_port": 11432,
@@ -136,6 +153,12 @@ class ClusterConfig:
             "fusion_kb_port": 11434,
             "fusion_desk_port": 9000,
             "model_hub_port": 11435,
+        },
+        # P1-3 (审计 §3.7): HTTP 派发/chat 代理/warm_cache 路径 PII 可选脱敏。
+        # 默认 False — LAN 可信保留明文 (零性能损耗); 跨不可信网络段须开 + mTLS。
+        # 开启时 DataScrubber.scrub 应用于 dispatch payload prompt/messages + chat 代理 + warm_cache prompt。
+        "security": {
+            "http_pii_scrub": False,
         },
         "mcp": {
             "enabled": True,

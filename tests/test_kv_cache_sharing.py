@@ -470,3 +470,78 @@ class TestKVCacheWarmScheduler:
         except asyncio.CancelledError:
             pass
         assert s._running is False
+
+
+class TestKVSharingManagerP122:
+    """P1-22 (审计 §6.6): 跨节点 KV 调用异常分类 + 连续失败计数 + 阈值告警。"""
+
+    @pytest.mark.asyncio
+    async def test_lookup_remote_500_increments_fail_count(self):
+        m = KVSharingManager(enable_compression=False)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_ac_class = _make_mock_client(mock_resp)
+        with patch("httpx.AsyncClient", mock_ac_class):
+            await m.lookup_remote("test-model", "hash1", ["node_1"])
+        assert m._remote_fail_counts.get("node_1") == 1, "5xx 应累连续失败计数"
+
+    @pytest.mark.asyncio
+    async def test_lookup_remote_exception_increments_fail_count(self):
+        m = KVSharingManager(enable_compression=False)
+        mock_ac_class = _make_mock_client(side_effect=httpx.ConnectError("connection refused"))
+        with patch("httpx.AsyncClient", mock_ac_class):
+            await m.lookup_remote("test-model", "hash1", ["node_1"])
+        assert m._remote_fail_counts.get("node_1") == 1, "传输异常应累连续失败计数"
+
+    @pytest.mark.asyncio
+    async def test_consecutive_failures_threshold_alert(self):
+        m = KVSharingManager(enable_compression=False)
+        m._REMOTE_FAIL_ALERT_THRESHOLD = 3
+        mock_resp = MagicMock()
+        mock_resp.status_code = 503
+        mock_ac_class = _make_mock_client(mock_resp)
+        with patch("httpx.AsyncClient", mock_ac_class):
+            for _ in range(3):
+                await m.lookup_remote("test-model", "hash1", ["bad-node"])
+        assert m._remote_fail_counts.get("bad-node") == 3, "3 次失败应累计"
+        # 阈值达 3 — 连续失败告警日志应已 emit (验计数, 日志由 logger 接管)。
+
+    @pytest.mark.asyncio
+    async def test_success_clears_fail_count(self):
+        m = KVSharingManager(enable_compression=False)
+        # 先 2 次失败 (未达阈值 3)
+        fail_resp = MagicMock()
+        fail_resp.status_code = 503
+        fail_client = _make_mock_client(fail_resp)
+        with patch("httpx.AsyncClient", fail_client):
+            await m.lookup_remote("test-model", "hash1", ["node_x"])
+            await m.lookup_remote("test-model", "hash1", ["node_x"])
+        assert m._remote_fail_counts.get("node_x") == 2
+        # 再成功 → 计数清零
+        ok_resp = MagicMock()
+        ok_resp.status_code = 200
+        ok_resp.json.return_value = {"found": True, "entry": m._serialize_entry(_make_entry())}
+        ok_client = _make_mock_client(ok_resp)
+        with patch("httpx.AsyncClient", ok_client):
+            await m.lookup_remote("test-model", "hash1", ["node_x"])
+        assert m._remote_fail_counts.get("node_x") is None, "成功应清零连续失败计数"
+
+    @pytest.mark.asyncio
+    async def test_transfer_5xx_increments_fail_count(self):
+        m = KVSharingManager(enable_compression=False)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_ac_class = _make_mock_client(mock_resp)
+        with patch("httpx.AsyncClient", mock_ac_class):
+            result = await m.transfer_from_remote("c1", "src-node", "tgt-node")
+        assert result is False
+        assert m._remote_fail_counts.get("src-node") == 1, "transfer 5xx 应累源节点计数"
+
+    @pytest.mark.asyncio
+    async def test_transfer_exception_increments_fail_count(self):
+        m = KVSharingManager(enable_compression=False)
+        mock_ac_class = _make_mock_client(side_effect=httpx.TimeoutException("timed out"))
+        with patch("httpx.AsyncClient", mock_ac_class):
+            result = await m.transfer_from_remote("c1", "src-node", "tgt-node")
+        assert result is False
+        assert m._remote_fail_counts.get("src-node") == 1, "transfer 超时应累源节点计数"

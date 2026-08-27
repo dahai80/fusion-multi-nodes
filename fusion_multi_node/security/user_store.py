@@ -169,9 +169,12 @@ class UserStore:
             }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        # P1-26 (审计 §6.4): flush+fsync 后再 replace, 防页缓存未刷盘崩溃丢令牌存储 (对齐 config.py save 范式)。
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self._path)
         os.chmod(self._path, 0o600)
 
@@ -297,12 +300,12 @@ class UserStore:
         """
         if not token.startswith(_TOKEN_PREFIX):
             return None
-        rest = token[len(_TOKEN_PREFIX):]
+        rest = token[len(_TOKEN_PREFIX) :]
         sep = rest.find("_")
         if sep <= 0:
             return None
         user_id = rest[:sep]
-        secret = rest[sep + 1:]
+        secret = rest[sep + 1 :]
         if not user_id or not secret:
             return None
         with self._lock:

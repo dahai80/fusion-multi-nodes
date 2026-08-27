@@ -155,6 +155,11 @@ class KVSharingManager:
             Path(persist_path) if persist_path else Path.home() / ".fusion" / "multi-node" / "kv_cache.json"
         )
         self._dirty: bool = False
+        # P1-22 (审计 §6.6): 跨节点 KV 调用静默吞异常 → 分类 + 连续失败计数 + 阈值告警。
+        # _remote_fail_counts[node_id] = 连续失败次数; 达 _REMOTE_FAIL_ALERT_THRESHOLD (3)
+        # 提 warning (网络分区/对端宕机运维须可见)。成功调用清零。
+        self._remote_fail_counts: dict[str, int] = {}
+        self._REMOTE_FAIL_ALERT_THRESHOLD = 3
 
     async def _get_http_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
@@ -178,6 +183,37 @@ class KVSharingManager:
             except Exception as e:
                 logger.debug(f"KV 张量后端关闭失败 (忽略): {e}")
 
+    # ── P1-22 (审计 §6.6): 跨节点 KV 调用异常分类 + 连续失败计数 ──
+
+    def _classify_remote_fail(self, node_id: str, status_code: int | None, exc: Exception | None, op: str) -> None:
+        """分类瞬时失败 (429/5xx/超时/连接拒) vs 逻辑失败 (4xx 业务错), 记 warning (非 debug 静默)。
+
+        连续失败达阈值 → 提 alert 级 warning (网络分区/对端宕机运维须可见)。
+        """
+        transient = False
+        if exc is not None:
+            # 传输异常 (ConnectError/Timeout/RemoteProtocolError) = 瞬时网络
+            transient = isinstance(exc, (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError))
+            kind = f"瞬时网络异常 ({type(exc).__name__})"
+        else:
+            # HTTP 状态码分类
+            transient = status_code == 429 or (status_code is not None and status_code >= 500)
+            kind = f"HTTP {status_code} ({'瞬时限流/服务过载' if transient else '逻辑失败'})"
+        level = logger.warning
+        self._remote_fail_counts[node_id] = self._remote_fail_counts.get(node_id, 0) + 1
+        fails = self._remote_fail_counts[node_id]
+        if fails >= self._REMOTE_FAIL_ALERT_THRESHOLD:
+            level(
+                f"P1-22 KV 跨节点 {op} 连续失败 {fails} 次 node={node_id} ({kind}) — "
+                f"疑似网络分区或对端宕机, 请检查节点健康"
+            )
+        else:
+            level(f"P1-22 KV 跨节点 {op} 失败 node={node_id} ({kind}): {str(exc)[:150] if exc else ''}")
+
+    def _mark_remote_success(self, node_id: str) -> None:
+        """成功调用清零连续失败计数。"""
+        self._remote_fail_counts.pop(node_id, None)
+
     # ── P1-9 磁盘持久化 ──
 
     def save(self, path: str | None = None) -> bool:
@@ -196,7 +232,11 @@ class KVSharingManager:
                 "entries": entries,
             }
             tmp = save_path.with_suffix(save_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            # P1-26 (审计 §6.4): flush+fsync 后再 replace, 防 OS 页缓存未刷盘崩溃丢落盘内容 (对齐 config.py save 范式)。
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, save_path)
             self._dirty = False
             logger.info(f"P1-9 KV 缓存落盘: {save_path} ({len(entries)} 条)")
@@ -334,9 +374,14 @@ class KVSharingManager:
                     data = resp.json()
                     if data.get("found"):
                         entry = self._deserialize_entry(data["entry"])
+                        self._mark_remote_success(node_id)
                         return entry, node_id
+                else:
+                    # P1-22: 非 200 记 warning (非 debug 静默) + 连续失败计数。
+                    self._classify_remote_fail(node_id, resp.status_code, None, "lookup")
             except Exception as e:
-                logger.debug(f"远程 KV 查询失败 {node_id}: {e}")
+                # P1-22: 传输异常分类 + 计数 (debug→warning, 网络分区运维须可见)。
+                self._classify_remote_fail(node_id, None, e, "lookup")
 
         return None
 
@@ -370,7 +415,8 @@ class KVSharingManager:
                 headers=self._auth_headers(),
             )
             if resp.status_code != 200:
-                logger.warning(f"KV 传输失败 {source_node} → {target_node}: HTTP {resp.status_code}")
+                # P1-22: 非 200 分类 (429/5xx 瞬时 vs 4xx 逻辑) + 连续失败计数。
+                self._classify_remote_fail(source_node, resp.status_code, None, "transfer")
                 return False
             data = resp.json()
             entry = self._deserialize_entry(data["entry"])
@@ -378,10 +424,12 @@ class KVSharingManager:
             if not stored:
                 logger.warning(f"KV 传输 store_local 失败 {source_node} → {target_node}: cache_id={cache_id}")
                 return False
+            self._mark_remote_success(source_node)
             logger.info(f"KV 传输成功 {source_node} → {target_node}: cache_id={cache_id}")
             return True
         except Exception as e:
-            logger.error(f"KV 传输失败 {source_node} → {target_node}: {e}")
+            # P1-22: 传输异常分类 + 连续失败计数 (error→warning, 不静默吞)。
+            self._classify_remote_fail(source_node, None, e, "transfer")
             return False
 
     def sync_to_cluster(self, cache_id: str, model_name: str, source_node_id: str) -> KVCacheSyncMessage:
@@ -420,7 +468,18 @@ class KVSharingManager:
         client = await self._get_http_client(60.0)
 
         for prompt in prompts:
-            prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+            # P1-3 (审计 §3.7): warm_cache 跨节点推送 prompt — 可选 PII 脱敏。
+            # KVSharingManager 在 agent 侧构造, 无 master ClusterConfig; 复用 env gate
+            # FUSION_HTTP_PII_SCRUB=1 (与 master config security.http_pii_scrub 同语义), 默认关。
+            warm_prompt = prompt
+            if os.environ.get("FUSION_HTTP_PII_SCRUB") == "1":
+                from fusion_multi_node.security.data_scrubber import DataScrubber
+
+                scrubbed, hits = DataScrubber().scrub_text(prompt)
+                if hits:
+                    warm_prompt = scrubbed
+                    logger.info(f"P1-3 warm_cache prompt 脱敏命中: {hits}")
+            prompt_hash = hashlib.sha256(warm_prompt.encode("utf-8")).hexdigest()[:16]
             for node_id in nodes:
                 try:
                     safe_node = sanitize_node_url_part(node_id)
@@ -433,25 +492,29 @@ class KVSharingManager:
                         f"{mtls_scheme()}://{safe_node}:11458/api/kv/warm",
                         json={
                             "model_name": model_name,
-                            "prompt": prompt,
+                            "prompt": warm_prompt,
                             "prompt_hash": prompt_hash,
                         },
                         headers=self._auth_headers(),
                     )
                     if resp.status_code == 200:
                         results["success"] += 1
+                        self._mark_remote_success(node_id)
                         results["details"].append(
                             {
                                 "node": node_id,
-                                "prompt": prompt[:50],
+                                "prompt": warm_prompt[:50],
                                 "status": "ok",
                             }
                         )
                     else:
                         results["failed"] += 1
+                        # P1-22: 非 200 分类 (429/5xx 瞬时 vs 4xx 逻辑) + 连续失败计数。
+                        self._classify_remote_fail(node_id, resp.status_code, None, "warm")
                 except Exception as e:
                     results["failed"] += 1
-                    logger.warning(f"缓存预热失败 {node_id}: {e}")
+                    # P1-22: 传输异常分类 + 连续失败计数 (warning, 不静默吞)。
+                    self._classify_remote_fail(node_id, None, e, "warm")
 
         logger.info(f"KV 缓存预热: {results['success']} 成功, {results['failed']} 失败")
         return results

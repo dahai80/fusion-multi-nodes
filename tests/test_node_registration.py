@@ -43,12 +43,12 @@ class TestRegisterIdempotency:
         )
         assert ok is True
         node = master.nodes["n1"]
-        assert node.active_tasks == 3          # 运行态保留
-        assert node.max_tasks == 8             # 运行态保留
-        assert node.network_rtt_ms == 12.5     # 运行态保留
+        assert node.active_tasks == 3  # 运行态保留
+        assert node.max_tasks == 8  # 运行态保留
+        assert node.network_rtt_ms == 12.5  # 运行态保留
         assert node.status == NodeStatus.BUSY  # 非 OFFLINE 运行态保留
-        assert node.cpu_cores == 24            # 硬件声明更新
-        assert node.gpu_cores == 40            # 硬件声明更新
+        assert node.cpu_cores == 24  # 硬件声明更新
+        assert node.gpu_cores == 40  # 硬件声明更新
         assert node.available_memory_gb == 20.0
         assert node.hostname == "mac-renamed"
 

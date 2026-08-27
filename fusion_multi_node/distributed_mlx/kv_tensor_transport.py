@@ -35,18 +35,14 @@ class KVTransportBackend(Protocol):
 
     name: str
 
-    async def export_tensor(
-        self, cache_id: str, model_name: str, node_id: str
-    ) -> bytes | None:
+    async def export_tensor(self, cache_id: str, model_name: str, node_id: str) -> bytes | None:
         """产出张量字节 — 导出侧 (源节点)。
 
         返回 None = 无法产出 (上游端点未落地), 调用方降级 (跳过该分片张量或合成兜底)。
         """
         ...
 
-    async def import_tensor(
-        self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str
-    ) -> bool:
+    async def import_tensor(self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str) -> bool:
         """消费张量字节 — 导入侧 (目标节点)。
 
         返回 True = 已接收 (合成=no-op 仅本地存; MLX=装进本地 fusion-mlx)。
@@ -54,8 +50,7 @@ class KVTransportBackend(Protocol):
         """
         ...
 
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...
 
 
 class SyntheticKVTransport:
@@ -70,9 +65,7 @@ class SyntheticKVTransport:
     def __init__(self, tensor_size: int = 512):
         self._tensor_size = tensor_size
 
-    async def export_tensor(
-        self, cache_id: str, model_name: str, node_id: str
-    ) -> bytes | None:
+    async def export_tensor(self, cache_id: str, model_name: str, node_id: str) -> bytes | None:
         seed = f"kv-tensor::{cache_id}::{model_name}::{node_id}".encode()
         digest = hashlib.sha256(seed).digest()
         # 复制 digest 到目标长度 (确定性, 可复现)
@@ -80,15 +73,10 @@ class SyntheticKVTransport:
         while len(out) < self._tensor_size:
             out.extend(digest)
         tensor = bytes(out[: self._tensor_size])
-        logger.debug(
-            f"GAP-7 合成张量导出: cache_id={cache_id} model={model_name} "
-            f"node={node_id} size={len(tensor)}B"
-        )
+        logger.debug(f"GAP-7 合成张量导出: cache_id={cache_id} model={model_name} node={node_id} size={len(tensor)}B")
         return tensor
 
-    async def import_tensor(
-        self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str
-    ) -> bool:
+    async def import_tensor(self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str) -> bool:
         # 合成后端: 张量仅存本地 (store_local 持有 bytes), 无需装进推理引擎。
         logger.debug(
             f"GAP-7 合成张量导入: cache_id={cache_id} model={model_name} "
@@ -133,9 +121,7 @@ class MLXKVTransport:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    async def export_tensor(
-        self, cache_id: str, model_name: str, node_id: str
-    ) -> bytes | None:
+    async def export_tensor(self, cache_id: str, model_name: str, node_id: str) -> bytes | None:
         try:
             client = await self._get_client()
             resp = await client.post(
@@ -145,8 +131,7 @@ class MLXKVTransport:
             )
             if resp.status_code == 404:
                 logger.warning(
-                    f"GAP-7 MLX 张量导出降级: 上游 {_KV_EXPORT_PATH} 未落地 (issue #650), "
-                    f"cache_id={cache_id} 返回 None"
+                    f"GAP-7 MLX 张量导出降级: 上游 {_KV_EXPORT_PATH} 未落地 (issue #650), cache_id={cache_id} 返回 None"
                 )
                 return None
             resp.raise_for_status()
@@ -158,18 +143,13 @@ class MLXKVTransport:
                 logger.warning(f"GAP-7 MLX 张量导出空: cache_id={cache_id}")
                 return None
             tensor = base64.b64decode(tensor_b64)
-            logger.info(
-                f"GAP-7 MLX 真张量导出: cache_id={cache_id} model={model_name} "
-                f"size={len(tensor)}B"
-            )
+            logger.info(f"GAP-7 MLX 真张量导出: cache_id={cache_id} model={model_name} size={len(tensor)}B")
             return tensor
         except Exception as e:
             logger.warning(f"GAP-7 MLX 张量导出失败, 降级 None: cache_id={cache_id} err={e}")
             return None
 
-    async def import_tensor(
-        self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str
-    ) -> bool:
+    async def import_tensor(self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str) -> bool:
         try:
             import base64
 
@@ -193,15 +173,22 @@ class MLXKVTransport:
                 return True
             resp.raise_for_status()
             logger.info(
-                f"GAP-7 MLX 真张量导入: cache_id={cache_id} model={model_name} "
-                f"node={node_id} size={len(tensor_bytes)}B"
+                f"GAP-7 MLX 真张量导入: cache_id={cache_id} model={model_name} node={node_id} size={len(tensor_bytes)}B"
             )
             return True
-        except Exception as e:
+        except httpx.HTTPStatusError as e:
+            # P1-20 (审计 §6.5): 上游返非 200 非 404 (5xx/4xx 业务错) = 真装载失败, 不再兜底返 True 掩盖。
+            # 404 降级已在上方 status_code 分支处理 (返 True);
+            # raise_for_status 抛的 HTTPStatusError 一律真失败 -> False。
             logger.warning(
-                f"GAP-7 MLX 张量导入失败, 走本地存储兜底: cache_id={cache_id} err={e}"
+                f"P1-20 MLX 张量导入失败 (上游 HTTP {e.response.status_code if e.response else '?'}), "
+                f"不降级兜底: cache_id={cache_id} err={e}"
             )
-            return True
+            return False
+        except Exception as e:
+            # P1-20: 连接拒/超时/序列化失败 = 真装载失败, 返 False 供调用方知 (不再 mask return True)。
+            logger.warning(f"P1-20 MLX 张量导入失败 (传输异常), 不降级兜底: cache_id={cache_id} err={e}")
+            return False
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:

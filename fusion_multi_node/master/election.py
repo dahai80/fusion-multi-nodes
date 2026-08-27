@@ -127,6 +127,11 @@ class MasterElection:
         """查询候选节点 (含 ip/port)。无地址返回 None。"""
         return self.candidates.get(node_id)
 
+    @property
+    def leader_known(self) -> bool:
+        """P1-17: leader 是否已确定。选举空窗期 (_leader_id None) → False, 客户端应得 503 而非误派。"""
+        return self._leader_id is not None
+
     def remove_known_node(self, node_id: str) -> None:
         self._known_nodes.discard(node_id)
         self.candidates.pop(node_id, None)

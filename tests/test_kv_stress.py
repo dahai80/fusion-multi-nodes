@@ -53,8 +53,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -200,10 +199,7 @@ class TestKVStress:
         expected = m * n
         assert result["failed"] == 0, f"warm 有丢失: failed={result['failed']}"
         assert result["success"] == expected, f"warm 成功数 {result['success']} != 期望 {expected}"
-        logger.info(
-            f"warm 规模: {m} prompt × {n} node = {expected} 次, "
-            f"总耗时 {total_elapsed:.3f}s, 0 丢失"
-        )
+        logger.info(f"warm 规模: {m} prompt × {n} node = {expected} 次, 总耗时 {total_elapsed:.3f}s, 0 丢失")
 
     @pytest.mark.asyncio
     async def test_warm_cache_latency_p99(self, kv_cluster):
@@ -214,15 +210,13 @@ class TestKVStress:
 
         for i in range(15):
             t0 = time.monotonic()
-            r = await mgr.warm_cache(
-                model_name="llama-1b", prompts=[f"lat-{i}"], nodes=[target]
-            )
+            r = await mgr.warm_cache(model_name="llama-1b", prompts=[f"lat-{i}"], nodes=[target])
             latencies.append(time.monotonic() - t0)
             assert r["failed"] == 0, f"第 {i} 次 warm 丢失"
 
         p50 = _pct(latencies, 0.5)
         p99 = _pct(latencies, 0.99)
-        logger.info(f"warm 单次延迟: p50={p50*1000:.1f}ms p99={p99*1000:.1f}ms (n={len(latencies)})")
+        logger.info(f"warm 单次延迟: p50={p50 * 1000:.1f}ms p99={p99 * 1000:.1f}ms (n={len(latencies)})")
         # 单次 warm 跨 HTTP 应 < 500ms (本地 ASGI 路由)。
         assert p99 < 1.0, f"warm p99 过高: {p99:.3f}s"
 
@@ -250,8 +244,7 @@ class TestKVStress:
         assert lost == 0, f"transfer 丢失 {lost}/{len(prompts)}"
         p99 = _pct(latencies, 0.99)
         logger.info(
-            f"transfer 规模 {len(prompts)}, 0 丢失, "
-            f"p50={_pct(latencies, 0.5)*1000:.1f}ms p99={p99*1000:.1f}ms"
+            f"transfer 规模 {len(prompts)}, 0 丢失, p50={_pct(latencies, 0.5) * 1000:.1f}ms p99={p99 * 1000:.1f}ms"
         )
         assert p99 < 1.0, f"transfer p99 过高: {p99:.3f}s"
 
@@ -259,11 +252,8 @@ class TestKVStress:
     async def test_kv_memory_accumulation(self, kv_cluster):
         # 累计 total_size_bytes 代理显存占用 (合成数据)。
         mgr = kv_cluster.servers[0].kv_manager
-        r = await mgr.warm_cache(
-            model_name="llama-1b", prompts=_make_prompts(5), nodes=kv_cluster.node_ids
-        )
+        r = await mgr.warm_cache(model_name="llama-1b", prompts=_make_prompts(5), nodes=kv_cluster.node_ids)
         assert r["failed"] == 0
         stats = kv_cluster.servers[0].kv_manager.get_stats()
         assert stats.get("local_entries", 0) >= 5, f"本地缓存条目不足: {stats}"
         logger.info(f"node-0 KV stats: {stats}")
-

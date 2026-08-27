@@ -785,9 +785,7 @@ class TestFullDetect:
             await self.detector._detect_thunderbolt()
 
         assert run_threads, "detect 应至少调用一次 subprocess.run"
-        assert all(
-            tid != loop_thread for tid in run_threads
-        ), "subprocess.run 须移出事件循环 (to_thread)"
+        assert all(tid != loop_thread for tid in run_threads), "subprocess.run 须移出事件循环 (to_thread)"
 
 
 class TestNetworkPath:

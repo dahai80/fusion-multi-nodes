@@ -60,17 +60,9 @@ class FakeInferenceBackend(FusionMLXBackend):
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        self.chat_calls.append(
-            {"model": model, "messages": messages, "node_id": self._node_id}
-        )
+        self.chat_calls.append({"model": model, "messages": messages, "node_id": self._node_id})
         return {
-            "choices": [
-                {
-                    "message": {
-                        "content": f"echo@{self._node_id}:{messages[0]['content']}"
-                    }
-                }
-            ],
+            "choices": [{"message": {"content": f"echo@{self._node_id}:{messages[0]['content']}"}}],
             "usage": {"total_tokens": 10},
         }
 
@@ -87,8 +79,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -219,9 +210,7 @@ class TestChatProxy:
     @pytest.mark.asyncio
     async def test_user_nonstream_routed(self, cluster):
         """USER 令牌非流式 → 200 OpenAI 格式, 路由到 agent-a, content 嵌 node_id。"""
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
                 "/v1/chat/completions",
@@ -241,9 +230,7 @@ class TestChatProxy:
     @pytest.mark.asyncio
     async def test_cluster_token_routed(self, cluster):
         """集群令牌亦放行 (内部调用, 无租户 gate) → 200。"""
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
                 "/v1/chat/completions",
@@ -259,9 +246,7 @@ class TestChatProxy:
     @pytest.mark.asyncio
     async def test_viewer_forbidden(self, cluster):
         """VIEWER 令牌无 chat:complete 权限 → 403。"""
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
                 "/v1/chat/completions",
@@ -276,9 +261,7 @@ class TestChatProxy:
     @pytest.mark.asyncio
     async def test_no_nodes_503(self, cluster):
         """无可用节点 (未注册) → 503。"""
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
@@ -307,17 +290,17 @@ class TestChatProxy:
 
         cluster["backend_a"].chat = _slow_chat  # type: ignore[assignment]
 
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             headers = {"Authorization": f"Bearer {cluster['alice_token']}"}
             # 并发两请求: gather 真并发调度, 第一挂住后第二命中配额 gate。
-            r1_task = asyncio.ensure_future(client.post(
-                "/v1/chat/completions",
-                json={"model": "m", "messages": [{"role": "user", "content": "a"}]},
-                headers=headers,
-            ))
+            r1_task = asyncio.ensure_future(
+                client.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "a"}]},
+                    headers=headers,
+                )
+            )
             await first_started.wait()
             resp2 = await client.post(
                 "/v1/chat/completions",
@@ -337,9 +320,7 @@ class TestChatProxy:
     @pytest.mark.asyncio
     async def test_audit_actor_chat(self, cluster):
         """审计 actor=已认证 user_id, action=chat, node_id=选中节点。"""
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
                 "/v1/chat/completions",
@@ -398,7 +379,7 @@ class TestChatProxy:
                 assert resp.headers["content-type"].startswith("text/event-stream")
                 body = resp.content
                 assert b"[DONE]" in body
-                assert b'delta' in body
+                assert b"delta" in body
         finally:
             await fake_client.aclose()
 
@@ -407,9 +388,7 @@ class TestChatProxy:
         """请求完成后槽释放 (非流式) → 后续请求不因前请求占槽 429。"""
         master = cluster["master"]
         master.configure_scheduling(tenant_max_concurrent=1)
-        async with AsyncClient(
-            transport=ASGITransport(app=cluster["master_app"]), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             headers = {"Authorization": f"Bearer {cluster['alice_token']}"}
             r1 = await client.post(
