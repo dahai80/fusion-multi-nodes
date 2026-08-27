@@ -1039,6 +1039,12 @@ class ClusterMaster:
                 errors.append(f"{nid}: 限流 (rate_limited): {r.get('error', '')}")
                 transient_fail = True
                 logger.info(f"节点 {nid} 限流瞬时失败 (可重试, 不计熔断): {r.get('error', '')[:120]}")
+            elif isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
+                # P0-2: 去重/沙箱阻塞 = master 自身重派或配置问题, 非节点故障;
+                # 不 report_fault (健康节点不误 ban), 不进 logic_fail/transient_fail (不重试回同节点)。
+                reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
+                errors.append(f"{nid}: {reason}: {r.get('error', '')}")
+                logger.info(f"节点 {nid} {reason} ({task.task_id}), 不计熔断不重试: {r.get('error', '')[:120]}")
             elif isinstance(r, dict) and "error" in r:
                 # C9: agent 内部错误 (OOM/坏模型) 返 200+ok+error — 对熔断器可见
                 errors.append(f"{nid}: {r['error']}")
@@ -1119,6 +1125,13 @@ class ClusterMaster:
                 # GAP-6: 流水线段限流 = 瞬时可重试, 不 ban 节点。
                 await self._finalize_task(
                     task, success=False, error=f"流水线步骤 {nid} 限流: {r.get('error', '')}", retryable=True
+                )
+                return
+            if isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
+                # P0-2: 流水线段去重/沙箱阻塞 = 非节点故障, 不 report_fault, 不重试 (重试回同段同任务大概率复现去重)。
+                reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
+                await self._finalize_task(
+                    task, success=False, error=f"流水线步骤 {nid} {reason}: {r.get('error', '')}"
                 )
                 return
             if isinstance(r, dict) and "error" in r:
