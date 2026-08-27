@@ -38,8 +38,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -204,9 +203,7 @@ class TestKVTensorStreamingMemory:
 
         tracemalloc.start()
         snapshot_before = tracemalloc.take_snapshot()
-        ok = await cm.sync_kv_cache(
-            "kv-e2e-tensor", "llama-1b", "agent-a", 10.0, target_node_id="agent-b"
-        )
+        ok = await cm.sync_kv_cache("kv-e2e-tensor", "llama-1b", "agent-a", 10.0, target_node_id="agent-b")
         snapshot_after = tracemalloc.take_snapshot()
         tracemalloc.stop()
 

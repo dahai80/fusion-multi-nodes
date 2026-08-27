@@ -488,9 +488,7 @@ class KVSharingManager:
         # 为缺张量的分片经后端产出 (合成/MLX); 已有张量的分片直传 (避免重复生成)。
         for shard in entry.shards:
             if shard.tensor is None:
-                tensor = await self._transport.export_tensor(
-                    cache_id, shard.model_name, node_id
-                )
+                tensor = await self._transport.export_tensor(cache_id, shard.model_name, node_id)
                 if tensor is not None:
                     shard.tensor = tensor
                     shard.is_compressed = self.enable_compression
@@ -501,7 +499,7 @@ class KVSharingManager:
         bundle = self._serialize_entry(entry)
         logger.info(
             f"GAP-7 KV 导出 bundle: cache_id={cache_id} model={model_name} "
-            f"shards={len(entry.shards)} size={entry.total_size_bytes}B backend={getattr(self._transport,'name','?')}"
+            f"shards={len(entry.shards)} size={entry.total_size_bytes}B backend={getattr(self._transport, 'name', '?')}"
         )
         return bundle
 
@@ -520,14 +518,11 @@ class KVSharingManager:
         # 经后端消费张量 (MLX 装本地引擎; 合成 no-op) — 不阻塞存储。
         for shard in entry.shards:
             if shard.tensor is not None:
-                await self._transport.import_tensor(
-                    entry.cache_id, shard.model_name, shard.tensor, node_id
-                )
+                await self._transport.import_tensor(entry.cache_id, shard.model_name, shard.tensor, node_id)
         stored = self.store_local(entry)
         if not stored:
             logger.warning(
-                f"GAP-7 KV 导入 store_local 拒绝 (预算超限): cache_id={entry.cache_id} "
-                f"size={entry.total_size_bytes}B"
+                f"GAP-7 KV 导入 store_local 拒绝 (预算超限): cache_id={entry.cache_id} size={entry.total_size_bytes}B"
             )
             return False
         logger.info(
@@ -562,9 +557,7 @@ class KVSharingManager:
         tensors = []
         for shard in entry.shards:
             if shard.tensor is None:
-                tensor = await self._transport.export_tensor(
-                    cache_id, shard.model_name, node_id
-                )
+                tensor = await self._transport.export_tensor(cache_id, shard.model_name, node_id)
                 if tensor is not None:
                     shard.tensor = tensor
                     shard.is_compressed = self.enable_compression
@@ -600,7 +593,7 @@ class KVSharingManager:
                 yield t
         logger.info(
             f"P0-3 KV 流式导出: cache_id={cache_id} shards={len(entry.shards)} "
-            f"size={entry.total_size_bytes}B backend={getattr(self._transport,'name','?')}"
+            f"size={entry.total_size_bytes}B backend={getattr(self._transport, 'name', '?')}"
         )
 
     async def import_stream(self, header_and_meta: bytes, tensor_body_aiter):
@@ -667,9 +660,7 @@ class KVSharingManager:
         node_id = self._node_id_for_export(entry)
         for shard in entry.shards:
             if shard.tensor is not None:
-                await self._transport.import_tensor(
-                    entry.cache_id, shard.model_name, shard.tensor, node_id
-                )
+                await self._transport.import_tensor(entry.cache_id, shard.model_name, shard.tensor, node_id)
         stored = self.store_local(entry)
         if not stored:
             logger.warning(
@@ -678,8 +669,7 @@ class KVSharingManager:
             )
             return False
         logger.info(
-            f"P0-3 KV 流式导入成功: cache_id={entry.cache_id} shards={len(entry.shards)} "
-            f"size={entry.total_size_bytes}B"
+            f"P0-3 KV 流式导入成功: cache_id={entry.cache_id} shards={len(entry.shards)} size={entry.total_size_bytes}B"
         )
         return True
 

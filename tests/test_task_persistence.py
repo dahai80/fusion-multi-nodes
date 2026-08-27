@@ -50,9 +50,7 @@ class TestPersistRestore:
     @pytest.mark.asyncio
     async def test_running_restored_as_pending(self, tmp_path):
         m = _master_with_store(tmp_path)
-        await m.register_node(
-            NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458)
-        )
+        await m.register_node(NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458))
         t = _task("t-run", TaskStatus.RUNNING)
         t.assigned_nodes = ["n1"]
         async with m._tasks_lock:
@@ -204,6 +202,7 @@ class TestPersistRestore:
         def slow_write(pending):
             # 模拟慢盘 fsync: 同步阻塞 80ms (若在事件循环线程, 会拖垮并发协程)
             import time as _t
+
             _t.sleep(0.08)
             return real_write(pending)
 

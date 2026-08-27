@@ -1130,9 +1130,7 @@ class ClusterMaster:
             if isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
                 # P0-2: 流水线段去重/沙箱阻塞 = 非节点故障, 不 report_fault, 不重试 (重试回同段同任务大概率复现去重)。
                 reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
-                await self._finalize_task(
-                    task, success=False, error=f"流水线步骤 {nid} {reason}: {r.get('error', '')}"
-                )
+                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} {reason}: {r.get('error', '')}")
                 return
             if isinstance(r, dict) and "error" in r:
                 await self._finalize_task(task, success=False, error=f"流水线步骤 {nid}: {r['error']}")
@@ -1674,8 +1672,7 @@ class ClusterMaster:
                 )
                 if exp_resp.status_code != 200:
                     logger.warning(
-                        f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: "
-                        f"{exp_resp.text[:200]}"
+                        f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: {exp_resp.text[:200]}"
                     )
                     return False
                 bundle = exp_resp.json().get("bundle")
@@ -1699,8 +1696,7 @@ class ClusterMaster:
             else:
                 if exp_resp.status_code != 200:
                     logger.warning(
-                        f"GAP-7 KV 同步: 源 {src_id} export-stream HTTP {exp_resp.status_code}: "
-                        f"{exp_resp.text[:200]}"
+                        f"GAP-7 KV 同步: 源 {src_id} export-stream HTTP {exp_resp.status_code}: {exp_resp.text[:200]}"
                     )
                     return False
                 # 5. 二进制中转: 源 export-stream 原始字节 → 目标 import-stream 请求体。
@@ -1750,10 +1746,7 @@ class ClusterMaster:
                     for cid, _ in oldest:
                         del self.kv_cache[cid]
 
-        logger.info(
-            f"GAP-7 KV 张量同步成功: cache_id={cache_id} {src_id}→{tgt_node.node_id} "
-            f"size={size_mb:.1f}MB"
-        )
+        logger.info(f"GAP-7 KV 张量同步成功: cache_id={cache_id} {src_id}→{tgt_node.node_id} size={size_mb:.1f}MB")
         return True
 
     # ── M3-03 选举配置 ──

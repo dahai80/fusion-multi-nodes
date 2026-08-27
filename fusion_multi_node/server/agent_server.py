@@ -414,18 +414,18 @@ class AgentServer:
                 payload["stream"] = True
                 client = await backend._get_client()
                 url = f"{backend._base_url}/v1/chat/completions"
+
                 # 流式: 透传 fusion-mlx SSE 字节流到上游 (master StreamingResponse 再透传客户端)。
                 async def _stream():
                     try:
-                        req_ctx = client.stream(
-                            "POST", url, json=payload, headers=backend._dist_headers()
-                        )
+                        req_ctx = client.stream("POST", url, json=payload, headers=backend._dist_headers())
                         async with req_ctx as upstream:
                             async for chunk in upstream.aiter_raw():
                                 yield chunk
                     except Exception as e:
                         logger.error(f"chat 流式透传失败: {e}")
                         yield b'data: {"error":"internal"}\n\n'
+
                 return StreamingResponse(_stream(), media_type="text/event-stream")
             try:
                 data = await backend.chat(

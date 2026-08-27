@@ -43,10 +43,13 @@ class FakeBackend(InferenceBackend):
 async def _drain(master: ClusterMaster) -> None:
     for _ in range(50):
         await asyncio.sleep(0.02)
-        if all(
-            t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
-            for t in master.tasks.values()
-        ) and not master._pending_queue:
+        if (
+            all(
+                t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+                for t in master.tasks.values()
+            )
+            and not master._pending_queue
+        ):
             return
     await asyncio.sleep(0.1)
 
@@ -75,6 +78,27 @@ def _node(node_id: str, port: int) -> NodeInfo:
         cpu_cores=12,
         max_tasks=4,
     )
+
+
+class _HoldResp:
+    status_code = 200
+
+    def json(self):
+        return {"status": "ok", "result": {"output": "ok"}}
+
+    text = "ok"
+
+
+class _HoldClient:
+    # 派发 HTTP 挂起 (长 sleep 不返) — 保持任务 RUNNING, 避免后台派发失败 finalize 清空计数。
+    is_closed = False
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        await asyncio.sleep(30.0)
+        return _HoldResp()
+
+    async def aclose(self):
+        pass
 
 
 class TestTenantQuota:
@@ -118,11 +142,23 @@ class TestTenantQuota:
         assert len(master._pending_queue) == 0
 
     @pytest.mark.asyncio
-    async def test_quota_zero_unlimited(self):
+    async def test_quota_zero_unlimited(self, monkeypatch):
+        # SSRF 守卫拦 127.0.0.1 — 测试作用域放行 (与 dispatch E2E 测试一致), 否则后台派发
+        # 累 3 fault ban 节点 → select_nodes 返空 → 全入队 (非配额语义验证目标)。
+        from fusion_multi_node.master import cluster_master as _cm_mod
+        from fusion_multi_node.utils import auth as _auth_mod
+
+        monkeypatch.setattr(_cm_mod, "is_safe_peer_host", lambda host: True)
+        # build_safe_url 内部调 auth.is_safe_peer_host (本模块绑定), 须同放行否则 raise ValueError。
+        monkeypatch.setattr(_auth_mod, "is_safe_peer_host", lambda host: True)
         master = ClusterMaster()
         master._dispatch_token = TEST_TOKEN
         master.configure_scheduling(0)  # 配额不限 (节点容量仍限)
         await master.register_node(_node("n1", 21502))  # max_tasks=4
+        # 派发 HTTP 挂起 (不返) — 保持任务 RUNNING, 避免后台派发失败 finalize 清空计数
+        # (assign_task 返 True 后后台 _dispatch_task 并发跑, 无 mock 会失败回填 FAILED →
+        # running_count 随调度时序波动; 挂起 client 锁定 RUNNING 计数稳定)。
+        master._dispatch_http = _HoldClient()
 
         tasks = [_make_task(f"u-{i}", user="tenant-Z") for i in range(10)]
         for t in tasks:

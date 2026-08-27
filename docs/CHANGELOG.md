@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-08-27 — 审计 0826 P0 热修 (5 阻断项)
+
+> **生产阻断消除**: 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 5 P0 阻断项
+> (❌ 不具备企业级生产商用发布条件) 全部代码修复落地。循环容错 / 派发误 ban / KV 流式 /
+> 异步落盘 / 告警出站五项闭环, 重审可发布。基线 1203 → 1213 测试全绿。
+
+### Fixed — P0 阻断 (5)
+
+- **P0-1 4 背景循环无逐次异常隔离**: `_persist_loop` / `_retry_loop` / `_health_check_loop`
+  (cluster_master) + `_election_loop` (election) 仅外层 `try/except CancelledError`, 循环体内
+  `await` 抛非取消异常 → 杀整个循环, Master 表面健康 (HTTP 200) 但持久化/重试/超时/选举
+  静默停滞, 零告警。修复: 每个循环体加内层 `try: <body> except CancelledError: raise
+  except Exception: logger.warning; continue` (复用既有 `_state_sync_loop` 范式)。
+  test: 4 循环首调抛 RuntimeError, 断言循环未死 (计数器递增)。
+- **P0-2 `dedup_blocked`/`sandbox_blocked` 误归 logic_fail + report_fault**: GAP-6 修了
+  `rate_limited` 漏 `dedup_blocked`/`sandbox_blocked` → 走 `"error" in r` → `logic_fail` +
+  `report_fault`。H3 重派触发去重 → 累 fault → 60s 窗口 3 次 → 健康节点 ban 300s。
+  修复: `_dispatch_data`/`_dispatch_pipeline` 在 `rate_limited` 分支后、`"error" in r` 前,
+  加独立分类 (不 report_fault, 不重试 — 去重属 master 自身重派错误, sandbox 阻塞归配置)。
+  test: mock agent 返 `{"dedup_blocked":True}`, 断言 `report_fault` 未调 + 节点未 ban。
+- **P0-3 KV 张量 base64+JSON 单 POST → 1.5GB 峰值/JSON 阻塞**: 全 bundle 经
+  `exp_resp.json().get("bundle")` 物化内存再 `client.post(json=)`。500MB 张量 → base64 膨胀
+  1.33× → JSON 解析峰值 1.5GB。修复: 流式二进制协议 — 头部 JSON 元数据 (shards 无 tensor)
+  + 定长 magic + 各 shard 原始 tensor bytes 拼接。agent `/api/kv/export-stream`
+  (`StreamingResponse` octet-stream) + `/api/kv/import-stream` (raw body); master
+  `sync_kv_cache` `aread()` 源响应 → `content=src_bytes` 目标请求体, 旧 JSON bundle 路径
+  向后兼容 (export-stream 404 降级)。test: 10MB 合成张量流式 round-trip 字节完整
+  (tracemalloc 峰值记录供审计)。
+- **P0-4 `_write_task_store` 同步 fsync 阻塞事件循环**: fsync 已移出 `_tasks_lock` (P1-11)
+  但仍阻塞 asyncio 单线程 (SSD 1-5ms/fsync, 100 task/s 占 10-50%)。修复: 5 call sites
+  (`_persist_tasks`/assign/finalize/cancel/retry) 改 `await asyncio.to_thread(
+  self._write_task_store, snapshot)` — 锁内快照拷贝纯内存, to_thread 内写盘不持锁不阻塞。
+  test: monkeypatch 慢盘 80ms, 并行 40ms `asyncio.sleep` 计时器 <0.07s 完成 (证明 fsync
+  移出事件循环)。
+- **P0-5 告警无出站通道, `on_alert` 零注册**: 告警机制存在 (`create_alert` 同步调 handler)
+  但 master 从不注册 → 节点掉线/内存告警只进 deque, 运维须轮询。修复: `ClusterMaster.start`
+  读 env `FUSION_ALERT_WEBHOOK_URL`, 非空则注册 fire-and-forget handler — 收 `Alert` →
+  `asyncio.create_task(_post_alert_webhook)` (`to_thread` 包 httpx POST, 失败 warning 不
+  拖垮告警链)。空 env → `logger.info` 不强制。test: env 设 webhook, monkeypatch httpx POST
+  断言 Alert 序列化 POST 被调 + `create_alert` <50ms 不阻塞。
+
+### Tests — 新增 ~10 例
+
+- `test_cluster_master.py`: 4 背景循环容错 + P0-2 dedup 不 ban。
+- `test_kv_tensor_e2e.py`: `TestKVTensorStreamingMemory` 10MB 流式 round-trip。
+- `test_task_persistence.py`: `test_fsync_does_not_block_event_loop`。
+- `test_observability.py`: `TestP05AlertWebhook` (2 例)。
+- `tests/test_scheduling.py::test_quota_zero_unlimited`: 修复既有基线失败 (SSRF 守卫
+  monkeypatch 双模块 + `_HoldClient` 锁定 RUNNING 计数稳定)。
+
+### Maintenance
+
+- ruff format 应用到本批触及文件 (cluster_master / kv_cache_sharing / agent_server / 4 测试)。
+
 ## [0.11.0] - 2026-08-27 — GAP-7 KV 张量跨节点传输 (close #33)
 
 > **`sync_kv_cache` 张量级跨节点传输交付**: 经可插拔张量后端编排骨 `/api/kv/export` → 目标

@@ -141,8 +141,14 @@ class TestClusterMaster:
         # P0-8: 注册一节点 → _collect_observability_locked 记录 mem_used_gb/active_tasks
         master = ClusterMaster()
         await master.start(with_server=False, with_mdns=False)
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458,
-                        total_memory_gb=64.0, available_memory_gb=48.0)
+        info = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            total_memory_gb=64.0,
+            available_memory_gb=48.0,
+        )
         await master.register_node(info)
         await master._collect_observability_locked()
         obs = master._observability
@@ -1054,4 +1060,3 @@ class TestP01LoopFaultTolerance:
         finally:
             cm.asyncio.sleep = orig_sleep
             await master.stop()
-

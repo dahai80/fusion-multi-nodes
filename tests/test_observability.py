@@ -649,9 +649,7 @@ class TestP05AlertWebhook:
         await m.start(with_server=False, with_mdns=False)
         try:
             t0 = time.monotonic()
-            m._observability.create_alert(
-                severity="critical", title="节点离线", message="n1 失联", node_id="n1"
-            )
+            m._observability.create_alert(severity="critical", title="节点离线", message="n1 失联", node_id="n1")
             elapsed = time.monotonic() - t0
             # create_alert 须 fire-and-forget 即返 (POST 在后台 create_task), 不阻塞同步路径。
             assert elapsed < 0.05, f"create_alert 被 webhook 拖慢: {elapsed:.3f}s"

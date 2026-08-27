@@ -5,12 +5,24 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.11.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.11.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1203%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1213%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **📦 v0.11.1 (2026-08-27) — 审计 0826 P0 热修 (5 阻断项)**
+>
+> 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 5 P0 阻断项 (❌ 不具备企业级
+> 生产商用发布条件) 全部代码修复落地: ① 4 背景循环逐次异常隔离 (防静默杀循环); ②
+> `dedup_blocked`/`sandbox_blocked` 误归 logic_fail + report_fault 修复 (防误 ban 健康节点);
+> ③ KV 张量流式二进制协议 (替代 base64+JSON 单 POST, 消 1.5GB 峰值); ④ `_write_task_store`
+> 移 `asyncio.to_thread` (防 fsync 阻塞事件循环); ⑤ 告警 webhook 出站通道 (env
+> `FUSION_ALERT_WEBHOOK_URL` fire-and-forget)。基线 1203 → 1213 测试全绿。详见
+> [CHANGELOG](docs/CHANGELOG.md)。P1/P2/P3 整改分批续 (v0.12.0/v0.12.1)。
 
 ---
 
