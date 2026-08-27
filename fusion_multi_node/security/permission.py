@@ -93,6 +93,8 @@ _PATH_PERMISSION_MAP: dict[str, Permission] = {
     "/api/tasks/cancel": Permission.TASK_CANCEL,
     "/api/tasks/migrate": Permission.TASK_MIGRATE,
     "/api/execute": Permission.TASK_EXECUTE,
+    # F3 (#27): agent chat 透传路由 — 同 TASK_EXECUTE 权限 (集群内部 master 派发)。
+    "/api/v1/chat/completions": Permission.TASK_EXECUTE,
     "/api/kv/register": Permission.KV_REGISTER,
     "/api/kv/find": Permission.KV_FIND,
     "/api/kv/lookup": Permission.KV_LOOKUP,

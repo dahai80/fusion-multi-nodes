@@ -9,20 +9,21 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1141%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1154%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **📦 v0.10.4 (2026-08-27) — GAP-8 Phase F2: per-user RBAC + 用户管理 CRUD**
+> **📦 v0.10.5 (2026-08-27) — GAP-8 Phase F3: 统一推理代理 /v1/chat/completions**
 >
-> 用户令牌按 UserRole 强制鉴权 (USER 可提交/取消, VIEWER 只读, migrate/degrade 仅 ADMIN);
-> `task.user` 取已认证 user_id 忽略客户端自报 (防伪造审计 actor); ADMIN-only 用户 CRUD +
-> 令牌签发/吊销/轮换 API。集群令牌路径不变 (内部可信)。详见 [CHANGELOG](docs/CHANGELOG.md)。
+> master 新增 `/v1/chat/completions` 轻量 pass-through 代理 → `select_nodes` 路由选中节点 agent
+> `/api/v1/chat/completions` → `FusionMLXBackend.chat` (原生 OpenAI 格式, 支持流式 SSE 透传)。
+> 用户令牌经 `chat:complete` RBAC + 租户在途并发配额 (复用 `_tenant_max_concurrent`, 超限 429 +
+> 审计 `chat_quota_exceeded`); 集群令牌内部放行。解决 #27 两套路由分叉 — 客户端经 master 统一推理入口。
+> 详见 [CHANGELOG](docs/CHANGELOG.md)。
 >
-> 已完成 (Phase A-E + F1-F2): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD。
+> 已完成 (Phase A-E + F1-F3): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1 令牌基座 → F2 RBAC+CRUD → F3 推理代理。
 > 仍待补齐 (Phase F):
-> - **F3 统一推理代理** (#27): master `/v1/chat/completions` pass-through
 > - **F4 集群控制 API 契约** (#32): /api/v1 响应模型 + HTTP 文档
 > - **F5 令牌轮转** (GAP-8): 多活令牌 + cluster previous-active 滚动重启
 > - **KV no-op** (GAP-7): sync_kv_cache 仅元数据 (张量 KV 上游阻塞, issue #33)
