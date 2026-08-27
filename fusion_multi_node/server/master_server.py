@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from starlette.responses import JSONResponse, StreamingResponse
 
@@ -27,7 +27,7 @@ from fusion_multi_node.master import (
 from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
-from fusion_multi_node.security.permission import NodeRole, PermissionManager
+from fusion_multi_node.security.permission import NodeRole, PermissionManager, UserRole, check_user_path_access
 from fusion_multi_node.utils.auth import (
     BearerAuthMiddleware,
     build_safe_url,
@@ -144,6 +144,21 @@ class TaskSubmitRequest(BaseModel):
 
 class TaskCancelRequest(BaseModel):
     reason: str = ""
+
+
+# GAP-8 (Phase F2): 用户管理 CRUD 请求模型 — 仅 ADMIN 可调 (user:manage 权限)。
+class UserCreateRequest(BaseModel):
+    user_id: str
+    role: str = "user"
+    password: str = ""
+
+
+class UserTokenIssueRequest(BaseModel):
+    label: str = ""
+
+
+class UserRoleUpdateRequest(BaseModel):
+    role: str
 
 
 class KVRegisterRequest(BaseModel):
@@ -271,6 +286,55 @@ class MasterServer:
 
         async def _check_permission(node_id: str, path: str, method: str = "GET") -> bool:
             return self._permission_manager.check_path_access(node_id, path, method)
+
+        # GAP-8 (Phase F2): 用户令牌身份解析 + per-user RBAC。
+        # 中间件对 fmu_ 令牌注入 scope["user_id"]/["user_role"] (auth.py)。
+        # _resolve_actor 取已认证 user_id (用户令牌) 或回退 X-Node-Id (集群令牌, 内部可信)。
+        # _enforce_user_rbac 仅对用户令牌鉴权 (check_user_path_access); 集群令牌走 node-RBAC,
+        # 用户层鉴权不适用 (内部流量无用户身份)。返回 actor: 用户令牌=user_id, 集群令牌=""。
+        def _resolve_actor(request) -> str:
+            scope = request.scope
+            uid = scope.get("user_id")
+            if uid:
+                return uid
+            # 集群令牌 — 无用户身份, 回退 X-Node-Id (内部调用方标识)
+            for name, value in scope.get("headers", []):
+                if name == b"x-node-id":
+                    return value.decode("utf-8", errors="replace")
+            return ""
+
+        def _user_token_role(request) -> UserRole | None:
+            scope = request.scope
+            role_v = scope.get("user_role")
+            if not role_v:
+                return None
+            try:
+                return UserRole(role_v)
+            except ValueError:
+                return None
+
+        def _enforce_user_rbac(request, path: str, method: str) -> str:
+            """用户令牌鉴权关卡 — 返回已认证 actor (user_id)。
+
+            集群令牌 (无 user_id) → 返回 "" 跳过用户层鉴权 (交 node-RBAC)。
+            用户令牌但权限不足 → 抛 403 + 审计 permission_deny。
+            """
+            role = _user_token_role(request)
+            if role is None:
+                return ""  # 集群令牌, 非用户面调用
+            actor = _resolve_actor(request)
+            if not check_user_path_access(role, path, method):
+                logger.warning(f"用户权限不足: user={actor} role={role.value} {method} {path}")
+                self._audit.log(
+                    actor=actor,
+                    action="permission_deny",
+                    path=path,
+                    method=method,
+                    result="denied",
+                    detail=f"用户权限不足: role={role.value} {method} {path}",
+                )
+                raise HTTPException(status_code=403, detail=f"用户权限不足: {method} {path}")
+            return actor
 
         @app.get("/api/health")
         @app.get("/health")
@@ -659,7 +723,10 @@ class MasterServer:
         # ── 任务管理 ──
 
         @app.post("/api/tasks/submit")
-        async def submit_task(req: TaskSubmitRequest):
+        async def submit_task(req: TaskSubmitRequest, request: Request):
+            # GAP-8 (Phase F2): 用户令牌 → per-user RBAC + task.user=已认证 user_id (防伪造)。
+            # 集群令牌 → node-RBAC (内部可信), task.user=req.user (内部调用方自声明)。
+            user_actor = _enforce_user_rbac(request, "/api/tasks/submit", "POST")
             if not await _check_permission("master", "/api/tasks/submit", "POST"):
                 self._audit.log(
                     actor="master",
@@ -674,6 +741,9 @@ class MasterServer:
             if self.master._election is not None and not self.master._is_leader:
                 raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝任务提交")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
+            # F2: 用户令牌 → task.user 取已认证身份 (忽略客户端 req.user, 防伪造审计 actor)。
+            # 集群令牌 → req.user (内部可信自声明, HA/CLI/agent 路径)。
+            effective_user = user_actor if user_actor else req.user
             task = ClusterTask(
                 task_id=f"task_{uuid.uuid4().hex[:12]}",
                 name=req.name,
@@ -681,7 +751,7 @@ class MasterServer:
                 model_name=req.model_name,
                 model_id=req.model_id,
                 timeout_seconds=req.timeout_seconds,
-                user=req.user,
+                user=effective_user,
                 created_at=time.time(),
                 required_capability=req.required_capability,
                 preferred_node_id=req.preferred_node_id,
@@ -697,7 +767,7 @@ class MasterServer:
                 },
             )
             self._audit.log(
-                actor=req.user or "unknown",
+                actor=effective_user or "unknown",
                 action="task_submit",
                 path="/api/tasks/submit",
                 method="POST",
@@ -764,7 +834,9 @@ class MasterServer:
             return _task_to_resp(task)
 
         @app.post("/api/tasks/{task_id}/cancel")
-        async def cancel_task(task_id: str, req: TaskCancelRequest):
+        async def cancel_task(task_id: str, req: TaskCancelRequest, request: Request):
+            # F2: 用户令牌 per-user RBAC; VIEWER 无 task:cancel → 403。
+            user_actor = _enforce_user_rbac(request, "/api/tasks/cancel", "POST")
             if not await _check_permission("master", "/api/tasks/cancel", "POST"):
                 self._audit.log(
                     actor="master",
@@ -790,7 +862,7 @@ class MasterServer:
             if not ok:
                 raise HTTPException(status_code=400, detail=f"任务 {task_id} 取消失败")
             self._audit.log(
-                actor="master",
+                actor=user_actor or "master",
                 action="task_cancel",
                 path="/api/tasks/cancel",
                 method="POST",
@@ -840,19 +912,32 @@ class MasterServer:
 
         # M4-04 任务降级
         @app.post("/api/tasks/{task_id}/degrade")
-        async def degrade_task(task_id: str):
+        async def degrade_task(task_id: str, request: Request):
+            # F2: 用户令牌 per-user RBAC; USER 无 task:degrade → 403, ADMIN 有。
+            _enforce_user_rbac(request, "/api/tasks/degrade", "POST")
             ok = await self.master.degrade_task(task_id)
             if not ok:
                 raise HTTPException(status_code=400, detail=f"任务 {task_id} 降级失败")
             return {"status": "ok", "task_id": task_id}
 
         @app.post("/api/tasks/{task_id}/migrate")
-        async def migrate_task(task_id: str):
+        async def migrate_task(task_id: str, request: Request):
+            # F2: 用户令牌 per-user RBAC; USER 无 task:migrate → 403, ADMIN 有。
+            user_actor = _enforce_user_rbac(request, "/api/tasks/migrate", "POST")
             if not await _check_permission("master", "/api/tasks/migrate", "POST"):
                 raise HTTPException(status_code=403, detail="权限不足: task migrate")
             ok = await self.master.migrate_task(task_id)
             if not ok:
                 raise HTTPException(status_code=500, detail="任务迁移失败")
+            self._audit.log(
+                actor=user_actor or "master",
+                action="task_migrate",
+                path="/api/tasks/migrate",
+                method="POST",
+                node_id="",
+                result="ok",
+                detail=f"task_id={task_id}",
+            )
             return {"status": "ok", "task_id": task_id}
 
         # ── KV 缓存 ──
@@ -1175,6 +1260,189 @@ class MasterServer:
                 return {"alerts": alerts, "count": len(alerts)}
             except Exception as e:
                 return {"alerts": [], "error": str(e)}
+
+        # ── GAP-8 (Phase F2): 用户管理 CRUD ──
+        # 仅 ADMIN (user:manage 权限, check_user_path_access 把关)。
+        # 集群令牌无用户身份 → _enforce_user_rbac 返回 "" 不拦; 但用户管理是用户面能力,
+        # 集群令牌 (内部 HA/CLI) 不该建用户 → 额外守卫: 无 user_store 或无 user 身份 → 403/503。
+        # 令牌明文仅签发/轮换时返回一次 (与 UserStore 语义一致)。
+
+        def _require_user_store(request: Request):
+            """用户管理路由前置 — 须有 user_store + 用户令牌 (ADMIN) 身份。
+
+            返回已认证 actor (ADMIN user_id)。无 user_store → 503; 非用户令牌 → 403。
+            """
+            if self._user_store is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="用户管理未启用: 未配置 FUSION_USERS_FILE / users.json (单租户零配置模式)",
+                )
+            actor = _enforce_user_rbac(request, "/api/v1/users", "POST")
+            if not actor:
+                # 集群令牌调用户管理 — 内部流量无用户身份, 拒 (用户管理须 ADMIN 用户令牌)
+                self._audit.log(
+                    actor="",
+                    action="permission_deny",
+                    path="/api/v1/users",
+                    method="POST",
+                    result="denied",
+                    detail="用户管理须 ADMIN 用户令牌, 集群令牌无权",
+                )
+                raise HTTPException(status_code=403, detail="用户管理须 ADMIN 用户令牌")
+            return actor
+
+        @app.post("/api/v1/users")
+        async def create_user_route(req: UserCreateRequest, request: Request):
+            admin = _require_user_store(request)
+            try:
+                role = UserRole(req.role)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"非法角色: {req.role!r} (admin/user/viewer)")
+            try:
+                self._user_store.create_user(req.user_id, role, req.password)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            logger.info(f"用户创建: {req.user_id} role={role.value} (by {admin})")
+            self._audit.log(
+                actor=admin,
+                action="user_create",
+                path="/api/v1/users",
+                method="POST",
+                result="ok",
+                detail=f"user={req.user_id} role={role.value}",
+            )
+            return JSONResponse(
+                status_code=201,
+                content={"status": "ok", "user_id": req.user_id, "role": role.value},
+            )
+
+        @app.get("/api/v1/users")
+        async def list_users_route(request: Request):
+            if self._user_store is None:
+                raise HTTPException(status_code=503, detail="用户管理未启用")
+            _enforce_user_rbac(request, "/api/v1/users", "GET")
+            return {"users": self._user_store.list_users(), "total": len(self._user_store.list_users())}
+
+        @app.get("/api/v1/users/{user_id}")
+        async def get_user_route(user_id: str, request: Request):
+            if self._user_store is None:
+                raise HTTPException(status_code=503, detail="用户管理未启用")
+            _enforce_user_rbac(request, "/api/v1/users", "GET")
+            if not is_safe_path_segment(user_id):
+                raise HTTPException(status_code=400, detail="非法 user_id")
+            rec = self._user_store.get_user(user_id)
+            if rec is None:
+                raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+            # 不返回 token_hash/salt (敏感), 仅元信息 + 令牌列表 (tid/label/created_at)
+            return {
+                "user_id": rec.user_id,
+                "role": rec.role.value,
+                "created_at": rec.created_at,
+                "tokens": [
+                    {"tid": t.tid, "label": t.label, "created_at": t.created_at}
+                    for t in rec.tokens
+                ],
+            }
+
+        @app.delete("/api/v1/users/{user_id}")
+        async def delete_user_route(user_id: str, request: Request):
+            admin = _require_user_store(request)
+            if not is_safe_path_segment(user_id):
+                raise HTTPException(status_code=400, detail="非法 user_id")
+            if user_id == admin:
+                raise HTTPException(status_code=400, detail="不可删除自身账户")
+            ok = self._user_store.delete_user(user_id)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+            logger.info(f"用户删除: {user_id} (by {admin})")
+            self._audit.log(
+                actor=admin,
+                action="user_delete",
+                path="/api/v1/users",
+                method="DELETE",
+                result="ok",
+                detail=f"user={user_id}",
+            )
+            return {"status": "ok", "user_id": user_id}
+
+        @app.put("/api/v1/users/{user_id}/role")
+        async def update_user_role_route(user_id: str, req: UserRoleUpdateRequest, request: Request):
+            admin = _require_user_store(request)
+            try:
+                role = UserRole(req.role)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"非法角色: {req.role!r}")
+            ok = self._user_store.set_role(user_id, role)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+            logger.info(f"用户角色变更: {user_id} → {role.value} (by {admin})")
+            self._audit.log(
+                actor=admin,
+                action="user_role_update",
+                path="/api/v1/users",
+                method="PUT",
+                result="ok",
+                detail=f"user={user_id} role={role.value}",
+            )
+            return {"status": "ok", "user_id": user_id, "role": role.value}
+
+        @app.post("/api/v1/users/{user_id}/tokens")
+        async def issue_user_token_route(user_id: str, req: UserTokenIssueRequest, request: Request):
+            admin = _require_user_store(request)
+            if not is_safe_path_segment(user_id):
+                raise HTTPException(status_code=400, detail="非法 user_id")
+            try:
+                token = self._user_store.issue_token(user_id, label=req.label)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+            logger.info(f"令牌签发: user={user_id} label={req.label!r} (by {admin})")
+            self._audit.log(
+                actor=admin,
+                action="token_issue",
+                path="/api/v1/users",
+                method="POST",
+                result="ok",
+                detail=f"user={user_id} label={req.label!r}",
+            )
+            # 明文仅此一次返回 — 不记审计 (防日志泄露令牌)
+            return {"status": "ok", "user_id": user_id, "token": token, "token_shown_once": True}
+
+        @app.delete("/api/v1/users/{user_id}/tokens/{tid}")
+        async def revoke_user_token_route(user_id: str, tid: str, request: Request):
+            admin = _require_user_store(request)
+            ok = self._user_store.revoke_token(user_id, tid)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"令牌不存在: user={user_id} tid={tid}")
+            logger.info(f"令牌吊销: user={user_id} tid={tid} (by {admin})")
+            self._audit.log(
+                actor=admin,
+                action="token_revoke",
+                path="/api/v1/users",
+                method="DELETE",
+                result="ok",
+                detail=f"user={user_id} tid={tid}",
+            )
+            return {"status": "ok", "user_id": user_id, "tid": tid}
+
+        @app.post("/api/v1/users/{user_id}/tokens/rotate")
+        async def rotate_user_token_route(user_id: str, req: UserTokenIssueRequest, request: Request):
+            admin = _require_user_store(request)
+            if not is_safe_path_segment(user_id):
+                raise HTTPException(status_code=400, detail="非法 user_id")
+            try:
+                token = self._user_store.rotate_user_token(user_id, label=req.label)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+            logger.info(f"令牌轮换: user={user_id} (by {admin}) — 旧令牌保留, 需另调吊销")
+            self._audit.log(
+                actor=admin,
+                action="token_rotate",
+                path="/api/v1/users",
+                method="POST",
+                result="ok",
+                detail=f"user={user_id} label={req.label!r}",
+            )
+            return {"status": "ok", "user_id": user_id, "token": token, "token_shown_once": True}
 
         # ── P2-20 配置热加载 (审计 §6.8) ──
         # 重读 config.json + 重应用运行时可调字段; 须重启字段 (端口/ha_config/mdns) 仅提示不生效。

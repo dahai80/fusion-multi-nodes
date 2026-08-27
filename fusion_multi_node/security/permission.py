@@ -267,6 +267,18 @@ def check_user_path_access(role: UserRole, path: str, method: str = "GET") -> bo
             if m == method and (path == p or path.startswith(p + "/")):
                 perm = pm
                 break
+    # F2: 动态 task 子路径 /api/tasks/{task_id}/<op> — op 在尾部, 非固定前缀。
+    # 前缀匹配够不到 (path=/api/tasks/ghost/cancel 不 startswith /api/tasks/cancel/)。
+    # 按 task 父路径 + 尾部 op 联合判定: /api/tasks 分段后末段为 cancel/migrate/degrade 即命中。
+    if perm is None and path.startswith("/api/tasks/"):
+        tail = path.rsplit("/", 1)[-1]
+        op_perm = {
+            "cancel": "task:cancel",
+            "migrate": "task:migrate",
+            "degrade": "task:degrade",
+        }.get(tail)
+        if op_perm is not None:
+            perm = op_perm
     if perm is None:
         return True
     allowed = _USER_ROLE_PERMISSIONS.get(role, frozenset())
