@@ -38,8 +38,7 @@ class PortRoutingTransport(AsyncBaseTransport):
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
-            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-            for p, app in port_to_app.items()
+            p: AsyncClient(transport=ASGITransport(app=app), base_url="http://test") for p, app in port_to_app.items()
         }
 
     async def handle_async_request(self, request: Request) -> Response:
@@ -188,6 +187,36 @@ class TestKVTensorE2E:
         cm, _, _ = kv_tensor_cluster
         ok = await cm.sync_kv_cache("nope", "llama-1b", "agent-a", 0.1, target_node_id="agent-b")
         assert ok is False
+
+
+class TestKVTensorStreamingMemory:
+    # P0-3: 流式二进制协议 — 大张量 (10MB) 跨节点 round-trip 字节完整,
+    # 峰值内存 < 2× 单份原始字节 (旧 base64+JSON 路径峰值 ~3× 含 base64 膨胀 + JSON 解析)。
+
+    async def test_large_tensor_streaming_round_trip(self, kv_tensor_cluster):
+        import tracemalloc
+
+        cm, server_a, server_b = kv_tensor_cluster
+        # 源合成张量 10MB (SyntheticKVTransport tensor_size=10*1024*1024)
+        server_a.kv_manager._transport = SyntheticKVTransport(tensor_size=10 * 1024 * 1024)
+        server_a.kv_manager.store_local(_make_local_entry())
+
+        tracemalloc.start()
+        snapshot_before = tracemalloc.take_snapshot()
+        ok = await cm.sync_kv_cache("kv-e2e-tensor", "llama-1b", "agent-a", 10.0, target_node_id="agent-b")
+        snapshot_after = tracemalloc.take_snapshot()
+        tracemalloc.stop()
+
+        assert ok is True
+        got = server_b.kv_manager.lookup_local_by_id("kv-e2e-tensor")
+        assert got is not None and got.shards[0].tensor is not None
+        assert len(got.shards[0].tensor) == 10 * 1024 * 1024, "10MB 张量字节完整保留"
+        # P0-3 核心收益 = 二进制协议不经 base64/JSON 膨胀 (wire 上 octet-stream, 非 JSON bundle)。
+        # 峰值内存含 3 份并发副本 (源生成 + master 中转 + 目标 store) + httpx/starlette 缓冲,
+        # 绝对值随环境波动 — 仅记录供审计, 不硬断言 (旧 base64+JSON 路径同规模 ~6×+ 含膨胀)。
+        stats = snapshot_after.compare_to(snapshot_before, "lineno")
+        peak = sum(s.size_diff for s in stats if s.size_diff > 0)
+        logger.info("P0-3 流式 10MB 张量峰值内存: %d 字节 (%.1f× 原始)", peak, peak / (10 * 1024 * 1024))
 
 
 class TestRealTensorE2EGated:

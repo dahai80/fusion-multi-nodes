@@ -141,8 +141,14 @@ class TestClusterMaster:
         # P0-8: 注册一节点 → _collect_observability_locked 记录 mem_used_gb/active_tasks
         master = ClusterMaster()
         await master.start(with_server=False, with_mdns=False)
-        info = NodeInfo(node_id="n1", hostname="mac1", ip_address="10.0.0.1", port=11458,
-                        total_memory_gb=64.0, available_memory_gb=48.0)
+        info = NodeInfo(
+            node_id="n1",
+            hostname="mac1",
+            ip_address="10.0.0.1",
+            port=11458,
+            total_memory_gb=64.0,
+            available_memory_gb=48.0,
+        )
         await master.register_node(info)
         await master._collect_observability_locked()
         obs = master._observability
@@ -935,3 +941,122 @@ class TestClusterMaster:
         mem = master._estimate_memory(task)
         assert isinstance(mem, float)
         assert mem >= 0
+
+
+class TestP01LoopFaultTolerance:
+    """P0-1: 背景循环逐次异常隔离 — 单轮抛非 CancelledError 不杀整个循环。"""
+
+    @pytest.mark.asyncio
+    async def test_persist_loop_survives_persist_failure(self):
+        import fusion_multi_node.master.cluster_master as cm
+
+        master = ClusterMaster()
+        calls = {"n": 0}
+
+        async def boom():
+            calls["n"] += 1
+            raise RuntimeError("模拟写盘失败")
+
+        orig_persist = master._persist_tasks
+        master._persist_tasks = boom
+        orig_sleep = cm.asyncio.sleep
+
+        async def fast_sleep(_d):
+            await orig_sleep(0)
+
+        cm.asyncio.sleep = fast_sleep
+        try:
+            await master.start(with_server=False, with_mdns=False)
+            await orig_sleep(0.05)
+            assert master._persist_task is not None
+            assert not master._persist_task.done(), "持久化循环不应被异常杀死"
+            assert calls["n"] >= 1, "循环体应已执行至少一次"
+        finally:
+            cm.asyncio.sleep = orig_sleep
+            master._persist_tasks = orig_persist
+            await master.stop()
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_survives_assign_failure(self):
+        import fusion_multi_node.master.cluster_master as cm
+
+        master = ClusterMaster()
+        task = ClusterTask(task_id="r1", name="infer", mode=ParallelMode.DATA, model_name="m")
+        master._pending_retry.append(task)
+        calls = {"n": 0}
+
+        async def boom(_t):
+            calls["n"] += 1
+            raise RuntimeError("模拟派发失败")
+
+        orig_assign = master.assign_task
+        master.assign_task = boom
+        orig_sleep = cm.asyncio.sleep
+
+        async def fast_sleep(_d):
+            await orig_sleep(0)
+
+        cm.asyncio.sleep = fast_sleep
+        try:
+            await master.start(with_server=False, with_mdns=False)
+            await orig_sleep(0.05)
+            assert not master._retry_task.done(), "重试循环不应被异常杀死"
+            assert calls["n"] >= 1, "循环体应已执行至少一次"
+        finally:
+            cm.asyncio.sleep = orig_sleep
+            master.assign_task = orig_assign
+            await master.stop()
+
+    @pytest.mark.asyncio
+    async def test_health_check_loop_survives_timeout_failure(self):
+        import fusion_multi_node.master.cluster_master as cm
+
+        master = ClusterMaster()
+
+        async def boom():
+            raise RuntimeError("模拟超时检查失败")
+
+        master.check_timeouts = boom
+        orig_sleep = cm.asyncio.sleep
+
+        async def fast_sleep(_d):
+            await orig_sleep(0)
+
+        cm.asyncio.sleep = fast_sleep
+        try:
+            await master.start(with_server=False, with_mdns=False)
+            await orig_sleep(0.05)
+            assert not master._health_task.done(), "健康检查循环不应被异常杀死"
+        finally:
+            cm.asyncio.sleep = orig_sleep
+            await master.stop()
+
+    @pytest.mark.asyncio
+    async def test_health_check_loop_survives_refresh_failure(self):
+        import fusion_multi_node.master.cluster_master as cm
+
+        master = ClusterMaster()
+
+        async def ok():
+            pass
+
+        async def boom():
+            raise RuntimeError("模拟刷新失败")
+
+        master.check_timeouts = ok
+        master._refresh_node_statuses = boom
+        master._cleanup_completed_tasks = ok
+        master._cleanup_offline_nodes = ok
+        orig_sleep = cm.asyncio.sleep
+
+        async def fast_sleep(_d):
+            await orig_sleep(0)
+
+        cm.asyncio.sleep = fast_sleep
+        try:
+            await master.start(with_server=False, with_mdns=False)
+            await orig_sleep(0.05)
+            assert not master._health_task.done(), "健康检查循环不应被刷新异常杀死"
+        finally:
+            cm.asyncio.sleep = orig_sleep
+            await master.stop()

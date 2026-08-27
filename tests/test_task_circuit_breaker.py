@@ -137,6 +137,78 @@ class TestDispatchFaultReports:
         assert not master._fault_counts.get("n1"), "成功派发不应累计故障"
 
 
+class _DedupClient:
+    """P0-2: agent 去重拦截 — 200+ok, result 含 dedup_blocked=True (master 重派同 task_id)。"""
+
+    is_closed = False
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        return _Resp(200, {"status": "ok", "result": {"dedup_blocked": True, "error": "重复派发, 任务已在运行"}})
+
+
+class _SandboxClient:
+    """P0-2: agent 沙箱拒绝 — 200+ok, result 含 sandbox_blocked=True (任务携带禁路径)。"""
+
+    is_closed = False
+
+    async def post(self, url, json=None, headers=None, timeout=None):
+        return _Resp(200, {"status": "ok", "result": {"sandbox_blocked": True, "error": "路径访问被拒: /etc"}})
+
+
+class TestP02DedupSandboxNoFault:
+    """P0-2: dedup_blocked/sandbox_blocked 误归 logic_fail + report_fault 修复。
+
+    修复前: 二者走 'error' in r → logic_fail + report_fault → 健康节点累计 3 fault/60s → ban 300s。
+    修复后: 独立分类 — 不 report_fault (节点健康), 不进 transient/logic (不重试回同节点),
+    任务直接 FAILED (master 自身重派/配置问题, 重试同节点同任务大概率复现)。
+    """
+
+    @pytest.mark.asyncio
+    async def test_dedup_blocked_no_fault_no_ban(self):
+        master = ClusterMaster()
+        await master.register_node(_node("n1"))
+        master._dispatch_token = "test-token"
+        master._dispatch_http = _DedupClient()
+        task = _plant(master, _task("n1"))
+
+        await master._dispatch_task(task)
+
+        assert not master._fault_counts.get("n1"), "去重阻塞非节点故障, 不应累计故障"
+        assert not master.is_node_banned("n1"), "去重阻塞不应 ban 健康节点"
+        assert task.status == TaskStatus.FAILED, "去重阻塞应 FAILED (master 重派问题, 不重试)"
+        assert task not in master._pending_retry, "去重阻塞不应入重试队列 (重试回同节点复现)"
+
+    @pytest.mark.asyncio
+    async def test_sandbox_blocked_no_fault_no_ban(self):
+        master = ClusterMaster()
+        await master.register_node(_node("n1"))
+        master._dispatch_token = "test-token"
+        master._dispatch_http = _SandboxClient()
+        task = _plant(master, _task("n1"))
+
+        await master._dispatch_task(task)
+
+        assert not master._fault_counts.get("n1"), "沙箱阻塞非节点故障, 不应累计故障"
+        assert not master.is_node_banned("n1"), "沙箱阻塞不应 ban 健康节点"
+        assert task.status == TaskStatus.FAILED, "沙箱阻塞应 FAILED (配置问题, 不重试)"
+        assert task not in master._pending_retry, "沙箱阻塞不应入重试队列"
+
+    @pytest.mark.asyncio
+    async def test_repeated_dedup_never_bans(self):
+        """对照 test_repeated_dispatch_failure_bans_node: 重复去重达阈值仍不 ban (非故障)。"""
+        master = ClusterMaster()
+        await master.register_node(_node("n1"))
+        master._dispatch_token = "test-token"
+        master._dispatch_http = _DedupClient()
+
+        for i in range(master._FAULT_THRESHOLD * 2):
+            t = _plant(master, _task("n1", task_id=f"dup{i}"))
+            await master._dispatch_task(t)
+
+        assert not master.is_node_banned("n1"), "反复去重达 2× 阈值仍不应 ban"
+        assert not master._fault_counts.get("n1"), "反复去重零故障计数"
+
+
 class TestSelectNodesSkipsBanned:
     """S1 gap2: select_nodes 跳过 ban 期内节点。"""
 

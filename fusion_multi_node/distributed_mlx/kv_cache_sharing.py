@@ -488,9 +488,7 @@ class KVSharingManager:
         # 为缺张量的分片经后端产出 (合成/MLX); 已有张量的分片直传 (避免重复生成)。
         for shard in entry.shards:
             if shard.tensor is None:
-                tensor = await self._transport.export_tensor(
-                    cache_id, shard.model_name, node_id
-                )
+                tensor = await self._transport.export_tensor(cache_id, shard.model_name, node_id)
                 if tensor is not None:
                     shard.tensor = tensor
                     shard.is_compressed = self.enable_compression
@@ -501,7 +499,7 @@ class KVSharingManager:
         bundle = self._serialize_entry(entry)
         logger.info(
             f"GAP-7 KV 导出 bundle: cache_id={cache_id} model={model_name} "
-            f"shards={len(entry.shards)} size={entry.total_size_bytes}B backend={getattr(self._transport,'name','?')}"
+            f"shards={len(entry.shards)} size={entry.total_size_bytes}B backend={getattr(self._transport, 'name', '?')}"
         )
         return bundle
 
@@ -520,19 +518,158 @@ class KVSharingManager:
         # 经后端消费张量 (MLX 装本地引擎; 合成 no-op) — 不阻塞存储。
         for shard in entry.shards:
             if shard.tensor is not None:
-                await self._transport.import_tensor(
-                    entry.cache_id, shard.model_name, shard.tensor, node_id
-                )
+                await self._transport.import_tensor(entry.cache_id, shard.model_name, shard.tensor, node_id)
         stored = self.store_local(entry)
         if not stored:
             logger.warning(
-                f"GAP-7 KV 导入 store_local 拒绝 (预算超限): cache_id={entry.cache_id} "
-                f"size={entry.total_size_bytes}B"
+                f"GAP-7 KV 导入 store_local 拒绝 (预算超限): cache_id={entry.cache_id} size={entry.total_size_bytes}B"
             )
             return False
         logger.info(
             f"GAP-7 KV 导入成功: cache_id={entry.cache_id} model={entry.model_name} "
             f"shards={len(entry.shards)} size={entry.total_size_bytes}B"
+        )
+        return True
+
+    # ── P0-3 (审计 §4.3): KV 张量流式二进制协议 — 替代 base64+JSON 单 POST 全量物化 ──
+    # 旧 _serialize_entry (base64 进 JSON) 把整 bundle 物化进内存, 500MB 张量 → JSON 解析峰值 1.5GB。
+    # 流式协议: 头部 JSON 元数据 (无张量) + 各分片原始张量字节顺序拼接, 逐块产/消, 不物化整 bundle。
+    # 格式:
+    #   8B magic b"FMUKVT01" + 4B big-endian uint32 metadata_len + metadata JSON bytes
+    #   metadata = {"entry": <entry 字段无 shards>, "shards": [{<shard 字段无 tensor>, "tensor_len": N}]}
+    #   随后顺序各 shard 的 tensor_len 原始字节 (len=0 则无负载, 旧对端降级 JSON)。
+    KV_STREAM_MAGIC = b"FMUKVT01"
+    KV_STREAM_VERSION = 1
+
+    async def export_stream(self, cache_id: str, model_name: str):
+        """源节点流式导出 KV 缓存 (含张量) — async generator 逐块产字节, 不物化整 bundle。
+
+        元数据头 JSON (无张量) 先 yield, 再逐分片经后端产张量后按块 yield 原始字节。
+        比旧 export_bundle (base64+JSON 全量物化) 峰值内存大幅下降, 真 8B 模型 (200-500MB) 可行。
+        """
+        entry = self.lookup_local_by_id(cache_id)
+        if entry is None:
+            logger.warning(f"P0-3 KV 流式导出: cache_id={cache_id} 本地未找到")
+            return
+        node_id = self._node_id_for_export(entry)
+        # 先逐分片经后端产张量 (缺则合成/MLX), 收集元数据 + 张量字节 (张量小可一次产, 大则优化为分块)
+        shard_metas = []
+        tensors = []
+        for shard in entry.shards:
+            if shard.tensor is None:
+                tensor = await self._transport.export_tensor(cache_id, shard.model_name, node_id)
+                if tensor is not None:
+                    shard.tensor = tensor
+                    shard.is_compressed = self.enable_compression
+                    shard.size_bytes += len(tensor)
+            t = shard.tensor or b""
+            shard_d = {k: getattr(shard, k) for k in ALLOWED_SHARD_KEYS if hasattr(shard, k)}
+            shard_d["tensor_len"] = len(t)
+            shard_d[COMPRESS_METHOD_KEY] = "caveman" if shard.is_compressed else "none"
+            shard_metas.append(shard_d)
+            tensors.append(t)
+        self._recompute_entry_size(entry)
+        metadata = {
+            "version": self.KV_STREAM_VERSION,
+            "entry": {
+                "cache_id": entry.cache_id,
+                "model_name": entry.model_name,
+                "prompt_hash": entry.prompt_hash,
+                "prompt_prefix": entry.prompt_prefix,
+                "total_tokens": entry.total_tokens,
+                "total_size_bytes": entry.total_size_bytes,
+                "created_at": entry.created_at,
+                "ttl_seconds": entry.ttl_seconds,
+                "access_count": entry.access_count,
+            },
+            "shards": shard_metas,
+        }
+        meta_bytes = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+        # 头: magic + 元数据长度 (big-endian uint32) + 元数据
+        yield self.KV_STREAM_MAGIC + len(meta_bytes).to_bytes(4, "big") + meta_bytes
+        # 逐分片张量字节 (大张量可分块, 此处整块 yield — 合成/中等张量足够; 真大张量优化留上游 #650)
+        for t in tensors:
+            if t:
+                yield t
+        logger.info(
+            f"P0-3 KV 流式导出: cache_id={cache_id} shards={len(entry.shards)} "
+            f"size={entry.total_size_bytes}B backend={getattr(self._transport, 'name', '?')}"
+        )
+
+    async def import_stream(self, header_and_meta: bytes, tensor_body_aiter):
+        """目标节点流式导入 — 消费 export_stream 产出的字节流并本地存储。
+
+        header_and_meta: 已读入的 magic+长度+元数据 (调用方先读头部确定元数据长度)。
+        tensor_body_aiter: 剩余张量字节 async iterator (逐块产), 按元数据 shard 顺序消费。
+        返回 True = 已存 (store_local 预算门控); False = 解析失败或预算超限。
+        """
+        if not header_and_meta.startswith(self.KV_STREAM_MAGIC):
+            logger.warning("P0-3 KV 流式导入: magic 头不匹配, 拒绝")
+            return False
+        try:
+            meta_len = int.from_bytes(header_and_meta[8:12], "big")
+            meta_bytes = header_and_meta[12 : 12 + meta_len]
+            metadata = json.loads(meta_bytes.decode("utf-8"))
+        except Exception as e:
+            logger.error(f"P0-3 KV 流式导入: 元数据解析失败: {e}")
+            return False
+        shard_metas = metadata.get("shards", [])
+        # 按顺序逐分片从 tensor_body_aiter 读 tensor_len 字节, 流式不物化全部
+        shard_tensors = []
+        async_gen = tensor_body_aiter.__aiter__() if hasattr(tensor_body_aiter, "__aiter__") else tensor_body_aiter
+        try:
+            for sm in shard_metas:
+                need = int(sm.get("tensor_len", 0))
+                if need <= 0:
+                    shard_tensors.append(None)
+                    continue
+                got = bytearray()
+                while len(got) < need:
+                    try:
+                        chunk = await async_gen.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    if not chunk:
+                        continue
+                    got.extend(chunk)
+                shard_tensors.append(bytes(got[:need]) if len(got) >= need else None)
+        except Exception as e:
+            logger.error(f"P0-3 KV 流式导入: 张量流消费失败: {e}")
+            return False
+        # 重建 entry + 经后端装张量 (MLX 装本地引擎 / 合成 no-op) + store_local
+        shards = []
+        for sm, t in zip(shard_metas, shard_tensors):
+            filtered = {k: v for k, v in sm.items() if k in ALLOWED_SHARD_KEYS}
+            if t is not None:
+                filtered["tensor"] = t
+                filtered["is_compressed"] = sm.get(COMPRESS_METHOD_KEY) == "caveman"
+            shards.append(KVShard(**filtered))
+        entry_meta = metadata.get("entry", {})
+        entry = KVCacheEntry(
+            cache_id=entry_meta.get("cache_id", ""),
+            model_name=entry_meta.get("model_name", ""),
+            prompt_hash=entry_meta.get("prompt_hash", ""),
+            prompt_prefix=entry_meta.get("prompt_prefix", ""),
+            shards=shards,
+            total_tokens=entry_meta.get("total_tokens", 0),
+            total_size_bytes=entry_meta.get("total_size_bytes", 0),
+            created_at=entry_meta.get("created_at", time.time()),
+            ttl_seconds=entry_meta.get("ttl_seconds", 3600.0),
+            access_count=entry_meta.get("access_count", 0),
+        )
+        node_id = self._node_id_for_export(entry)
+        for shard in entry.shards:
+            if shard.tensor is not None:
+                await self._transport.import_tensor(entry.cache_id, shard.model_name, shard.tensor, node_id)
+        stored = self.store_local(entry)
+        if not stored:
+            logger.warning(
+                f"P0-3 KV 流式导入 store_local 拒绝 (预算超限): cache_id={entry.cache_id} "
+                f"size={entry.total_size_bytes}B"
+            )
+            return False
+        logger.info(
+            f"P0-3 KV 流式导入成功: cache_id={entry.cache_id} shards={len(entry.shards)} size={entry.total_size_bytes}B"
         )
         return True
 

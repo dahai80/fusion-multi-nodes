@@ -458,8 +458,8 @@ class ClusterMaster:
             snapshot = self._persist_tasks_locked()
             # HA: leader 构建推送目标 (锁内构建 payload, 锁外异步发送)
             targets = self._sync_tasks_to_standbys_locked()
-        # P1-11: 落盘 (fsync) 已移出 _tasks_lock 持有区。
-        self._write_task_store(snapshot)
+        # P1-11: 落盘 (fsync) 已移出 _tasks_lock 持有区。P0-4: fsync 阻塞事件循环, 移 to_thread。
+        await asyncio.to_thread(self._write_task_store, snapshot)
         if targets:
             await self._push_sync_to_standbys(targets)
 
@@ -940,8 +940,8 @@ class ClusterMaster:
                     node.active_tasks += 1
                 self._emit_task_event(task, "running")
 
-        # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。
-        self._write_task_store(_snapshot)
+        # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。P0-4: fsync 阻塞事件循环, 移 to_thread。
+        await asyncio.to_thread(self._write_task_store, _snapshot)
         logger.info(f"任务分配: {task.name} → {[n.hostname for n in nodes]}")
         self._trigger_dispatch(task)
         return True
@@ -1039,6 +1039,12 @@ class ClusterMaster:
                 errors.append(f"{nid}: 限流 (rate_limited): {r.get('error', '')}")
                 transient_fail = True
                 logger.info(f"节点 {nid} 限流瞬时失败 (可重试, 不计熔断): {r.get('error', '')[:120]}")
+            elif isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
+                # P0-2: 去重/沙箱阻塞 = master 自身重派或配置问题, 非节点故障;
+                # 不 report_fault (健康节点不误 ban), 不进 logic_fail/transient_fail (不重试回同节点)。
+                reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
+                errors.append(f"{nid}: {reason}: {r.get('error', '')}")
+                logger.info(f"节点 {nid} {reason} ({task.task_id}), 不计熔断不重试: {r.get('error', '')[:120]}")
             elif isinstance(r, dict) and "error" in r:
                 # C9: agent 内部错误 (OOM/坏模型) 返 200+ok+error — 对熔断器可见
                 errors.append(f"{nid}: {r['error']}")
@@ -1120,6 +1126,11 @@ class ClusterMaster:
                 await self._finalize_task(
                     task, success=False, error=f"流水线步骤 {nid} 限流: {r.get('error', '')}", retryable=True
                 )
+                return
+            if isinstance(r, dict) and (r.get("dedup_blocked") or r.get("sandbox_blocked")):
+                # P0-2: 流水线段去重/沙箱阻塞 = 非节点故障, 不 report_fault, 不重试 (重试回同段同任务大概率复现去重)。
+                reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
+                await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} {reason}: {r.get('error', '')}")
                 return
             if isinstance(r, dict) and "error" in r:
                 await self._finalize_task(task, success=False, error=f"流水线步骤 {nid}: {r['error']}")
@@ -1287,7 +1298,7 @@ class ClusterMaster:
                     logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
                     self._emit_task_event(t, "failed", error=error)
         if _snapshot is not None:
-            self._write_task_store(_snapshot)
+            await asyncio.to_thread(self._write_task_store, _snapshot)
 
     async def _snapshot_nodes(self, node_ids: list[str]) -> dict[str, NodeInfo]:
         """快照节点 (深拷贝引用, 派发期间不被 heartbeat 改字段影响)。"""
@@ -1373,7 +1384,7 @@ class ClusterMaster:
 
         # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。
         if _snapshot is not None:
-            self._write_task_store(_snapshot)
+            await asyncio.to_thread(self._write_task_store, _snapshot)
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
         # P1-H: 取消释放节点/配额 → 排空队列。
         await self._drain_pending_locked()
@@ -1638,53 +1649,80 @@ class ClusterMaster:
         # 超时随张量大小缩放 (P1-13 模式), 下限 30s
         http_timeout = max(30.0, size_mb * 2.0 + 30.0)
 
-        # 4. 源 agent /api/kv/export 取含张量 bundle
+        # 4. 源 agent /api/kv/export-stream 流式取含张量 bundle (P0-3 审计 §4.3)
+        #    旧 /api/kv/export base64+JSON 全量物化峰值 1.5GB; 流式元数据头+张量原始字节不物化整 bundle。
+        #    404 (旧对端无流式路由) → 降级 JSON export/import (向后兼容)。
+        src_stream_url = build_safe_url(mtls_scheme(), src_node.ip_address, src_node.port, "/api/kv/export-stream")
         src_url = build_safe_url(mtls_scheme(), src_node.ip_address, src_node.port, "/api/kv/export")
         try:
             exp_resp = await client.post(
-                src_url,
+                src_stream_url,
                 json={"cache_id": cache_id, "model_name": model_name},
                 headers=headers,
                 timeout=http_timeout,
             )
-            if exp_resp.status_code != 200:
-                logger.warning(
-                    f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: "
-                    f"{exp_resp.text[:200]}"
+            if exp_resp.status_code == 404:
+                # 旧对端无流式路由 → 降级 JSON 全量 (向后兼容, 小张量可行)
+                logger.info(f"GAP-7 KV 同步: 源 {src_id} 无流式路由, 降级 JSON export")
+                exp_resp = await client.post(
+                    src_url,
+                    json={"cache_id": cache_id, "model_name": model_name},
+                    headers=headers,
+                    timeout=http_timeout,
                 )
-                return False
-            bundle = exp_resp.json().get("bundle")
-            if not bundle:
-                logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 返回空 bundle")
-                return False
+                if exp_resp.status_code != 200:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 源 {src_id} export HTTP {exp_resp.status_code}: {exp_resp.text[:200]}"
+                    )
+                    return False
+                bundle = exp_resp.json().get("bundle")
+                if not bundle:
+                    logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 返回空 bundle")
+                    return False
+                # 降级: 目标走 JSON import
+                tgt_url = build_safe_url(mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import")
+                imp_resp = await client.post(
+                    tgt_url,
+                    json={"bundle": bundle},
+                    headers=headers,
+                    timeout=http_timeout,
+                )
+                if imp_resp.status_code != 200 or imp_resp.json().get("stored", 0) != 1:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 目标 {tgt_node.node_id} JSON import 失败: "
+                        f"{imp_resp.status_code} {imp_resp.text[:200]}"
+                    )
+                    return False
+            else:
+                if exp_resp.status_code != 200:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 源 {src_id} export-stream HTTP {exp_resp.status_code}: {exp_resp.text[:200]}"
+                    )
+                    return False
+                # 5. 二进制中转: 源 export-stream 原始字节 → 目标 import-stream 请求体。
+                #    agent 侧 export_stream 产原始张量字节 (不经 base64+JSON 物化),
+                #    import_stream 流式消费 (不经整 bundle JSON 解析), 降峰值内存。
+                #    master 2 跳 HTTP 中转暂持整段二进制 (无真字节管道原语) — 但已无 base64/JSON 膨胀,
+                #    峰值 = 单份原始字节 (500MB) 而非旧 JSON 解析峰值 (1.5GB)。
+                tgt_stream_url = build_safe_url(
+                    mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import-stream"
+                )
+                src_bytes = await exp_resp.aread()
+
+                imp_resp = await client.post(
+                    tgt_stream_url,
+                    content=src_bytes,
+                    headers={**headers, "Content-Type": "application/octet-stream"},
+                    timeout=http_timeout,
+                )
+                if imp_resp.status_code != 200 or imp_resp.json().get("stored", 0) != 1:
+                    logger.warning(
+                        f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import-stream 失败: "
+                        f"{imp_resp.status_code} {imp_resp.text[:200]}"
+                    )
+                    return False
         except Exception as e:
             logger.warning(f"GAP-7 KV 同步: 源 {src_id} export 异常: {e}")
-            return False
-
-        # 5. 目标 agent /api/kv/import 存入 (预算门在 store_local)
-        tgt_url = build_safe_url(mtls_scheme(), tgt_node.ip_address, tgt_node.port, "/api/kv/import")
-        try:
-            imp_resp = await client.post(
-                tgt_url,
-                json={"bundle": bundle},
-                headers=headers,
-                timeout=http_timeout,
-            )
-            if imp_resp.status_code != 200:
-                logger.warning(
-                    f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import HTTP {imp_resp.status_code}: "
-                    f"{imp_resp.text[:200]}"
-                )
-                return False
-            stored = imp_resp.json().get("stored", 0)
-            if stored != 1:
-                logger.warning(
-                    f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import 预算拒存 (stored=0), "
-                    f"cache_id={cache_id}"
-                )
-                return False
-        except Exception as e:
-            logger.warning(f"GAP-7 KV 同步: 目标 {tgt_node.node_id} import 异常: {e}")
             return False
 
         # 6. 更新 master 元数据 — 记录目标节点持有副本
@@ -1708,10 +1746,7 @@ class ClusterMaster:
                     for cid, _ in oldest:
                         del self.kv_cache[cid]
 
-        logger.info(
-            f"GAP-7 KV 张量同步成功: cache_id={cache_id} {src_id}→{tgt_node.node_id} "
-            f"size={size_mb:.1f}MB"
-        )
+        logger.info(f"GAP-7 KV 张量同步成功: cache_id={cache_id} {src_id}→{tgt_node.node_id} size={size_mb:.1f}MB")
         return True
 
     # ── M3-03 选举配置 ──
@@ -1852,7 +1887,7 @@ class ClusterMaster:
                 _snapshot = self._persist_tasks_locked()
         # P1-11: 落盘在 _tasks_lock 释放后。
         if _snapshot is not None:
-            self._write_task_store(_snapshot)
+            await asyncio.to_thread(self._write_task_store, _snapshot)
         if merged:
             logger.info(f"HA 同步接收 {merged} 任务 (standby 合并落盘)")
         return merged
@@ -2133,6 +2168,45 @@ class ClusterMaster:
 
     # ── 生命周期 ──
 
+    def _register_alert_webhook(self) -> None:
+        # P0-5 (审计 §5.6): 告警无出站通道, on_alert 零生产注册 → 节点掉线/内存告警只进 deque,
+        # 运维须轮询 /api/v1/observability/alerts。读 env FUSION_ALERT_WEBHOOK_URL,
+        # 非空则注册 handler: Alert → fire-and-forget asyncio.create_task (不阻塞 create_alert 同步路径),
+        # 内部 to_thread 包 httpx POST, 失败 logger.warning 不拖垮告警链。
+        webhook_url = os.environ.get("FUSION_ALERT_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            logger.info("未配告警 webhook (FUSION_ALERT_WEBHOOK_URL), 告警仅留内存 deque")
+            return
+        logger.info(f"P0-5 告警 webhook 出站通道已注册: {webhook_url}")
+
+        def _webhook_handler(alert: Any) -> None:
+            # 同步 handler (create_alert 内调用) — 仅派发 fire-and-forget 任务即返, 不阻塞。
+            payload = {
+                "alert_id": alert.alert_id,
+                "severity": alert.severity,
+                "title": alert.title,
+                "message": alert.message,
+                "node_id": alert.node_id,
+                "created_at": alert.created_at,
+                "source": "fusion-multi-node",
+            }
+            asyncio.create_task(self._post_alert_webhook(webhook_url, payload))
+
+        self._observability.on_alert(_webhook_handler)
+
+    async def _post_alert_webhook(self, url: str, payload: dict[str, Any]) -> None:
+        # fire-and-forget POST — to_thread 避 httpx 同步阻塞, 失败不抛 (告警链不被拖垮)。
+        def _post() -> None:
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code >= 400:
+                        logger.warning(f"告警 webhook 返回 {resp.status_code}: {resp.text[:200]}")
+            except Exception as e:
+                logger.warning(f"告警 webhook 发送失败: {e}")
+
+        await asyncio.to_thread(_post)
+
     async def start(
         self,
         with_server: bool = True,
@@ -2175,6 +2249,8 @@ class ClusterMaster:
             self._observability = ClusterObservability()
         await self._observability.start()
         logger.info("P0-8 Observability 已接线 (周期采集 + 告警规则)")
+        # P0-5: 告警出站通道 — observability 接线后注册 webhook handler (env 门控)。
+        self._register_alert_webhook()
 
         # P4 HA 选举接线 — config 门控, 单 Master 默认不启用
         if ha_config and ha_config.get("enabled") and ha_config.get("node_id") and ha_config.get("peers"):
@@ -2312,7 +2388,13 @@ class ClusterMaster:
         try:
             while self._running:
                 await asyncio.sleep(15)
-                await self._persist_tasks()
+                # P0-1: 逐次异常隔离, 单轮写盘失败不杀整个循环 (违 Rule 12 静默停滞)。
+                try:
+                    await self._persist_tasks()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"持久化循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -2323,12 +2405,18 @@ class ClusterMaster:
                 await asyncio.sleep(30)
                 if not self._pending_retry:
                     continue
-                retry_tasks = self._pending_retry[:]
-                self._pending_retry.clear()
-                for task in retry_tasks:
-                    ok = await self.assign_task(task)
-                    if not ok:
-                        self._enqueue_retry(task)
+                # P0-1: 逐次异常隔离, 单个任务重试失败不杀循环。
+                try:
+                    retry_tasks = self._pending_retry[:]
+                    self._pending_retry.clear()
+                    for task in retry_tasks:
+                        ok = await self.assign_task(task)
+                        if not ok:
+                            self._enqueue_retry(task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"重试循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -2366,16 +2454,22 @@ class ClusterMaster:
         try:
             while self._running:
                 await asyncio.sleep(10)
-                await self.check_timeouts()
-                await self._refresh_node_statuses()
-                await self._cleanup_completed_tasks()
-                await self._cleanup_offline_nodes()
-                online = len(await self.get_online_nodes())
-                active = sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING)
-                logger.debug(f"集群状态: {online} 在线, {active} 活跃任务")
-                # P0-8: 周期采集节点指标 + 告警规则 (接 _observability, 路由不再 503)。
-                if self._observability:
-                    await self._collect_observability_locked()
+                # P0-1: 逐次异常隔离, 单轮健康检查失败不杀循环 (否则超时/清理静默停滞)。
+                try:
+                    await self.check_timeouts()
+                    await self._refresh_node_statuses()
+                    await self._cleanup_completed_tasks()
+                    await self._cleanup_offline_nodes()
+                    online = len(await self.get_online_nodes())
+                    active = sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING)
+                    logger.debug(f"集群状态: {online} 在线, {active} 活跃任务")
+                    # P0-8: 周期采集节点指标 + 告警规则 (接 _observability, 路由不再 503)。
+                    if self._observability:
+                        await self._collect_observability_locked()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"健康检查循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
