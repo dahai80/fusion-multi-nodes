@@ -2175,6 +2175,45 @@ class ClusterMaster:
 
     # ── 生命周期 ──
 
+    def _register_alert_webhook(self) -> None:
+        # P0-5 (审计 §5.6): 告警无出站通道, on_alert 零生产注册 → 节点掉线/内存告警只进 deque,
+        # 运维须轮询 /api/v1/observability/alerts。读 env FUSION_ALERT_WEBHOOK_URL,
+        # 非空则注册 handler: Alert → fire-and-forget asyncio.create_task (不阻塞 create_alert 同步路径),
+        # 内部 to_thread 包 httpx POST, 失败 logger.warning 不拖垮告警链。
+        webhook_url = os.environ.get("FUSION_ALERT_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            logger.info("未配告警 webhook (FUSION_ALERT_WEBHOOK_URL), 告警仅留内存 deque")
+            return
+        logger.info(f"P0-5 告警 webhook 出站通道已注册: {webhook_url}")
+
+        def _webhook_handler(alert: Any) -> None:
+            # 同步 handler (create_alert 内调用) — 仅派发 fire-and-forget 任务即返, 不阻塞。
+            payload = {
+                "alert_id": alert.alert_id,
+                "severity": alert.severity,
+                "title": alert.title,
+                "message": alert.message,
+                "node_id": alert.node_id,
+                "created_at": alert.created_at,
+                "source": "fusion-multi-node",
+            }
+            asyncio.create_task(self._post_alert_webhook(webhook_url, payload))
+
+        self._observability.on_alert(_webhook_handler)
+
+    async def _post_alert_webhook(self, url: str, payload: dict[str, Any]) -> None:
+        # fire-and-forget POST — to_thread 避 httpx 同步阻塞, 失败不抛 (告警链不被拖垮)。
+        def _post() -> None:
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code >= 400:
+                        logger.warning(f"告警 webhook 返回 {resp.status_code}: {resp.text[:200]}")
+            except Exception as e:
+                logger.warning(f"告警 webhook 发送失败: {e}")
+
+        await asyncio.to_thread(_post)
+
     async def start(
         self,
         with_server: bool = True,
@@ -2217,6 +2256,8 @@ class ClusterMaster:
             self._observability = ClusterObservability()
         await self._observability.start()
         logger.info("P0-8 Observability 已接线 (周期采集 + 告警规则)")
+        # P0-5: 告警出站通道 — observability 接线后注册 webhook handler (env 门控)。
+        self._register_alert_webhook()
 
         # P4 HA 选举接线 — config 门控, 单 Master 默认不启用
         if ha_config and ha_config.get("enabled") and ha_config.get("node_id") and ha_config.get("peers"):

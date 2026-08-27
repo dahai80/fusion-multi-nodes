@@ -611,3 +611,73 @@ class TestOptimizationSuggestions:
             )
         suggestions = obs.generate_optimization_suggestions()
         assert any("inference_engine" in s["title"] for s in suggestions)
+
+
+class TestP05AlertWebhook:
+    # P0-5 (审计 §5.6): 告警出站通道 — env FUSION_ALERT_WEBHOOK_URL 注册 webhook handler,
+    # create_alert → fire-and-forget POST, 不阻塞 create_alert 同步路径。
+
+    @pytest.mark.asyncio
+    async def test_webhook_registered_and_posted(self, tmp_path, monkeypatch):
+        from fusion_multi_node.master.cluster_master import ClusterMaster
+
+        posted = []
+
+        class _FakeResp:
+            status_code = 200
+            text = "ok"
+
+        class _FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, json=None):
+                posted.append({"url": url, "json": json})
+                return _FakeResp()
+
+        monkeypatch.setattr("fusion_multi_node.master.cluster_master.httpx.Client", _FakeClient)
+        monkeypatch.setenv("FUSION_ALERT_WEBHOOK_URL", "http://alert-sink.local/hook")
+
+        m = ClusterMaster()
+        m._task_store_path = tmp_path / "tasks.json"
+        await m.start(with_server=False, with_mdns=False)
+        try:
+            t0 = time.monotonic()
+            m._observability.create_alert(
+                severity="critical", title="节点离线", message="n1 失联", node_id="n1"
+            )
+            elapsed = time.monotonic() - t0
+            # create_alert 须 fire-and-forget 即返 (POST 在后台 create_task), 不阻塞同步路径。
+            assert elapsed < 0.05, f"create_alert 被 webhook 拖慢: {elapsed:.3f}s"
+            # 后台 POST 需要一个事件循环 tick 调度 — 等 to_thread 完成。
+            await asyncio.sleep(0.1)
+        finally:
+            await m.stop()
+
+        assert len(posted) == 1, "告警须经 webhook POST 出站"
+        payload = posted[0]["json"]
+        assert payload["title"] == "节点离线"
+        assert payload["severity"] == "critical"
+        assert payload["node_id"] == "n1"
+        assert payload["source"] == "fusion-multi-node"
+
+    @pytest.mark.asyncio
+    async def test_no_webhook_env_skips_registration(self, tmp_path, monkeypatch):
+        from fusion_multi_node.master.cluster_master import ClusterMaster
+
+        monkeypatch.delenv("FUSION_ALERT_WEBHOOK_URL", raising=False)
+        m = ClusterMaster()
+        m._task_store_path = tmp_path / "tasks.json"
+        await m.start(with_server=False, with_mdns=False)
+        try:
+            # 无 env → 零 handler 注册, create_alert 不触发任何出站 (仅内存 deque)。
+            assert m._observability._alert_handlers == []
+            m._observability.create_alert(severity="info", title="t", message="m")
+        finally:
+            await m.stop()
