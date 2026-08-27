@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.6] - 2026-08-27 — GAP-8 Phase F4: 集群控制 API 契约 /api/v1
+
+> **/api/v1 typed 契约 + HTTP 文档 + 漂移检测**: `/api/v1/*` 路由补齐 `response_model=` Pydantic 契约,
+> 覆盖 9 集群控制操作 (list_nodes/register/remove/submit/migrate/degrade/progress/cluster_stats/
+> observability_suggestions)。fusion-agent-studio 可据此桥接真实 multi-node 集群 (替代内存 dev 集群,
+> 解决 #32)。OpenAPI `/openapi.json` 现对 9 操作 + autoscaler/observability 返回 typed schema。
+
+### Added
+
+- **13 V1* Pydantic 响应模型** (`server/master_server.py`) — GAP-8 Phase F4, issue #32
+  - `V1NodeResponse` (16 字段含 role), `V1NodeListResponse`, `V1NodeRegisterResponse`, `V1StatusResponse`
+  - `V1TaskResponse` (16 字段), `V1TaskSubmitResponse` (+queued), `V1TaskProgressResponse`
+  - `V1ClusterStatsResponse`, `V1ObservabilitySuggestionsResponse`, `V1AutoscalerConfigResponse`
+  - 对齐 `_node_to_resp`/`_task_to_resp` 实际输出; 旧 v0.1 时代 `NodeResponse`/`TaskResponse` (字段过时且未接 response_model) 已删
+- **typed /api/v1 路由** — 9 操作经 `response_model=` 类型化:
+  - `GET /api/v1/nodes`, `GET /api/v1/nodes/{id}`, `POST /api/v1/nodes/register`, `DELETE /api/v1/nodes/{id}`
+  - `POST /api/v1/tasks/submit` (200 派发 / 202 queued), `POST /api/v1/tasks/{id}/migrate`, `POST /api/v1/tasks/{id}/degrade`
+  - `GET /api/v1/tasks/{id}/progress`, `GET /api/v1/cluster/stats`, `GET /api/v1/observability/suggestions`
+  - autoscaler GET/PUT 显式 503 not-wired (契约文档化, 非歧义 enabled:False)
+- **HTTP 文档** — `docs/API.md` 重写为 HTTP 路由契约表 (9-op contract table + 其余路由分组); Python 类文档迁出 `docs/PYTHON_API.md`
+- **漂移检测测试** — `tests/test_api_docs_contract.py`: 每 `/api/v1` 路由须在 API.md 出现; 9-op 契约表完整; PYTHON_API.md 存在
+
+### Fixed
+
+- **重复路由遮蔽** (first-registered-wins): 旧 untyped `/api/v1/cluster/stats`、`/observability/suggestions`、
+  `/autoscaler/config` (GET/PUT)、`/tasks/{id}/progress` 与新 typed 副本同路径 → 后注册被遮蔽 (死代码)。
+  修复: bless 旧路由加 `response_model=` (字段对齐 V1* 模型), 删 5 个遮蔽副本 + 未用 `V1AutoscalerConfigUpdateRequest`。
+  验证: OpenAPI `/openapi.json` 对 4 路由返回正确 `$ref` (V1ClusterStatsResponse 等)。
+
+### Tests
+
+- `tests/test_v1_contract.py` (17): 9 操作 schema 校验 + 注册 400 / 提交 202 queued / 降级链模型 / progress 404
+- `tests/test_api_docs_contract.py` (3): docs 漂移检测
+- 回归 1174 passed (+20), ruff clean
+
 ## [0.10.5] - 2026-08-27 — GAP-8 Phase F3: 统一推理代理 /v1/chat/completions
 
 > **统一推理入口 + 租户在途配额**: master 新增 `/v1/chat/completions` 轻量 pass-through 代理,

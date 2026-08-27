@@ -1,396 +1,172 @@
-# API Reference — fusion-multi-node v0.1.0
-# User instruction: "生成doc文档和READMD，README_CN，提交配置库，发布0.1.0版本"
-# Public API surface for all 7 modules + config + utils
+# HTTP API Reference — fusion-multi-node
 
-## Table of Contents
+Master HTTP API on `127.0.0.1:11452` (default). All endpoints require `Authorization: Bearer <token>` except exempt paths (`/api/health`, `/docs`, `/openapi.json`, `/redoc`, `/`, `/favicon.ico`).
 
-- [Cluster Master](#cluster-master)
-- [Node Agent](#node-agent)
-- [mDNS Discovery](#mdns-discovery)
-- [FMP Protocol](#fmp-protocol)
-- [Distributed MLX Bridge](#distributed-mlx-bridge)
-- [MCP Cluster Gateway](#mcp-cluster-gateway)
-- [Cluster Observability](#cluster-observability)
-- [Configuration](#configuration)
-- [Utilities](#utilities)
+Two token types (GAP-8 Phase F):
+- **Cluster token** — shared intra-cluster secret (`~/.fusion/multi-node/.cluster_token`), all node-to-node traffic. Format: opaque.
+- **User token** — `fmu_<userid>_<secret>`, user-facing master routes only. Resolves `UserRole` (ADMIN/USER/VIEWER). See [docs/PYTHON_API.md](PYTHON_API.md) for `UserStore`.
 
----
+OpenAPI schema at `/openapi.json`; interactive docs at `/docs`.
 
-## Cluster Master
+## Contents
 
-`from fusion_multi_node.master import ClusterMaster, NodeInfo, ClusterTask, KVCacheEntry, NodeStatus, ParallelMode, TaskStatus`
-
-### ClusterMaster
-
-```python
-master = ClusterMaster(host="127.0.0.1", port=11452)
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `register_node` | `(node: NodeInfo) -> bool` | Register/update node (F-A12 PATCH 幂等). Returns `True` ok, `False` if banned |
-| `unregister_node` | `(node_id: str, reason: str = "") -> None` | Remove node; `reason="banned"` writes blacklist (`_BAN_DURATION_S`) |
-| `report_fault` | `(node_id: str, fault_type: str = "", message: str = "") -> bool` | Mark node FAULT + count; threshold in window → auto-ban (F-A13) |
-| `is_node_banned` | `(node_id: str) -> bool` | Whether node is currently in ban window |
-| `unban_node` | `(node_id: str) -> bool` | Manually lift ban; returns whether a ban was removed |
-| `assign_task` | `(task: ClusterTask) -> ClusterTask` | Assign task to best-scoring node |
-| `complete_task` | `(task_id: str, error: str = None) -> ClusterTask` | Complete or fail a task |
-| `cancel_task` | `(task_id: str) -> bool` | Cancel a pending/running task |
-| `migrate_task` | `(task_id: str) -> ClusterTask` | Migrate task to another node |
-| `check_heartbeat` | `() -> list[str]` | Check all nodes, return stale node IDs |
-| `find_kv_cache` | `(model: str, prompt_hash: str) -> KVCacheEntry or None` | Look up KV cache by model+hash |
-| `add_kv_cache` | `(entry: KVCacheEntry)` | Add entry to global KV cache pool |
-
-**Public attributes**: `nodes: dict[str, NodeInfo]`, `tasks: dict[str, ClusterTask]`, `kv_cache: dict[str, KVCacheEntry]`
-
-### NodeInfo
-
-```python
-node = NodeInfo(
-    node_id="node_1",
-    hostname="mac-studio-1",
-    ip_address="10.0.0.1",
-    port=11445,
-    total_memory_gb=64.0,
-    available_memory_gb=48.0,
-)
-print(node.score)  # 0.0-1.0, mem_weight=0.4 + task_weight=0.4 + net_penalty=0.2
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `node_id` | `str` | required | Unique node identifier |
-| `hostname` | `str` | `""` | Machine hostname |
-| `ip_address` | `str` | `""` | IP address |
-| `port` | `int` | `11445` | Agent port |
-| `total_memory_gb` | `float` | `0.0` | Total unified memory |
-| `available_memory_gb` | `float` | `0.0` | Available memory |
-| `status` | `NodeStatus` | `OFFLINE` | Node status |
-| `last_heartbeat` | `float` | `0.0` | Last heartbeat timestamp |
-| `task_count` | `int` | `0` | Current assigned tasks |
-| `link_type` | `str` | `""` | Network link type |
-| `latency_ms` | `float` | `0.0` | Network latency |
-
-### ClusterTask
-
-```python
-task = ClusterTask(
-    task_id="task_1",
-    name="batch-inference",
-    mode=ParallelMode.DATA,
-)
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `task_id` | `str` | required | Unique task identifier |
-| `name` | `str` | `""` | Task name |
-| `mode` | `ParallelMode` | `PIPELINE` | Pipeline or data parallel |
-| `status` | `TaskStatus` | `PENDING` | Current status |
-| `assigned_node` | `str` | `None` | Assigned node ID |
-| `model` | `str` | `None` | Model name |
-| `timeout` | `float` | `300.0` | Timeout in seconds |
-| `created_at` | `float` | `time.time()` | Creation timestamp |
-| `started_at` | `float` | `None` | Start timestamp |
-| `completed_at` | `float` | `None` | Completion timestamp |
-| `error` | `str` | `None` | Error message if failed |
-
-### Enums
-
-| Enum | Values |
-|------|--------|
-| `NodeStatus` | `OFFLINE`, `ONLINE`, `BUSY`, `ERROR` |
-| `ParallelMode` | `PIPELINE`, `DATA` |
-| `TaskStatus` | `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `MIGRATED`, `TIMEOUT` |
+- [Cluster Control Contract — 9 Operations](#cluster-control-contract--9-operations)
+- [Inference](#inference)
+- [Observability & Metrics](#observability--metrics)
+- [Autoscaler](#autoscaler)
+- [User Management (ADMIN only)](#user-management-admin-only)
+- [Config Hot-Reload](#config-hot-reload)
+- [Legacy `/api/*` Routes](#legacy-apiroutes)
 
 ---
 
-## Node Agent
+## Cluster Control Contract — 9 Operations
 
-`from fusion_multi_node.agent import NodeAgent, AgentConfig`
+The 9 operations fusion-agent-studio delegates to a real cluster (replaces its in-memory dev cluster). All return typed JSON (`response_model=` Pydantic schemas; see `/openapi.json` `components/schemas/V1*`).
 
-### NodeAgent
+| # | Operation | Method + Path | Response Model | Auth |
+|---|-----------|---------------|----------------|------|
+| 1 | list_nodes | `GET /api/v1/nodes` | `V1NodeListResponse` | cluster\|user |
+| 2 | join_node | `POST /api/v1/nodes/register` | `V1NodeRegisterResponse` | cluster |
+| 3 | remove_node | `DELETE /api/v1/nodes/{node_id}` | `V1StatusResponse` | cluster\|user(ADMIN) |
+| 4 | submit_task | `POST /api/v1/tasks/submit` | `V1TaskSubmitResponse` | cluster\|user |
+| 5 | migrate_task | `POST /api/v1/tasks/{task_id}/migrate` | `V1StatusResponse` | cluster\|user |
+| 6 | degrade_task | `POST /api/v1/tasks/{task_id}/degrade` | `V1StatusResponse` | cluster\|user |
+| 7 | task_progress | `GET /api/v1/tasks/{task_id}/progress` | `V1TaskProgressResponse` | cluster\|user |
+| 8 | cluster_stats | `GET /api/v1/cluster/stats` | `V1ClusterStatsResponse` | cluster\|user |
+| 9 | observability suggestions | `GET /api/v1/observability/suggestions` | `V1ObservabilitySuggestionsResponse` | cluster\|user |
 
-```python
-config = AgentConfig(node_id="my_mac", master_host="10.0.0.1")
-agent = NodeAgent(config)
+### 1. list_nodes — `GET /api/v1/nodes`
+
+Lists all nodes.
+
+Response `V1NodeListResponse`:
+```
+{ "total": int, "online": int, "nodes": [V1NodeResponse] }
 ```
 
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `start` | `() -> None` | Start heartbeat loop and task polling |
-| `stop` | `() -> None` | Stop agent |
-| `collect_hardware_info` | `() -> dict` | Return CPU/memory/GPU info via psutil |
-| `execute_task` | `(task: dict) -> dict` | Execute task via fusion-mlx httpx API |
-| `report_fault` | `(fault_type: str = "", message: str = "") -> bool` | Report fault to master |
+`V1NodeResponse` (16 fields): `node_id`, `hostname`, `ip_address`, `port`, `status`, `role`, `total_memory_gb`, `available_memory_gb`, `cpu_cores`, `gpu_cores`, `device_model`, `uma_size_gb`, `active_tasks`, `max_tasks`, `score`, `last_heartbeat`.
 
-### AgentConfig
+### 2. join_node — `POST /api/v1/nodes/register`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `node_id` | `str` | `""` | Node identifier |
-| `master_host` | `str` | `"localhost"` | Master hostname |
-| `master_port` | `int` | `11452` | Master port |
-| `discovery_port` | `int` | `11450` | mDNS discovery port |
-| `heartbeat_interval` | `float` | `5.0` | Heartbeat interval (seconds) |
-| `task_poll_interval` | `float` | `2.0` | Task poll interval (seconds) |
+Registers a node agent. Gated by `NodeApprovalManager` + protocol-version compat check (agent must send `protocol_version` ≥ `0.8.0`).
+
+Body `NodeRegisterRequest` (key fields): `node_id`, `hostname`, `ip_address`, `port`, `total_memory_gb`, `available_memory_gb`, `cpu_cores`, `gpu_cores`, `device_model`, `uma_size_gb`, `max_tasks`, `protocol_version`.
+
+Response `V1NodeRegisterResponse`: `{ "status": str, "node_id": str, "role": "worker" }`.
+
+Errors: `400` illegal `node_id` / protocol incompatible; `403` banned node.
+
+### 3. remove_node — `DELETE /api/v1/nodes/{node_id}`
+
+Removes a node.
+
+Response `V1StatusResponse`: `{ "status": "ok", "task_id": "", "node_id": <id>, "action": "removed" }`. `404` if not found.
+
+### 4. submit_task — `POST /api/v1/tasks/submit`
+
+Submits a task. Returns `200` (dispatched/running) or `202` (queued — no nodes / priority queue). HA standby returns `503`.
+
+Body: `name`, `mode` (`data`\|`pipeline`), `model_name`, `prompt`, optional `priority`, `required_capability`, `timeout_seconds`, `target_node_id`, `task_id`.
+
+Response `V1TaskSubmitResponse` (V1TaskResponse + `queued: bool`). `V1TaskResponse` (16 fields): `task_id`, `name`, `mode`, `model_name`, `status`, `assigned_nodes`, `created_at`, `started_at`, `completed_at`, `error`, `required_capability`, `priority`, `degraded_from_model`, `degradation_count`, `cancel_reason`, `sub_tasks`, `result`.
+
+### 5. migrate_task — `POST /api/v1/tasks/{task_id}/migrate`
+
+Migrates a running task to another node.
+
+Response `V1StatusResponse`: `{ "status": "ok", "task_id": <id>, "action": "migrated" }`. `404` if not found.
+
+### 6. degrade_task — `POST /api/v1/tasks/{task_id}/degrade`
+
+Degrades a task's model to the next smaller in `MODEL_DEGRADATION_CHAIN` (`70b→32b→13b→8b→3b→1b`). Max 2 degradations.
+
+Response `V1StatusResponse`: `{ "status": "ok", "task_id": <id> }`. `400` if no smaller model available / max reached; `404` if not found.
+
+### 7. task_progress — `GET /api/v1/tasks/{task_id}/progress`
+
+Response `V1TaskProgressResponse`: `task_id`, `name`, `status`, `progress` (0.0–1.0), `total_shards`, `completed_shards`, `assigned_nodes`, `elapsed_seconds`, `remaining_seconds`, `model_name`. `404` if not found.
+
+### 8. cluster_stats — `GET /api/v1/cluster/stats`
+
+Response `V1ClusterStatsResponse`:
+```
+{
+  "cluster": { "online_nodes", "total_nodes", "active_tasks", "total_memory_gb", "available_memory_gb", "utilization" },
+  "tasks": { "total", "completed", "failed" },
+  "load_summary": {...}
+}
+```
+
+### 9. observability suggestions — `GET /api/v1/observability/suggestions`
+
+Response `V1ObservabilitySuggestionsResponse`: `{ "suggestions": [dict], "error": str }`.
 
 ---
 
-## mDNS Discovery
+## Inference
 
-`from fusion_multi_node.discovery import MDNSDiscovery, DiscoveryInfo`
+### `POST /v1/chat/completions` — unified chat proxy (F3)
 
-### MDNSDiscovery
+Pass-through to selected node's fusion-mlx via `select_nodes(DATA, count=1)`. OpenAI-compatible request/response body; `stream: true` → SSE.
 
-```python
-mdns = MDNSDiscovery(node_id="fusion-master")
-mdns.register(port=11452, properties={"role": "master"})
-master_info = await mdns.find_master_async(timeout=5.0)
-mdns.unregister()
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `register` | `(port: int, properties: dict = None) -> None` | Register mDNS service |
-| `unregister` | `() -> None` | Unregister service |
-| `browse` | `(timeout: float = 5.0) -> list[DiscoveryInfo]` | Browse for services |
-| `find_master` | `(timeout: float = 5.0) -> DiscoveryInfo or None` | Synchronous master lookup |
-| `find_master_async` | `(timeout: float = 5.0) -> DiscoveryInfo or None` | Async master lookup |
-
-### DiscoveryInfo
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `node_id` | `str` | Service node ID |
-| `host` | `str` | Host address |
-| `port` | `int` | Service port |
-| `properties` | `dict` | Service properties |
+Auth: user token (`chat:complete`, USER/ADMIN not VIEWER) OR cluster token. Tenant-quota gate: per-user inflight vs `scheduling.tenant_max_concurrent`; `429` over.
 
 ---
 
-## FMP Protocol
+## Observability & Metrics
 
-`from fusion_multi_node.protocol import FMPMessage, PayloadType, MessageType, FMPCrypto, CircuitBreaker, CircuitBreakerState, FMPConnectionManager, FMPRouter`
-
-### FMPMessage
-
-```python
-msg = FMPMessage.create("master", "node1", PayloadType.HEARTBEAT, {"status": "ok"})
-data = msg.serialize()  # bytes
-msg2 = FMPMessage.deserialize(data)  # FMPMessage
-```
-
-Three layers:
-- **LinkLayer**: `source`, `destination`, `hop_count`, `timestamp`
-- **BusinessLayer**: `payload_type`, `payload` (dict), `rounds`, `priority`
-- **ControlLayer**: `message_type`, `ack_required`, `flow_control`
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `create` | `(source, dest, ptype, payload, **) -> FMPMessage` | Create new message |
-| `serialize` | `() -> bytes` | Serialize to binary |
-| `deserialize` | `(data: bytes) -> FMPMessage` | Deserialize from binary |
-
-### FMPCrypto
-
-```python
-key = FMPCrypto.generate_key()  # 32 bytes
-crypto = FMPCrypto(key=key)
-encrypted = crypto.encrypt_message(msg)
-crypto.decrypt_message(msg)
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `generate_key` | `() -> bytes` | Generate 256-bit AES key |
-| `encrypt_message` | `(msg: FMPMessage) -> None` | Encrypt message payload in-place |
-| `decrypt_message` | `(msg: FMPMessage) -> None` | Decrypt message payload in-place |
-
-### CircuitBreaker
-
-```python
-cb = CircuitBreaker(name="node1", failure_threshold=5, recovery_timeout=30.0)
-if cb.allow_request():
-    try:
-        result = await do_work()
-        cb.record_success()
-    except Exception:
-        cb.record_failure()
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `allow_request` | `() -> bool` | Check if request is allowed |
-| `record_success` | `() -> None` | Record successful call |
-| `record_failure` | `() -> None` | Record failed call |
-
-States: `CLOSED` -> `OPEN` (after threshold failures) -> `HALF_OPEN` (after recovery_timeout)
+| Method + Path | Description |
+|---------------|-------------|
+| `GET /api/v1/observability/alerts?severity=` | Active alerts |
+| `GET /api/v1/observability/logs/export?fmt=json\|csv&since=&node_id=` | Log export |
+| `GET /api/v1/metrics` | Prometheus exposition (text/plain 0.0.4) |
+| `GET /api/v1/nodes/{node_id}/metrics` | Per-node load metrics |
+| `GET /api/v1/tasks/{task_id}/timeline` | Task event timeline |
+| `GET /api/tasks/events` | SSE task-state event stream (15s keepalive) |
 
 ---
 
-## Distributed MLX Bridge
+## Autoscaler
 
-`from fusion_multi_node.distributed_mlx import DistributedMLXBridge, KVSharingManager, CavemanManager, CavemanCompressor`
-
-### DistributedMLXBridge
-
-```python
-bridge = DistributedMLXBridge()
-shards = await bridge.shard_model("llama-70b", num_shards=4)
-result = await bridge.pipeline_inference("llama-70b", "Hello", ["n1", "n2", "n3", "n4"])
-result = await bridge.data_parallel_inference("qwen-7b", ["prompt1", "prompt2"], ["n1", "n2"])
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `shard_model` | `(model: str, num_shards: int) -> list[ModelShard]` | Split model into shards |
-| `pipeline_inference` | `(model, prompt, nodes) -> dict` | Pipeline parallel inference |
-| `data_parallel_inference` | `(model, prompts, nodes) -> dict` | Data parallel inference |
-| `sync_weights` | `(model: str, nodes: list) -> bool` | Sync model weights across nodes |
-
-### KVSharingManager
-
-```python
-kv = KVSharingManager(max_local_cache_mb=4096.0)
-kv.store_local(entry)
-found = kv.lookup_local("qwen", "abc123")
-prefixed = kv.lookup_by_prefix("qwen", "abc")
-await kv.warm_cache("qwen", "Hello world", ["n1"])
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `store_local` | `(entry: KVCacheEntry) -> None` | Store in local cache |
-| `lookup_local` | `(model, prompt_hash) -> KVCacheEntry or None` | Look up by exact hash |
-| `lookup_by_prefix` | `(model, prefix_hash) -> list[KVCacheEntry]` | Look up by prefix |
-| `lookup_remote` | `(model, prompt_hash, source_node, source_ip) -> KVCacheEntry or None` | Look up on remote node |
-| `warm_cache` | `(model, prompt, nodes) -> None` | Pre-warm cache on nodes |
-| `evict_lru` | `() -> int` | Evict least recently used entries |
-
-### CavemanManager
-
-```python
-manager = CavemanManager()
-compressed, method, stats = await manager.compress_tensor(data, link_type="ethernet_1g")
-decompressed = await manager.decompress_tensor(compressed, method, original_shape, original_dtype)
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `compress_tensor` | `(data, link_type) -> (bytes, str, dict)` | Auto-select and compress |
-| `decompress_tensor` | `(data, method, shape, dtype) -> ndarray` | Decompress tensor |
-
-**Link-type selection**: Thunderbolt -> dict, Ethernet -> zlib, WiFi -> diff
+| Method + Path | Response | Note |
+|---------------|----------|------|
+| `GET /api/v1/autoscaler/config` | `V1AutoscalerConfigResponse` | **503 not-wired** — module exists but not instantiated (GAP-5). Documented contract, not ambiguous `enabled:False`. |
+| `PUT /api/v1/autoscaler/config` | `V1StatusResponse` | **503 not-wired** (same). |
 
 ---
 
-## MCP Cluster Gateway
+## User Management (ADMIN only)
 
-`from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool, MCPRequest`
+GAP-8 Phase F2. Requires user token with ADMIN role.
 
-### MCPClusterGateway
-
-```python
-gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
-gateway.register_tool(
-    MCPTool(
-        name="code_review",
-        description="Review code",
-        parameters={"type": "object", "properties": {"code": {"type": "string"}}},
-    )
-)
-result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `register_tool` | `(tool: MCPTool) -> None` | Register a tool |
-| `unregister_tool` | `(name: str) -> None` | Unregister a tool |
-| `list_tools` | `() -> list[MCPTool]` | List all tools |
-| `handle_tool_call` | `(name, args, source) -> dict` | Route and execute tool call |
-| `get_token_usage` | `() -> dict` | Get token budget usage |
-
-### MCPTool
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | `str` | Tool name |
-| `description` | `str` | Tool description |
-| `parameters` | `dict` | JSON Schema parameters |
-| `node_id` | `str` | Source node ID |
+| Method + Path | Description |
+|---------------|-------------|
+| `POST /api/v1/users` | Create user (returns token once) |
+| `GET /api/v1/users` | List users |
+| `GET /api/v1/users/{user_id}` | Get user |
+| `DELETE /api/v1/users/{user_id}` | Delete user |
+| `PUT /api/v1/users/{user_id}/role` | Set user role |
+| `POST /api/v1/users/{user_id}/tokens` | Issue token (returns plaintext once) |
+| `DELETE /api/v1/users/{user_id}/tokens/{tid}` | Revoke token |
+| `POST /api/v1/users/{user_id}/tokens/rotate` | Rotate token (F5) |
 
 ---
 
-## Cluster Observability
+## Config Hot-Reload
 
-`from fusion_multi_node.observability import ClusterObservability, MetricPoint, Alert, LogEntry`
+### `POST /api/v1/config/reload` (P2-20)
 
-### ClusterObservability
-
-```python
-obs = ClusterObservability(retention_hours=24.0)
-obs.record_metric("node_1", "memory_used_gb", 16.0, tags={"gpu": "m4_ultra"})
-obs.add_log(LogEntry(time.time(), "node_1", "INFO", "scheduler", "Task completed"))
-alert = obs.create_alert("warning", "High memory", "node_1 at 90%")
-await obs.check_alert_rules(nodes)
-report = obs.get_cluster_report()
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `record_metric` | `(node_id, name, value, tags=None) -> None` | Record a metric |
-| `add_log` | `(entry: LogEntry) -> None` | Add a log entry |
-| `create_alert` | `(level, title, message) -> Alert` | Create an alert |
-| `check_alert_rules` | `(nodes: dict) -> list[Alert]` | Evaluate alert rules |
-| `get_cluster_report` | `() -> dict` | Generate cluster summary |
-| `cleanup_expired` | `() -> int` | Remove expired data |
+Re-reads `config.json` + re-applies `scheduling.tenant_max_concurrent`. Port/HA/mDNS require restart → response `restart_required` hint. `503` if no config injected.
 
 ---
 
-## Configuration
+## Legacy `/api/*` Routes
 
-`from fusion_multi_node.config import ClusterConfig`
-
-### ClusterConfig
-
-```python
-config = ClusterConfig()
-config.set("cluster.master_host", "10.0.0.1")
-host = config.get("cluster.master_host")
-agent_config = config.to_node_agent_config()
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `get` | `(key: str, default=None) -> Any` | Get value by dot-notation key |
-| `set` | `(key: str, value) -> None` | Set value by dot-notation key |
-| `to_node_agent_config` | `() -> AgentConfig` | Convert to agent config |
+Pre-v1 raw-dict routes kept for backward compat (no `response_model`): `/api/health`, `/api/nodes`, `/api/nodes/register`, `/api/tasks/submit`, `/api/tasks/{id}`, `/api/tasks/{id}/cancel`, `/api/cluster/stats` (flat), `/api/kv/*`, `/api/ha/*`. Prefer `/api/v1/*` for typed contracts.
 
 ---
 
-## Utilities
+## Python API
 
-`from fusion_multi_node.utils import NetworkTopologyDetector, setup_logger, get_data_dir, get_log_dir`
-
-### NetworkTopologyDetector
-
-```python
-detector = NetworkTopologyDetector()
-topology = detector.detect()
-link = detector.detect_link_type("10.0.0.1")
-latency = detector.measure_latency("10.0.0.1")
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `detect` | `() -> dict` | Detect all network interfaces |
-| `detect_link_type` | `(ip: str) -> str` | Detect link type for IP |
-| `measure_latency` | `(ip: str) -> float` | Measure latency in ms |
-
-### Logger
-
-```python
-logger = setup_logger("my_module")
-logger.info("Hello")
-```
+Class-level API (ClusterMaster, NodeAgent, KVSharingManager, etc.) moved to [docs/PYTHON_API.md](PYTHON_API.md).
