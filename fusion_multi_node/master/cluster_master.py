@@ -458,8 +458,8 @@ class ClusterMaster:
             snapshot = self._persist_tasks_locked()
             # HA: leader 构建推送目标 (锁内构建 payload, 锁外异步发送)
             targets = self._sync_tasks_to_standbys_locked()
-        # P1-11: 落盘 (fsync) 已移出 _tasks_lock 持有区。
-        self._write_task_store(snapshot)
+        # P1-11: 落盘 (fsync) 已移出 _tasks_lock 持有区。P0-4: fsync 阻塞事件循环, 移 to_thread。
+        await asyncio.to_thread(self._write_task_store, snapshot)
         if targets:
             await self._push_sync_to_standbys(targets)
 
@@ -940,8 +940,8 @@ class ClusterMaster:
                     node.active_tasks += 1
                 self._emit_task_event(task, "running")
 
-        # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。
-        self._write_task_store(_snapshot)
+        # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。P0-4: fsync 阻塞事件循环, 移 to_thread。
+        await asyncio.to_thread(self._write_task_store, _snapshot)
         logger.info(f"任务分配: {task.name} → {[n.hostname for n in nodes]}")
         self._trigger_dispatch(task)
         return True
@@ -1300,7 +1300,7 @@ class ClusterMaster:
                     logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
                     self._emit_task_event(t, "failed", error=error)
         if _snapshot is not None:
-            self._write_task_store(_snapshot)
+            await asyncio.to_thread(self._write_task_store, _snapshot)
 
     async def _snapshot_nodes(self, node_ids: list[str]) -> dict[str, NodeInfo]:
         """快照节点 (深拷贝引用, 派发期间不被 heartbeat 改字段影响)。"""
@@ -1386,7 +1386,7 @@ class ClusterMaster:
 
         # P1-11: 落盘在 _nodes_lock/_tasks_lock 释放后。
         if _snapshot is not None:
-            self._write_task_store(_snapshot)
+            await asyncio.to_thread(self._write_task_store, _snapshot)
         logger.info(f"任务取消: {task_id} (原因: {task.cancel_reason}), 子任务取消: {cancelled_sub}")
         # P1-H: 取消释放节点/配额 → 排空队列。
         await self._drain_pending_locked()
@@ -1894,7 +1894,7 @@ class ClusterMaster:
                 _snapshot = self._persist_tasks_locked()
         # P1-11: 落盘在 _tasks_lock 释放后。
         if _snapshot is not None:
-            self._write_task_store(_snapshot)
+            await asyncio.to_thread(self._write_task_store, _snapshot)
         if merged:
             logger.info(f"HA 同步接收 {merged} 任务 (standby 合并落盘)")
         return merged

@@ -5,6 +5,7 @@
 No external API callers — internal unit tests.
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -188,6 +189,35 @@ class TestPersistRestore:
             mp.setattr(m, "_write_task_store", spy_write)
             await m._persist_tasks()
         assert lock_state_at_write["locked"] is False, "落盘须在 _tasks_lock 释放后 (不持锁 fsync)"
+        assert (tmp_path / "tasks.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_fsync_does_not_block_event_loop(self, tmp_path):
+        # P0-4 (审计): _write_task_store 含 os.fsync 同步阻塞 — 移 asyncio.to_thread 后
+        # 落盘期间事件循环须可推进 (并行 asyncio.sleep 计时器不受慢盘拖累)。
+        m = _master_with_store(tmp_path)
+        async with m._tasks_lock:
+            m.tasks["t1"] = _task("t1", TaskStatus.RUNNING)
+
+        real_write = m._write_task_store
+
+        def slow_write(pending):
+            # 模拟慢盘 fsync: 同步阻塞 80ms (若在事件循环线程, 会拖垮并发协程)
+            import time as _t
+            _t.sleep(0.08)
+            return real_write(pending)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(m, "_write_task_store", slow_write)
+            t0 = time.monotonic()
+            persist_task = asyncio.create_task(m._persist_tasks())
+            # 并行计时器: 40ms sleep — 若 fsync 阻塞事件循环, 此 sleep 会被 80ms 慢盘推迟到 ~80ms+ 才完成
+            timer_task = asyncio.create_task(asyncio.sleep(0.04))
+            await timer_task
+            timer_elapsed = time.monotonic() - t0
+            await persist_task
+        # 计时器应在 ~40ms 完成 (容忍调度抖动), 不被 80ms 慢盘拖到 ~80ms — 证明 fsync 移出事件循环。
+        assert timer_elapsed < 0.07, f"事件循环被 fsync 阻塞: 计时器 {timer_elapsed:.3f}s 应 < 0.07s"
         assert (tmp_path / "tasks.json").exists()
 
     @pytest.mark.asyncio
