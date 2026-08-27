@@ -2312,7 +2312,13 @@ class ClusterMaster:
         try:
             while self._running:
                 await asyncio.sleep(15)
-                await self._persist_tasks()
+                # P0-1: 逐次异常隔离, 单轮写盘失败不杀整个循环 (违 Rule 12 静默停滞)。
+                try:
+                    await self._persist_tasks()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"持久化循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -2323,12 +2329,18 @@ class ClusterMaster:
                 await asyncio.sleep(30)
                 if not self._pending_retry:
                     continue
-                retry_tasks = self._pending_retry[:]
-                self._pending_retry.clear()
-                for task in retry_tasks:
-                    ok = await self.assign_task(task)
-                    if not ok:
-                        self._enqueue_retry(task)
+                # P0-1: 逐次异常隔离, 单个任务重试失败不杀循环。
+                try:
+                    retry_tasks = self._pending_retry[:]
+                    self._pending_retry.clear()
+                    for task in retry_tasks:
+                        ok = await self.assign_task(task)
+                        if not ok:
+                            self._enqueue_retry(task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"重试循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -2366,16 +2378,22 @@ class ClusterMaster:
         try:
             while self._running:
                 await asyncio.sleep(10)
-                await self.check_timeouts()
-                await self._refresh_node_statuses()
-                await self._cleanup_completed_tasks()
-                await self._cleanup_offline_nodes()
-                online = len(await self.get_online_nodes())
-                active = sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING)
-                logger.debug(f"集群状态: {online} 在线, {active} 活跃任务")
-                # P0-8: 周期采集节点指标 + 告警规则 (接 _observability, 路由不再 503)。
-                if self._observability:
-                    await self._collect_observability_locked()
+                # P0-1: 逐次异常隔离, 单轮健康检查失败不杀循环 (否则超时/清理静默停滞)。
+                try:
+                    await self.check_timeouts()
+                    await self._refresh_node_statuses()
+                    await self._cleanup_completed_tasks()
+                    await self._cleanup_offline_nodes()
+                    online = len(await self.get_online_nodes())
+                    active = sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING)
+                    logger.debug(f"集群状态: {online} 在线, {active} 活跃任务")
+                    # P0-8: 周期采集节点指标 + 告警规则 (接 _observability, 路由不再 503)。
+                    if self._observability:
+                        await self._collect_observability_locked()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"健康检查循环异常: {e}")
         except asyncio.CancelledError:
             pass
 

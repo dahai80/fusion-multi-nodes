@@ -115,6 +115,43 @@ class TestMasterElection:
         e.remove_known_node("node-2")
         assert "node-2" not in e._known_nodes
 
+    @pytest.mark.asyncio
+    async def test_election_loop_survives_start_election_failure(self):
+        # P0-1: 选举循环逐次异常隔离 — _start_election 抛异常不杀循环。
+        import fusion_multi_node.master.election as el
+        from fusion_multi_node.master.election import MasterElection
+
+        e = MasterElection(node_id="node-1", priority=1, known_nodes=["node-2"])
+        calls = {"n": 0}
+
+        async def boom():
+            calls["n"] += 1
+            raise RuntimeError("模拟选举失败")
+
+        orig_start = e._start_election
+        e._start_election = boom
+        # 强制选举超时: _last_heartbeat 置远过去, _election_timeout 置极小。
+        import time as _time
+
+        e._last_heartbeat = _time.time() - 1000
+        e._election_timeout = 0.001
+        orig_sleep = el.asyncio.sleep
+
+        async def fast_sleep(_d):
+            await orig_sleep(0)
+
+        el.asyncio.sleep = fast_sleep
+        try:
+            await e.start()
+            await orig_sleep(0.05)
+            assert e._running is True, "选举循环不应被异常杀死"
+            assert e._task is not None and not e._task.done()
+            assert calls["n"] >= 1
+        finally:
+            el.asyncio.sleep = orig_sleep
+            e._start_election = orig_start
+            await e.stop()
+
 
 # ── M4-05 Cloud Fallback ──
 

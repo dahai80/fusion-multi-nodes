@@ -152,19 +152,25 @@ class MasterElection:
                 await asyncio.sleep(0.5)
                 now = time.time()
 
-                async with self._lock:
-                    if self.state == ElectionState.FOLLOWER:
-                        if now - self._last_heartbeat > self._election_timeout:
-                            await self._start_election()
-                    elif self.state == ElectionState.CANDIDATE:
-                        pass
-                    elif self.state == ElectionState.LEADER:
-                        # C1: 周期广播 heartbeat 到所有 follower (非每 0.5s, 按 heartbeat_interval)。
-                        # 旧实现仅 self._last_heartbeat = now, follower 收不到心跳 → 超时重选 → term 抖动。
-                        self._last_heartbeat = now
-                        if now - self._last_broadcast >= self._heartbeat_interval:
-                            self._last_broadcast = now
-                            await self._broadcast_heartbeat_locked()
+                # P0-1: 逐次异常隔离, 单轮选举/心跳失败不杀循环 (否则 HA 静默停滞零告警)。
+                try:
+                    async with self._lock:
+                        if self.state == ElectionState.FOLLOWER:
+                            if now - self._last_heartbeat > self._election_timeout:
+                                await self._start_election()
+                        elif self.state == ElectionState.CANDIDATE:
+                            pass
+                        elif self.state == ElectionState.LEADER:
+                            # C1: 周期广播 heartbeat 到所有 follower (非每 0.5s, 按 heartbeat_interval)。
+                            # 旧实现仅 self._last_heartbeat = now, follower 收不到心跳 → 超时重选 → term 抖动。
+                            self._last_heartbeat = now
+                            if now - self._last_broadcast >= self._heartbeat_interval:
+                                self._last_broadcast = now
+                                await self._broadcast_heartbeat_locked()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"选举循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
