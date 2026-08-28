@@ -4,7 +4,6 @@
 - 响应 schema 与 V1* Pydantic 模型对齐 (字段存在/类型)。
 - 9 操作 (list_nodes/register/remove/submit/migrate/degrade/progress/
   cluster_stats/observability_suggestions) 全覆盖。
-- autoscaler 未接线 → 503 (契约文档化, 非歧义 enabled:False)。
 - v1 与旧 /api/* 同源行为一致 (注册/列表)。
 """
 
@@ -242,7 +241,7 @@ class TestV1ContractTasks:
 
 
 class TestV1ContractStatsAndOps:
-    """操作 8-9: cluster_stats / observability_suggestions + autoscaler。"""
+    """操作 8-9: cluster_stats / observability_suggestions。"""
 
     @pytest.mark.asyncio
     async def test_cluster_stats_schema(self, client):
@@ -261,19 +260,3 @@ class TestV1ContractStatsAndOps:
         data = resp.json()
         assert {"suggestions", "error"} <= data.keys()
         assert isinstance(data["suggestions"], list)
-
-    @pytest.mark.asyncio
-    async def test_autoscaler_get_503_not_wired(self, client):
-        # 契约文档化: autoscaler 未接线 → 503 (非歧义 enabled:False)。
-        resp = await client.get("/api/v1/autoscaler/config", headers=AUTH_HEADERS)
-        assert resp.status_code == 503
-        assert "未接线" in resp.text
-
-    @pytest.mark.asyncio
-    async def test_autoscaler_put_503_not_wired(self, client):
-        resp = await client.put(
-            "/api/v1/autoscaler/config",
-            json={"min_nodes": 1, "max_nodes": 4},
-            headers=AUTH_HEADERS,
-        )
-        assert resp.status_code == 503

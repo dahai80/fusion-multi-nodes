@@ -225,18 +225,6 @@ class NodeRejectRequest(BaseModel):
     reason: str = ""
 
 
-class AutoscalerConfigUpdateRequest(BaseModel):
-    policy: str = ""
-    min_nodes: int | None = None
-    max_nodes: int | None = None
-    scale_up_threshold: float | None = None
-    scale_down_threshold: float | None = None
-    cooldown_seconds: float | None = None
-    idle_timeout_seconds: float | None = None
-    check_interval: float | None = None
-    rebalance_threshold: float | None = None
-
-
 # HA 路由 — VoteRequest 已在 election.py (dataclass, 非 pydantic), vote 路由用 pydantic HAVoteRequest。
 class HAVoteRequest(BaseModel):
     term: int = 0
@@ -364,19 +352,6 @@ class V1ClusterStatsResponse(BaseModel):
 class V1ObservabilitySuggestionsResponse(BaseModel):
     suggestions: list[dict[str, Any]] = []
     error: str = ""
-
-
-class V1AutoscalerConfigResponse(BaseModel):
-    enabled: bool
-    min_nodes: int = 0
-    max_nodes: int = 0
-    scale_up_threshold: float = 0.0
-    scale_down_threshold: float = 0.0
-    cooldown_seconds: float = 0.0
-    idle_timeout_seconds: float = 0.0
-    policy: str = ""
-    check_interval: float = 0.0
-    rebalance_threshold: float = 0.0
 
 
 # ── Master Server ──
@@ -1463,91 +1438,6 @@ class MasterServer:
                 "events": events,
             }
 
-        # M10-04 Autoscaler 配置热更新
-        # GAP-5 (审计 §7): autoscaler 模块未接线 (零实例化, _autoscaler 恒 None)。
-        # 旧 GET 返回 {"enabled": False} — 歧义 ("禁用" vs "未实现")。改为显式 503 +
-        # 明示未接线, 避免误读为已接但关闭。模块保留待迁移 (非生产路径)。
-        @app.get("/api/v1/autoscaler/config", response_model=V1AutoscalerConfigResponse)
-        async def get_autoscaler_config(request: Request):
-            _enforce_user_rbac(request, "/api/v1/autoscaler/config", "GET")
-            autoscaler = getattr(self.master, "_autoscaler", None)
-            if not autoscaler:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "Autoscaler 未接线 (not-wired): 模块存在但未实例化, 不构成调度路径。"
-                        "详见 CLAUDE.md GAP-5 / 迁移计划。"
-                    ),
-                )
-            cfg = autoscaler.config
-            return {
-                "enabled": True,
-                "min_nodes": cfg.min_nodes,
-                "max_nodes": cfg.max_nodes,
-                "scale_up_threshold": cfg.scale_up_threshold,
-                "scale_down_threshold": cfg.scale_down_threshold,
-                "cooldown_seconds": cfg.cooldown_seconds,
-                "idle_timeout_seconds": cfg.idle_timeout_seconds,
-                "policy": cfg.policy.value,
-                "check_interval": cfg.check_interval,
-                "rebalance_threshold": cfg.rebalance_threshold,
-            }
-
-        @app.put("/api/v1/autoscaler/config", response_model=V1StatusResponse)
-        async def update_autoscaler_config(req: AutoscalerConfigUpdateRequest, request: Request):
-            _enforce_user_rbac(request, "/api/v1/autoscaler/config", "PUT")
-            from fusion_multi_node.autoscaler.autoscaler import (
-                AutoscalerConfig,
-                ScalePolicy,
-            )
-
-            autoscaler = getattr(self.master, "_autoscaler", None)
-            if not autoscaler:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Autoscaler 未接线 (not-wired): 模块存在但未实例化。详见 CLAUDE.md GAP-5。",
-                )
-            # P1-10: pydantic 字段 None = 未提供 (走 autoscaler.config 默认); policy 非空串才更新策略。
-            if req.policy:
-                try:
-                    policy = ScalePolicy(req.policy)
-                    autoscaler.update_policy(policy)
-                    return {
-                        "status": "ok",
-                        "action": "policy_updated",
-                        "policy": policy.value,
-                    }
-                except ValueError:
-                    raise HTTPException(status_code=400, detail=f"无效策略: {req.policy}")
-            try:
-                new_config = AutoscalerConfig(
-                    min_nodes=req.min_nodes if req.min_nodes is not None else autoscaler.config.min_nodes,
-                    max_nodes=req.max_nodes if req.max_nodes is not None else autoscaler.config.max_nodes,
-                    scale_up_threshold=req.scale_up_threshold
-                    if req.scale_up_threshold is not None
-                    else autoscaler.config.scale_up_threshold,
-                    scale_down_threshold=req.scale_down_threshold
-                    if req.scale_down_threshold is not None
-                    else autoscaler.config.scale_down_threshold,
-                    cooldown_seconds=req.cooldown_seconds
-                    if req.cooldown_seconds is not None
-                    else autoscaler.config.cooldown_seconds,
-                    idle_timeout_seconds=req.idle_timeout_seconds
-                    if req.idle_timeout_seconds is not None
-                    else autoscaler.config.idle_timeout_seconds,
-                    policy=autoscaler.config.policy,
-                    check_interval=req.check_interval
-                    if req.check_interval is not None
-                    else autoscaler.config.check_interval,
-                    rebalance_threshold=req.rebalance_threshold
-                    if req.rebalance_threshold is not None
-                    else autoscaler.config.rebalance_threshold,
-                )
-                autoscaler.update_config(new_config)
-                return {"status": "ok", "action": "config_updated"}
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=str(e))
-
         # M8-02 日志导出
         @app.get("/api/v1/observability/logs/export")
         async def export_logs(request: Request, fmt: str = "json", since: float = 0.0, node_id: str = ""):
@@ -1804,8 +1694,8 @@ class MasterServer:
             return {"status": "ok", "task_id": task_id}
 
         # 旧 /api/v1 路由已 bless 为 typed (response_model) — 见上方 task_progress /
-        # v1_cluster_stats / get_optimization_suggestions / get_autoscaler_config /
-        # update_autoscaler_config。F4 不再新增重复路由 (first-registered-wins 导致后注册被遮蔽)。
+        # v1_cluster_stats / get_optimization_suggestions。F4 不再新增重复路由
+        # (first-registered-wins 导致后注册被遮蔽)。
 
         # ── GAP-8 (Phase F2): 用户管理 CRUD ──
         # 仅 ADMIN (user:manage 权限, check_user_path_access 把关)。

@@ -183,7 +183,7 @@ class TestClusterTokenBypass:
 class TestP15P16RbacFailClosed:
     """P1-5 (审计 §3.4) RBAC fail-closed: 未登记路径拒用户令牌。
     P1-6: 集群内部路由 (CLUSTER_INTERNAL) 拒用户令牌, 仅 cluster_token 可达;
-    用户面新增路由 (config/autoscaler/metrics/observability-export) 登记鉴权。"""
+    用户面新增路由 (config/metrics/observability-export) 登记鉴权。"""
 
     async def test_unregistered_path_denies_user_token(self, tmp_path, monkeypatch):
         # P1-5: 未登记路由 (/api/foobar) → 用户令牌 fail-closed 拒 (旧 fail-open 放行)。
