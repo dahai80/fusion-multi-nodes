@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-28 — 企业级生产商用发布阻塞项修复 (7 项)
+
+> **生产就绪阻塞消除**: 7 项企业级商用阻塞全部落地 — HA 接线漏 / 可观测持久化 / 告警出站 /
+> mTLS config 段 / KV 生产可用声明 / CLI 备份恢复 / 规则纪元持久化。策略 = config 段 + 部署层
+> env 透传 + 文档引导 (用户决策), **不翻代码默认** (mTLS/HA 仍默认关保测试兼容); 唯一翻默认
+> 项 `observability.persist` (测试显式构造)。基线 1309 → 1341 测试全绿 (新增 26 + 6 回归网)。
+> 随机序双向绿。ruff 净。
+
+### Fixed — 7 阻塞
+
+- **HA 单 Master 接线漏 (item 1)**: `cli.py` `cluster start` 路径调 `_master.start()` 不带
+  `ha_config` (仅 `node start` 带) → 该路径永不启 HA。修: `_async_cluster_start` 与
+  `_async_node_start` 对齐, 读 `ClusterConfig().get_ha_config()` + `config=` 注入, 消除两启动
+  路径不一致。HA 仍默认关 (单 Master 兼容), `config.json` `ha.enabled=true` + peers 显式启用。
+- **可观测全内存 deque (item 2)**: `observability.persist` 默认 False + 无周期 save → 崩溃丢
+  stop 后数据。修: `persist` 默认 True (唯一翻默认项, 测试显式构造不读默认); `_cleanup_loop`
+  末尾加周期 save (300s 节拍, persist=True 时 `self.save()` 落盘增量); `node start` master 分支
+  注入带 config 的 `ClusterObservability` (retention+persist), 消除裸构造兜底。
+- **告警无出站通道 (item 3)**: `_register_alert_webhook` env-only (`FUSION_ALERT_WEBHOOK_URL`),
+  零配置无告警。修: `config` 加 `observability.alerts.{webhook_url,webhook_timeout}` 段;
+  `_register_alert_webhook` 读 config 回退 env (env 优先); 非空才注册 fire-and-forget POST
+  (httpx, to_thread 不阻塞)。100% 本地 — webhook 指内网端点。
+- **mTLS 默认关无 config 段 (item 4)**: `_ENABLED` import 时读 env 缓存 → config-driven
+  `enabled` 无效; 无 config 段无部署引导。修: `config` 加 `security.mtls.{enabled,ca_cert,
+  node_cert,node_key,node_id,node_role}` 段 (默认关); `mtls.py` `_ENABLED` import-time 缓存
+  → lazy `is_enabled()` 读 env; 新 `configure_from_config(cfg)` config→env 桥 (env 优先不覆盖
+  已设非空); 两 master 启动路径 start 前调桥。**fail-closed 不变** (开但证书不全 raise
+  RuntimeError "证书路径不全", GAP-2 不破)。mTLS 仍默认关 (测试兼容), 生产须显式开。
+- **数据无内置备份 (item 6)**: `docs/OPERATIONS.md` 手动 recipe 漏 users.json/audit.log/
+  observability.jsonl/tls//kv/; 无 CLI 命令无恢复流程。修: `cli.py` 新 `backup` 命令组 —
+  `backup create [--out DIR]` (tar.gz 打包 `~/.fusion/multi-node/` 全量 9 文件+tls/+kv/,
+  原子 tmp+rename, 0600, 含 `.cluster_token` 明文+日志警告) + `backup restore --in FILE
+  [--yes]` (路径逃逸校验拒 `..`/绝对路径, `--yes` 跳确认, 损坏文件中止)。
+- **规则纪元/confirm 内存态 (item 7)**: `_rule_epoch`/`_confirms` 纯内存 → 重启归零 / HA
+  failover 从 0 (guard 重新基线/重查, v0.13.0 CHANGELOG 已知限制)。修: 加 `_rule_epoch_path
+  = ~/.fusion/multi-node/rule_epoch.json`; `_load_rule_epoch_state()` (start 恢复, 坏盘容错
+  → 默认 0/空) + `_save_rule_epoch_snapshot()` (原子 tmp+fsync+replace, 锁外 async
+  to_thread) + `_persist_rule_epoch_async()` + `_mark_rule_epoch_dirty()` (节流脏标 5s,
+  `_persist_loop` 15s 兜底); `advance_rule_epoch`/`receive_rule_epoch`/`receive_confirm` 写后
+  接入; `stop()` 最终落盘; HA `_build_state_sync_payload` 纳入 epoch+confirm, standby
+  `receive_synced_state` 取 max epoch (防回退) + 合并 confirm。
+
+### Docs — item 5 (KV 生产可用声明, 非代码阻塞)
+
+- `docs/DEPLOYMENT.md` + `README.md`: 声明合成 KV 跨节点传输**生产可用** (v0.11.0 起, issue
+  #33 已闭合) — `SyntheticKVTransport` 默认后端, 跨节点 HTTP 路由合成 KVCacheEntry, `sync_kv_cache`
+  返 True; 真实张量 `MLXKVTransport` = env-gated 实验性 bonus (`FUSION_KV_TENSOR_BACKEND=mlx`,
+  纯 env flip 当上游 #650 落地, 404→degrade 优雅)。生产用合成 KV 即可, 非阻塞。
+- `docs/DEPLOYMENT.md` 加 5 生产段: 多 Master HA 配置示例 / mTLS 节点互信必配 / 告警出站通道 /
+  KV 生产可用 / 可观测持久化。
+- `docs/HA-CRASH-RECOVERY.md`: 多 Master 生产配置示例 + 规则纪元/confirm 持久化 (不再内存态)。
+- `docs/OPERATIONS.md`: 备份范围补全 5 漏项 + 引用新 `backup create/restore` CLI + 恢复流程
+  + 保留手动 recipe 兜底 + mTLS 证书轮换。
+
+### Changed
+
+- `config/config.py`: `observability.persist` 默认 True; 加 `observability.alerts` +
+  `security.mtls` 子段 + validators + `get_mtls_config()`/`get_alert_webhook_config()`/
+  `get_ha_config()`。
+- `security/mtls.py`: lazy `is_enabled()` + `configure_from_config()`; 全调用点
+  (server_ssl_kwargs/client_kwargs/scheme/certs_available) 经 `is_enabled()` 非裸 `_ENABLED`。
+- `observability/observability.py`: `_cleanup_loop` 周期 save。
+- `master/cluster_master.py`: `_register_alert_webhook` 读 config 回退 env; rule_epoch/confirm
+  持久化 + HA 同步 payload。
+- `cli.py`: `cluster start` 传 ha_config+config; 两 master 路径调 `mtls.configure_from_config`;
+  新 `backup` 命令组。
+- 版本 0.13.0 → **0.14.0** (`pyproject.toml`, `__init__.py`)。
+
+### Tests — 新增 26
+
+- `tests/test_backup_cli.py` (8): create tar.gz 全文件+0600 / 自定义 out / 空目录容错 /
+  token 警告 / restore roundtrip / 确认中止 / 损坏中止 / 路径逃逸拒。
+- `tests/test_rule_epoch_persist.py` (10): advance 重启恢复 / confirm 重启恢复 / 缺文件默认 0 /
+  坏 JSON 默认 0 / 节流 defer / persist_loop flush / stop 最终落盘 / HA standby 接 epoch /
+  接 confirm / 防回退。
+- `tests/test_mtls_config_bridge.py` (8): disabled by default / config 写 env / env 优先 /
+  fail-closed 证书不全 / 空段 no-op / 无方法 no-op / 空串不写 env / scheme lazy。
+
+### 已知限制
+
+- mTLS/HA 仍默认关 (生产须显式开: config 段 + 部署层 env, 见 `docs/DEPLOYMENT.md`)。
+- 上游真实张量 KV env-gated (待 fusion-mlx #650); 合成 KV 生产可用, 非阻塞。
+
 ## [0.13.0] - 2026-08-28 — issue #52 跨节点 guard TRANSPORT 原语
 
 > **新功能 (minor)**: 跨节点 guard 契约 — fusion-guard 消费的 3 个 TRANSPORT 原语。

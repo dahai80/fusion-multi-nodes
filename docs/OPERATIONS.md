@@ -98,26 +98,72 @@
 
 ## 备份与恢复 (backup/restore)
 
-**备份** (定期, 关键状态文件):
+### CLI 备份 (v0.14.0, 推荐)
+
+`fusion-multi-node backup` 命令组一键打包/恢复 `~/.fusion/multi-node/` 全量数据 (原子 tar.gz, 0600 权限):
+
+```bash
+# 备份 — 默认输出 ~/.fusion/multi-node/backups/mn-<时间戳>.tar.gz
+fusion-multi-node backup create
+# 自定义输出目录
+fusion-multi-node backup create --out /data/backups/
+
+# 恢复 — 停服后解包覆盖 (默认交互确认, --yes 跳确认)
+./start.sh stop
+fusion-multi-node backup restore --in ~/.fusion/multi-node/backups/mn-XXXXXX.tar.gz --yes
+./start.sh start
+```
+
+**备份范围** (9 文件 + tls/ + kv/ 子目录):
+- `config.json` — 集群配置 (端口/HA/scheduling/mTLS 段)。
+- `tasks.json` — H3 任务持久化 (非终态 RUNNING/MIGRATED/PENDING)。
+- `election_state.json` — 选举 term/voted_for (多 Master HA)。
+- `rule_epoch.json` — 规则纪元/confirm 持久化 (v0.14.0, issue #52 guard 基线)。
+- `kv_cache.json` — KV 缓存 (P1-9, 过期条目不恢复)。
+- `users.json` — 多租户用户令牌 (GAP-8 F1, scrypt 哈希)。
+- `audit.log` — 安全审计 JSONL (GAP-8)。
+- `observability.jsonl` — 可观测指标/告警持久化 (v0.14.0)。
+- `.cluster_token` — 集群共享密钥 (mode 0600) — **备份文件含明文 token, 0600 权限, 须妥善保管**。
+- `tls/` — mTLS CA/叶证书 (v0.14.0 生产必配)。
+- `kv/` — KV 张量分片 (GAP-7)。
+
+**恢复语义**:
+- `tasks.json`: RUNNING/MIGRATED → PENDING 启动重派; 终态不落盘。
+- `election_state.json`: 单 Master 模式无影响; 多 Master HA 恢复投票状态防 term churn。
+- `rule_epoch.json`: 恢复 guard 纪元基线, 不从 0 重查 (v0.14.0, 修重启归零/HA failover 从 0)。
+- `.cluster_token`: **所有节点必须一致** — 恢复后须同步全集群 (见 Token 轮换), 否则节点间 401。
+- restore 含**路径逃逸校验** (拒 tar 内 `..`/绝对路径), 损坏文件中止不部分写。
+
+### 手动备份 (CLI 不可用时兜底)
+
 ```bash
 BACKUP=~/.fusion/multi-node-backup-$(date +%Y%m%d)
 mkdir -p "$BACKUP"
-cp ~/.fusion/multi-node/{tasks.json,election_state.json,kv_cache.json,config.json} "$BACKUP/" 2>/dev/null || true
+# 全量数据文件 (v0.14.0 范围)
+cp ~/.fusion/multi-node/{tasks.json,election_state.json,rule_epoch.json,kv_cache.json,users.json,config.json} "$BACKUP/" 2>/dev/null || true
+cp ~/.fusion/multi-node/{audit.log,observability.jsonl} "$BACKUP/" 2>/dev/null || true
+cp -r ~/.fusion/multi-node/{tls,kv} "$BACKUP/" 2>/dev/null || true
 # .cluster_token 单独安全备份 (mode 0600)
 cp ~/.fusion/multi-node/.cluster_token "$BACKUP/" && chmod 600 "$BACKUP/.cluster_token"
 ```
-**恢复**:
+**手动恢复**:
 ```bash
 ./start.sh stop
-cp "$BACKUP"/{tasks.json,election_state.json,kv_cache.json,config.json,.cluster_token} ~/.fusion/multi-node/
+cp "$BACKUP"/{tasks.json,election_state.json,rule_epoch.json,kv_cache.json,users.json,config.json,audit.log,observability.jsonl,.cluster_token} ~/.fusion/multi-node/ 2>/dev/null || true
+cp -r "$BACKUP"/{tls,kv} ~/.fusion/multi-node/ 2>/dev/null || true
 chmod 600 ~/.fusion/multi-node/.cluster_token
-./start.sh start   # H3 _restore_tasks 恢复在途任务; election_state 恢复 term/voted_for
+./start.sh start   # H3 _restore_tasks 恢复在途任务; rule_epoch 恢复 guard 纪元
 ```
-- `tasks.json`: 非终态任务 (RUNNING/MIGRATED/PENDING) → 启动重派; 终态不落盘。
-- `election_state.json`: 选举 term/voted_for (多 Master HA); 单 Master 模式无影响。
-- `kv_cache.json`: KV 缓存 (P1-9 持久化); 过期条目不恢复。
-- `config.json`: 集群配置 (含端口/HA/scheduling)。
-- `.cluster_token`: 集群共享密钥 — **所有节点必须一致**, 恢复后须同步全集群 (见 Token 轮换)。
+
+### mTLS 证书轮换 (v0.14.0 生产必配)
+
+mTLS 开启后, 叶证书到期前轮换 (CA 3650 天, 叶 365 天):
+
+1. 生成新叶证书: `mtls.provision_node(node_id, role, ca_cert, ca_key, ip=...)` (见 `docs/DEPLOYMENT.md`)。
+2. 停节点: `./start.sh stop`。
+3. 替换 `~/.fusion/multi-node/tls/node.crt` + `node.key`。
+4. 启动: `./start.sh start` — `mtls.configure_from_config()` 读 config 段 (env 优先), fail-closed 校验证书路径齐全。
+5. CA 轮换 (罕见): `mtls.provision_cluster()` 生成新 CA → 全节点重签叶证书 → 同步 ca.crt。须停机窗口 (全节点重签)。
 
 ## Token 轮换 (token rotation)
 

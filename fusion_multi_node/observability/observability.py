@@ -600,6 +600,12 @@ class ClusterObservability:
                     f"日志 {before_l}→{len(self.logs)}, "
                     f"告警 {before_a}→{len(self.alerts)}"
                 )
+                # v0.14.0 item 2: 周期 save 防崩溃丢 stop 后数据 (persist=True 时落盘, 复用既有 save)。
+                if self.persist:
+                    try:
+                        self.save()
+                    except Exception as e:
+                        logger.warning(f"可观测周期落盘失败: {e}")
         except asyncio.CancelledError:
             pass
 

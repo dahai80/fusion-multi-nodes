@@ -5,12 +5,26 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.13.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.14.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1309%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1341%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **📦 v0.14.0 (2026-08-28) — 企业级生产商用发布阻塞项修复 (7 项)**
+>
+> 7 项企业级商用阻塞全部落地: (1) HA `cluster start` 接线漏修复 (原该路径永不启 HA);
+> (2) 可观测持久化默认开 (`observability.persist=True` + `_cleanup_loop` 300s 周期 save, 不再重启即失);
+> (3) 告警出站 webhook config 段 (env 优先, 非 0 配置无告警); (4) mTLS config 段 + lazy `is_enabled()` +
+> `configure_from_config` config→env 桥 (fail-closed 不变, 仍默认关保测试兼容); (5) 合成 KV 跨节点传输
+> **生产可用**声明 (#33 已闭合, 真实张量 env-gated bonus); (6) CLI `backup create/restore` 一键备份恢复
+> (全量 9 文件+tls/+kv/, 原子 tar.gz 0600, 路径逃逸校验); (7) 规则纪元/confirm 持久化 (不再重启归零 /
+> HA failover 从 0, `_build_state_sync_payload` 纳入同步)。策略 = config 段 + 部署层 env 透传 + 文档引导
+> (不翻代码默认, 唯一翻默认项 `observability.persist`)。基线 1309 → 1341 测试全绿 (随机序双向绿), ruff 净。详见
+> [CHANGELOG](docs/CHANGELOG.md)。生产 mTLS/HA 须显式开: 见 `docs/DEPLOYMENT.md`。
 
 ---
 
@@ -76,9 +90,9 @@
 | **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (上游 `/distributed/load_shard`+`pipeline_step` 已交付 issue #621 closed, b64.npy 激活跨节点, ⚠️真模型端到端待长期落地) |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server. ⚠️启动但从不作为派发传输 (仅 HTTP 派发) |
-| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing. ⚠️Master 级 KV 张量同步为 no-op (跨节点 KV 仅 HTTP 元数据, 非张量; P3-28 张量级传输待长期落地) |
+| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing. ✅跨节点 KV 传输生产可用 (GAP-7/#33, v0.11.0): `SyntheticKVTransport` 默认后端合成 KVCacheEntry 跨节点路由; 真实张量 `MLXKVTransport` env-gated 实验性 bonus (`FUSION_KV_TENSOR_BACKEND=mlx`, 待上游 #650) |
 | **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, OS-level sandbox-exec, data scrubbing, FMPCrypto (AES-256-GCM + ECDH), Metal AES-GCM acceleration |
-| **Observability** ✅已接线 | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions. **P0-8 接 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集指标/告警 (去重); `/api/v1/observability/{logs/export,suggestions,alerts}` 已返 200; `/api/v1/metrics` (Prometheus) 同样已接。全内存 deque, 重启即失 (P1 同类债)** |
+| **Observability** ✅已接线 | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions. **P0-8 接 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集指标/告警 (去重); `/api/v1/observability/{logs/export,suggestions,alerts}` 已返 200; `/api/v1/metrics` (Prometheus) 同样已接。v0.14.0 持久化默认开 (`observability.persist=True`, `observability.jsonl` 落盘, `_cleanup_loop` 300s 周期 save)** |
 | **Storage Volumes** | Volume abstraction, checkpoint persistence, capacity monitoring, LRU eviction. **ShardReplicator / DistributedKVStore / quorum 读写未接线生产路径, 仅库级可用** |
 
 ### Architecture

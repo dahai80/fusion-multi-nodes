@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import os
+import tarfile
 import time
 import uuid
+from pathlib import Path
 
 import click
 
@@ -173,18 +175,29 @@ async def _async_node_start(
         actual_port = port or 11452
         _master = ClusterMaster(host=host, port=actual_port)
         with_mdns = not no_mdns
+        cfg = _get_config()
+        # v0.14.0 item 4: mTLS config 段 → env 桥 (启动前应用, lazy is_enabled 即时生效)。
+        try:
+            from .security.mtls import configure_from_config as _mtls_cfg
+
+            _mtls_cfg(cfg)
+        except Exception as e:
+            logger.warning(f"mTLS config 桥应用失败: {e}")
+        # v0.14.0 item 2: node start 路径注入 observability config (消除裸构造兜底忽略 config)。
+        _master._observability = ClusterObservability(
+            retention_hours=cfg.get("observability.retention_hours", 24.0),
+            persist=cfg.get("observability.persist", True),
+        )
         # P4: 读 HA 配置接入 start() (默认关闭 → 单 Master)
         try:
-            from .config import ClusterConfig
-
-            ha_config = ClusterConfig().get_ha_config()
+            ha_config = cfg.get_ha_config()
         except Exception:
             ha_config = None
         await _master.start(
             with_server=True,
             with_mdns=with_mdns,
             ha_config=ha_config,
-            config=_get_config(),  # P2-20 §6.8: 传 ClusterConfig 供 /api/v1/config/reload 热加载
+            config=cfg,  # P2-20 §6.8: 传 ClusterConfig 供 /api/v1/config/reload 热加载
         )
 
         if transport == "fmp":
@@ -308,23 +321,37 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
     global _master, _agent
 
     if mode in ("master", "both"):
+        cfg = _get_config()
         _master = ClusterMaster(
-            host=_get_config().get("cluster.master_host", "127.0.0.1"),
-            port=_get_config().get("cluster.master_port", 11452),
+            host=cfg.get("cluster.master_host", "127.0.0.1"),
+            port=cfg.get("cluster.master_port", 11452),
         )
+        # v0.14.0 item 4: mTLS config 段 → env 桥 (启动前应用)。
+        try:
+            from .security.mtls import configure_from_config as _mtls_cfg
+
+            _mtls_cfg(cfg)
+        except Exception as e:
+            logger.warning(f"mTLS config 桥应用失败: {e}")
         # P1-H 注入租户并发配额 (DEFAULT_CONFIG scheduling.tenant_max_concurrent)。
         # P1-19: 注入优先级队列上限 (scheduling.max_pending_queue, 0=不限, 默认 1000)。
         _master.configure_scheduling(
-            _get_config().get("scheduling.tenant_max_concurrent", 4),
-            max_pending_queue=_get_config().get("scheduling.max_pending_queue", 1000),
+            cfg.get("scheduling.tenant_max_concurrent", 4),
+            max_pending_queue=cfg.get("scheduling.max_pending_queue", 1000),
         )
         # P0-8: 注入带配置 retention 的 Observability (master.start 接生命周期 + 路由)。
-        # 原独立 _observability 全局不挂 master → /api/v1/observability/* 恒 503。
+        # v0.14.0 item 2: persist 默认 True (企业生产跨重启保留)。
         _master._observability = ClusterObservability(
-            retention_hours=_get_config().get("observability.retention_hours", 168.0),
-            persist=_get_config().get("observability.persist", False),
+            retention_hours=cfg.get("observability.retention_hours", 168.0),
+            persist=cfg.get("observability.persist", True),
         )
-        await _master.start()
+        # v0.14.0 item 1: 修 HA 接线漏 — cluster start 路径原调 _master.start() 不带 ha_config,
+        # 该路径永不启 HA。与 node start 对齐, 读 get_ha_config() 传入。
+        try:
+            ha_config = cfg.get_ha_config()
+        except Exception:
+            ha_config = None
+        await _master.start(ha_config=ha_config, config=cfg)
 
         if transport == "fmp":
             from .protocol import FMPServer
@@ -712,6 +739,113 @@ async def _async_kv_warm(prompts: list, nodes: list):
     manager = KVSharingManager()
     results = await manager.warm_cache("default", prompts, nodes)
     click.echo(f"预热完成: {results['success']} 成功, {results['failed']} 失败")
+
+
+# ── v0.14.0 item 6: 数据备份/恢复 ──
+
+# 备份范围 — ~/.fusion/multi-node/ 下全部状态文件 (生产数据跨重启/迁移必备)。
+# 含 .cluster_token 明文 (备份须含 token 才能恢复), 备份文件 0600 + 日志警告妥善保管。
+_BACKUP_PATTERNS = (
+    "config.json",
+    "tasks.json",
+    "election_state.json",
+    "rule_epoch.json",
+    "kv_cache.json",
+    "users.json",
+    "audit.log",
+    "observability.jsonl",
+    ".cluster_token",
+)
+
+
+def _multi_node_dir() -> Path:
+    return Path.home() / ".fusion" / "multi-node"
+
+
+@cli.group()
+def backup():
+    """数据备份/恢复 (config/tasks/kv/users/audit/tls/cluster_token)。"""
+
+
+@backup.command("create")
+@click.option(
+    "--out",
+    "-o",
+    type=click.Path(file_okay=False),
+    default="",
+    help="输出目录 (默认 ~/.fusion/multi-node/backups/)",
+)
+def backup_create(out: str):
+    """打包 ~/.fusion/multi-node/ 全量状态 → tar.gz (原子 tmp+rename, 0600)。"""
+    src = _multi_node_dir()
+    out_dir = Path(out) if out else src / "backups"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dest = out_dir / f"mn-{ts}.tar.gz"
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    included: list[str] = []
+    try:
+        with tarfile.open(tmp, "w:gz") as tar:
+            for name in _BACKUP_PATTERNS:
+                fpath = src / name
+                if fpath.exists():
+                    tar.add(fpath, arcname=name)
+                    included.append(name)
+            # tls/ + kv/ 子目录全量打包 (证书 + KV 持久化数据)
+            for subdir in ("tls", "kv"):
+                d = src / subdir
+                if d.exists() and d.is_dir():
+                    tar.add(d, arcname=subdir)
+                    included.append(f"{subdir}/")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dest)
+    except Exception as e:
+        logger.error(f"备份创建失败: {e}")
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        click.echo(f"❌ 备份失败: {e}", err=True)
+        raise click.Abort()
+    click.echo(f"✅ 备份已创建: {dest}")
+    click.echo(f"   含 {len(included)} 项: {', '.join(included) if included else '(空)'}")
+    if ".cluster_token" in included:
+        click.echo("⚠️  备份含 .cluster_token 明文, 妥善保管 (0600 权限)")
+
+
+@backup.command("restore")
+@click.option("--in", "in_file", required=True, type=click.Path(exists=True, dir_okay=False), help="备份 tar.gz 路径")
+@click.option("--yes", "-y", is_flag=True, help="跳过确认")
+def backup_restore(in_file: str, yes: bool):
+    """从 tar.gz 恢复 — 覆盖 ~/.fusion/multi-node/ (建议先停服)。"""
+    dest = _multi_node_dir()
+    if not yes:
+        click.echo(f"将解包覆盖: {dest}")
+        click.echo("建议先停服 (./start.sh stop) 再恢复, 避运行态文件竞争。")
+        click.confirm("确认继续恢复?", abort=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    restored: list[str] = []
+    try:
+        with tarfile.open(in_file, "r:gz") as tar:
+            # 安全校验: 拒路径逃逸 (.. / 绝对路径), 防解包写任意位置
+            for member in tar.getmembers():
+                if member.name.startswith("/") or ".." in Path(member.name).parts:
+                    logger.error(f"备份含不安全路径, 拒解包: {member.name}")
+                    click.echo(f"❌ 备份含不安全路径: {member.name}", err=True)
+                    raise click.Abort()
+            tar.extractall(dest)
+            restored = [m.name for m in tar.getmembers()]
+    except tarfile.ReadError as e:
+        logger.error(f"备份文件损坏: {e}")
+        click.echo(f"❌ 备份文件损坏或非 tar.gz: {e}", err=True)
+        raise click.Abort()
+    # 恢复后敏感文件权限复原
+    token_file = dest / ".cluster_token"
+    if token_file.exists():
+        try:
+            os.chmod(token_file, 0o600)
+        except OSError:
+            pass
+    click.echo(f"✅ 恢复完成: {dest}")
+    click.echo(f"   还原 {len(restored)} 项: {', '.join(restored[:8])}{'...' if len(restored) > 8 else ''}")
 
 
 def main():

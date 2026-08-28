@@ -123,12 +123,26 @@ Leader Master 宕机 (整机/进程)
   → always-on: 空窗 ≤ 选举超时 (~10s)
 ```
 
+## v0.14.0 — HA 接线修复 + 规则纪元/confirm 持久化
+
+两处企业级阻塞修复 (详见 `docs/DEPLOYMENT.md` + `docs/CHANGELOG.md`):
+
+1. **`cluster start` 接线漏修复**: v0.14.0 前 `fusion-multi-node cluster start` (cli.py `_async_cluster_start`)
+   调 `_master.start()` **不带 ha_config** → 该路径永不启 HA (仅 `node start` 路径带)。v0.14.0 两启动路径
+   对齐, 均读 `ClusterConfig.get_ha_config()` + 注入 `config=`。生产经 `config.json` `ha.enabled=true` +
+   peers 显式启用 (config 示例见 DEPLOYMENT.md「多 Master HA」段)。HA 仍默认关 (单 Master 兼容)。
+2. **规则纪元/confirm 不再内存态**: v0.14.0 前 `_rule_epoch`/`_confirms` 纯内存 → 重启归零 / HA failover
+   从 0 起 (guard 重新基线/重查, v0.13.0 CHANGELOG 已知限制)。v0.14.0 加 `rule_epoch.json` 持久化
+   (原子落盘, start 恢复, 坏盘容错→默认 0) + leader `_build_state_sync_payload` 纳入 epoch+confirm,
+   standby `receive_synced_state` 取 max epoch (防回退) + 合并 confirm。HA failover 后 standby 接 leader
+   推进的纪元, 不再从 0。
+
 ## 局限
 
 - 单 Master = SPOF, launchd 守护仅保证 **本机** 崩溃自愈, 不防整机宕机/网络分区。
 - 多 Master HA (跨机故障转移) 已接线 + 全状态同步 (GAP-1): `start(ha_config=)` 显式配 peers
-  启动选举, leader 心跳 + 任务快照 + **全状态** 推 standby。**always-on 空窗 ≤ 选举超时 (~10s)**。
-  仍为 opt-in, 默认单 Master 部署不启用。生产 always-on 须 2+ Master 显式配置。
+  启动选举, leader 心跳 + 任务快照 + **全状态** (含规则纪元/confirm) 推 standby。**always-on 空窗 ≤ 选举超时 (~10s)**。
+  仍为 opt-in, 默认单 Master 部署不启用。生产 always-on 须 2+ Master 显式配置 (见 DEPLOYMENT.md)。
 - 本机崩溃自愈 (launchd + H3) 已覆盖主要故障模式; 跨机故障转移为可选增强 (GAP-1 补齐)。
 - KV 跨节点张量复用已交付 (GAP-7, v0.11.0): `sync_kv_cache` 传输真张量, 默认 `SyntheticKVTransport`
   合成兜底, `MLXKVTransport` env-gated 待上游 #650 内存直传落地 (未落地 404→降级合成, 不阻断);

@@ -74,8 +74,88 @@ docker compose up -d --scale agent=2
 - `MasterElection` Raft-simplified: leader 选举 + term/voted_for 持久化 (P0-1) + leader 心跳广播 + 任务快照推 standby。
 - Standby (`_election 配置且非 _is_leader`): `assign_task` 拒派发, `/api/tasks/submit` 返 503。
 - `StandbyMaster` 类为未接线死代码 (与已接线的 `MasterElection` 分离)。
+- **v0.14.0**: `cluster start` 路径已修接线漏 (原 `node start` 带 ha_config, `cluster start` 漏), 两启动路径一致。规则纪元/confirm 持久化 (不再重启归零 / HA failover 从 0 起)。
+
+**生产多 Master 配置示例** (`~/.fusion/multi-node/config.json`):
+```json
+{
+  "ha": {
+    "enabled": true,
+    "node_id": "master-1",
+    "priority": 10,
+    "peers": [
+      {"node_id": "master-2", "ip_address": "10.0.0.2", "port": 11452, "priority": 5},
+      {"node_id": "master-3", "ip_address": "10.0.0.3", "port": 11452, "priority": 1}
+    ],
+    "state_sync_interval": 2.0
+  }
+}
+```
+各 Master 节点设不同 `node_id`/`priority`, `peers` 列全集群 Master (含地址, 裸字符串仅 node_id 不可达)。leader 崩溃 → 选举转移 → standby 接管调度。配合 launchd/docker 双 Master 部署, 每节点各跑一份。
 
 **警告**: 技术预览, 非生产 SLA 验证。生产关键负载仍建议单 Master + launchd + 定期备份。
+
+## mTLS 节点互信 (生产必配)
+
+v0.14.0: mTLS **默认关** (测试兼容); 企业生产**必须显式开启** — 否则集群内 HTTP 无节点身份校验, 任何同网段主机可注册节点。
+
+**1. 生成集群 CA (一次性, 各节点共享 ca.crt)**:
+```bash
+python -c "from fusion_multi_node.security.mtls import provision_cluster; print(provision_cluster())"
+# → (/path/ca.crt, /path/ca.key)
+```
+
+**2. 各节点签发叶证书** (CN=node_id, O=role):
+```bash
+python -c "from fusion_multi_node.security.mtls import provision_node; print(provision_node('master-1', 'master', '/path/ca.crt', '/path/ca.key', ip='10.0.0.1'))"
+# → (/path/node.crt, /path/node.key)  叶证书带 SAN (DNSName + IPAddress) 防 MITM
+```
+
+**3. config 段开启** (`~/.fusion/multi-node/config.json`):
+```json
+{
+  "security": {
+    "mtls": {
+      "enabled": true,
+      "ca_cert": "/tls/ca.crt",
+      "node_cert": "/tls/node.crt",
+      "node_key": "/tls/node.key",
+      "node_id": "master-1",
+      "node_role": "master"
+    }
+  }
+}
+```
+启动时 `mtls.configure_from_config()` 把 config 段写回 env (env 优先兼容旧 env-only 部署)。**fail-closed**: `enabled=true` 但证书路径不全 → 启动 raise, 不回退明文 (GAP-2)。亦可经 env 直配 (`FUSION_MTLS_ENABLED=1` + `FUSION_MTLS_CA_CERT/NODE_CERT/NODE_KEY`), 见 `deploy/.env.example` + plist/docker env 透传。
+
+证书轮换见 `docs/OPERATIONS.md`。
+
+## 告警出站通道 (生产必配)
+
+v0.14.0: 告警**默认仅留内存 deque** (需轮询 `/api/v1/observability/alerts`); 企业生产**须配 webhook** 接收节点掉线/内存告警推送。
+
+config 段 (`~/.fusion/multi-node/config.json`):
+```json
+{
+  "observability": {
+    "alerts": {
+      "webhook_url": "http://内网告警端点/alert",
+      "webhook_timeout": 10.0
+    }
+  }
+}
+```
+非空则 `_register_alert_webhook` 注册 fire-and-forget POST (httpx, to_thread 不阻塞告警链, 失败 logger.warning 不拖垮)。env 优先: `FUSION_ALERT_WEBHOOK_URL` 覆盖 config。**100% 本地** — webhook 指内网端点, 无云依赖。
+
+## KV 跨节点传输 (生产可用)
+
+合成 KV 跨节点传输**生产可用** (v0.11.0 起, issue #33 已闭合): `SyntheticKVTransport` 默认后端, 跨节点 HTTP 路由合成 KVCacheEntry, 不依赖上游 fusion-mlx 张量接口。`sync_kv_cache` 返回 True, 跨节点 warm/export/import 路由全通。
+
+真实张量 transport (`MLXKVTransport`) 为 **env-gated 实验性 bonus** (`FUSION_KV_TENSOR_BACKEND=mlx`), 代码已写, 纯 env flip 当上游 fusion-mlx #650 落地, 404→degrade 优雅。生产用合成 KV 即可。
+
+## 可观测持久化
+
+v0.14.0: `observability.persist` **默认开** — 指标/告警/日志跨重启保留 (`~/.fusion/multi-node/observability.jsonl`, 限最近 N 条)。`_cleanup_loop` 周期 save (300s) 防崩溃丢 stop 后数据, stop 时最终落盘。关持久化: config `observability.persist=false`。
 
 ## 扩容与资源
 

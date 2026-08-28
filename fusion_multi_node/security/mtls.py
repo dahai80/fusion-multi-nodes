@@ -27,15 +27,47 @@ import os
 import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DIR = Path.home() / ".fusion" / "multi-node" / "tls"
-_ENABLED = os.environ.get("FUSION_MTLS_ENABLED", "").lower() in ("1", "true", "yes")
+# v0.14.0 item 4: 不再 import 时一次性缓存 — lazy 读 env, 供 configure_from_config 运行时翻默认。
+# 旧 _ENABLED import-time 缓存导致 config 段 enabled=True 不生效 (silent security gap, Rule 12)。
+_TRUTHY = ("1", "true", "yes")
 
 
 def is_enabled() -> bool:
-    return _ENABLED
+    """mTLS 是否开启 — lazy 读 env FUSION_MTLS_ENABLED (config 桥经 configure_from_config 写 env)。"""
+    return os.environ.get("FUSION_MTLS_ENABLED", "").lower() in _TRUTHY
+
+
+def configure_from_config(cfg: Any) -> None:
+    """v0.14.0 item 4: config 段 → env 桥。CLI/服务器启动时 (config 加载后, uvicorn 前) 调。
+
+    把 security.mtls 配置段写回 env (env 优先: 已设的非空 env 不覆盖, 兼容旧 env-only 部署)。
+    写入后 is_enabled() 即时反映 (lazy, 无 import-time 缓存问题)。fail-closed 不变: enabled=True
+    但证书路径不全 → server_ssl_kwargs/client_kwargs raise (不回退明文)。
+    """
+    mtls = cfg.get_mtls_config() if hasattr(cfg, "get_mtls_config") else {}
+    if not mtls:
+        return
+    if mtls.get("enabled"):
+        # 仅当 env 未设时写 (env 优先, 不覆盖显式 env 部署)。
+        if not os.environ.get("FUSION_MTLS_ENABLED"):
+            os.environ["FUSION_MTLS_ENABLED"] = "1"
+    # 证书路径: config 非空且 env 未设时写回 (env 优先)。
+    for cfg_key, env_name in (
+        ("ca_cert", "FUSION_MTLS_CA_CERT"),
+        ("node_cert", "FUSION_MTLS_NODE_CERT"),
+        ("node_key", "FUSION_MTLS_NODE_KEY"),
+        ("node_id", "FUSION_MTLS_NODE_ID"),
+        ("node_role", "FUSION_MTLS_NODE_ROLE"),
+    ):
+        val = mtls.get(cfg_key, "")
+        if val and not os.environ.get(env_name):
+            os.environ[env_name] = str(val)
+    logger.info(f"mTLS config 桥已应用: enabled={is_enabled()}")
 
 
 def _env_path(name: str) -> str | None:
@@ -49,7 +81,7 @@ def certs_available() -> bool:
     GAP-2 修复 (复审计 2026-08-26): 旧实现证书不全时静默回退明文 (fail-open),
     默认部署零节点身份校验。现改 fail-closed — 开启但证书不全直接 raise, 不回退明文。
     """
-    if not _ENABLED:
+    if not is_enabled():
         return True
     ca = _env_path("FUSION_MTLS_CA_CERT")
     cert = _env_path("FUSION_MTLS_NODE_CERT")
@@ -81,7 +113,7 @@ def _build_ssl_context(verify_ca: str | None, cert: str | None, key: str | None)
 
 
 def server_ssl_context() -> ssl.SSLContext | None:
-    if not _ENABLED:
+    if not is_enabled():
         return None
     ca, cert, key = _require_certs()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -95,7 +127,7 @@ def server_ssl_context() -> ssl.SSLContext | None:
 
 
 def client_ssl_context() -> ssl.SSLContext | None:
-    if not _ENABLED:
+    if not is_enabled():
         return None
     ca, cert, key = _require_certs()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -130,7 +162,7 @@ def server_ssl_kwargs() -> dict:
     ssl_certfile/ssl_keyfile (本节点叶证书), ssl_ca_certs (集群 CA),
     ssl_cert_reqs=CERT_REQUIRED (要求客户端证书)。开启但证书不全 → raise (fail-closed)。
     """
-    if not _ENABLED:
+    if not is_enabled():
         return {}
     ca, cert, key = _require_certs()
     return {
@@ -144,7 +176,7 @@ def server_ssl_kwargs() -> dict:
 
 def scheme() -> str:
     """集群内 URL 协议 — mTLS 开时 https, 否则 http。"""
-    return "https" if _ENABLED else "http"
+    return "https" if is_enabled() else "http"
 
 
 # ── 证书供给 (provision_cluster / provision_node) ──
