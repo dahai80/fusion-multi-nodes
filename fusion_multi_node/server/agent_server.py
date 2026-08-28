@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -197,6 +198,27 @@ class HealthResponse(BaseModel):
     uptime_seconds: float
 
 
+# issue #52 跨节点 guard 契约 — 共享 Pydantic 模型 (master + agent 同 schema)。
+# 放 agent_server 侧 cycle-safe: master 已 import agent_server (master_server:403),
+# agent 零 import master — master 反向 import 这两个模型不引入循环。
+
+
+class V1AuditChainResponse(BaseModel):
+    """原语 1 — 审计链段响应 (master + agent 同形)。guard 拉取后验链。"""
+
+    node_id: str
+    records: list[dict[str, Any]]
+    fetched_at: str
+    truncated: bool = False
+
+
+class RuleEpochReceiveRequest(BaseModel):
+    """原语 2 — 纪元广播接收端 (master 接 standby 广播 / agent 接 master 广播)。"""
+
+    epoch: int
+    source: str = ""
+
+
 # ── Agent Server ──
 
 
@@ -251,6 +273,8 @@ class AgentServer:
         # 本节点对外可寻址地址 — transfer_from_remote 据此回连本机拉缓存。
         # 默认 127.0.0.1, start() 时更新为实际监听 host。
         self._host: str = "127.0.0.1"
+        # issue #52 原语 2 — 本节点规则纪元 (接收 master 广播存此, guard 读本地基线)。
+        self._rule_epoch: int = 0
         self._setup_routes()
 
     def _setup_routes(self):
@@ -586,6 +610,29 @@ class AgentServer:
 
             info = await asyncio.to_thread(self.agent.collect_hardware_info)
             return info
+
+        # ── issue #52 跨节点 guard 契约原语 ──
+
+        @app.get("/api/v1/audit/chain")
+        async def audit_chain(request: Request, since_seq: int = 0):
+            # 原语 1: guard 拉本节点审计链段。since_seq 过滤 (缺 seq 基线记录一律返)。
+            # node-RBAC: guard 持 cluster_token + X-Node-Id: master (MASTER 角色) 放行。
+            await _check_permission(request, "/api/v1/audit/chain", "GET")
+            records = self._audit.read()
+            filtered = [r for r in records if r.get("seq", 0) >= since_seq or "seq" not in r]
+            return V1AuditChainResponse(
+                node_id=self.agent.config.node_id,
+                records=filtered,
+                fetched_at=datetime.now(UTC).isoformat(),
+            )
+
+        @app.post("/api/rules/epoch")
+        async def receive_rule_epoch(request: Request, req: RuleEpochReceiveRequest):
+            # 原语 2: 接收 master 规则纪元广播, 存本地供 guard 读基线。
+            await _check_permission(request, "/api/rules/epoch", "POST")
+            self._rule_epoch = req.epoch
+            logger.info(f"接收规则纪元广播 → {req.epoch} (source={req.source})")
+            return {"status": "ok", "epoch": self._rule_epoch}
 
     async def start(self, host: str = "127.0.0.1", port: int = 11458, ssl_context=None) -> None:
         import uvicorn

@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.12.3-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.13.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1261%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1309%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -1067,6 +1067,7 @@ release. The default deployment posture has these known limits — hardened alte
 - **Data scrubbing** — Auto-detect and redact PII (phone, email, API keys, ID cards) — **FMP path only**
 - **AES-GCM encryption** — FMP protocol encrypted communication — **FMP path only**
 - **Circuit breaker** — Automatic fault isolation for failing nodes (dispatch failure + agent-internal error both visible)
+- **Cross-node guard transport** — Issue #52: 3 TRANSPORT primitives for fusion-guard consumption — audit-chain HMAC (tamper-evident `seq`/`prev_hash`/`mac`, `GET /api/v1/audit/chain` segment fetch) + cluster-wide rule-epoch broadcast (`GET /api/v1/rules/epoch`) + cross-node confirm relay (`POST /api/confirm`). HKDF-SHA256 derives 3 domain-separated MAC keys from cluster_token (no new secret). 100% local/LAN, no cloud. Multi-node defines TRANSPORT+IDENTITY+KEY SCHEME only; guard implements consumer.
 - **No telemetry** — No analytics, no phoning home
 
 ---

@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -70,10 +71,55 @@ class AuditLogger:
         # AuditLogger 无 observability 句柄 (独立模块), 用本地计数 + 日志级别升级 (同 P1-22 范式)。
         self._write_fail_count = 0
         self._WRITE_FAIL_ALERT_THRESHOLD = 3
+        # issue #52 原语 1 — HMAC 链段: 每条记录追加 seq/prev_hash/mac, 篡改任前序字段断下条链。
+        # 惰性派生 chain_key — 单例在中间件构造时 cluster_token 可能尚未注入 (env 延迟), 首次 log 才取。
+        self._seq = 0
+        self._prev_hash = ""
+        self._chain_key: bytes | None = None
+        self._chain_key_loaded = False
 
     @property
     def path(self) -> Path:
         return self._path
+
+    def _ensure_chain_key(self) -> None:
+        """惰性派生 HMAC 链密钥 — 从 cluster_token 经 HKDF (cluster_key 模块)。
+
+        首次 log 时取 token; 失败 (token 未就绪/库缺) 降级 _chain_key=None
+        → 该条及后续无链字段, guard 视为未验证基线 (审计不丢事件优先)。
+        token 轮换后进程需重建单例 (reset_audit_logger) 才重派生 — v0.13.0 已知限制。
+        """
+        if self._chain_key_loaded:
+            return
+        try:
+            from fusion_multi_node.security.cluster_key import derive_audit_chain_key
+            from fusion_multi_node.utils.auth import load_or_create_token
+
+            token = load_or_create_token()
+            self._chain_key = derive_audit_chain_key(token)
+        except Exception as e:
+            # 降级: 无链字段, guard 视为基线。不 raise (审计不丢事件契约)。
+            logger.warning(f"审计链密钥派生失败, 降级无链字段: {e}")
+            self._chain_key = None
+        finally:
+            self._chain_key_loaded = True
+
+    def _chain_payload(self, record: dict) -> bytes:
+        """规范 JSON over (record 减 mac) — MAC 签名输入, 须确定性。"""
+        from fusion_multi_node.security.cluster_key import canonical_json
+
+        payload = {k: v for k, v in record.items() if k != "mac"}
+        return canonical_json(payload)
+
+    def _canonical_full(self, record: dict) -> bytes:
+        """规范 JSON over 完整记录 (含 mac) — prev_hash 滚动锚点用。
+
+        与 _chain_payload 同算法 (canonical_json), 但含 mac — guard 验证:
+        sha256(_canonical_full(record)) == 下条 prev_hash。
+        """
+        from fusion_multi_node.security.cluster_key import canonical_json
+
+        return canonical_json(record)
 
     def log(
         self,
@@ -97,6 +143,26 @@ class AuditLogger:
             "result": result,
             "detail": detail,
         }
+        # issue #52 原语 1 — HMAC 链段: seq 单调, prev_hash = 含 mac 的完整前序记录 sha256,
+        # mac = HMAC-SHA256 over (record 减 mac)。链计算失败降级写无链字段 (审计不丢事件优先)。
+        # 篡改任前序字段 → 重算 mac 不匹配 + 下条 prev_hash 断链, guard 双重检出。
+        try:
+            self._ensure_chain_key()
+            if self._chain_key is not None:
+                from fusion_multi_node.security.cluster_key import mac_payload
+
+                self._seq += 1
+                event["seq"] = self._seq
+                event["prev_hash"] = self._prev_hash
+                event["mac"] = mac_payload(self._chain_key, self._chain_payload(event))
+                # prev_hash 滚动 = 含 mac 的完整记录 sha256 (下条链接锚点)。
+                self._prev_hash = hashlib.sha256(self._canonical_full(event)).hexdigest()
+        except Exception as e:
+            # 降级: 该条无链字段, guard 视为基线。seq/prev_hash 不前进 (下条重新尝试)。
+            logger.warning(f"审计链字段计算失败, 降级无链字段: {e}")
+            event.pop("seq", None)
+            event.pop("prev_hash", None)
+            event.pop("mac", None)
         line = json.dumps(event, ensure_ascii=False)
         try:
             with self._write_lock:

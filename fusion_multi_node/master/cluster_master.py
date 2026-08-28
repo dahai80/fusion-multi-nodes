@@ -282,6 +282,15 @@ class ClusterMaster:
         # _tenant_max_concurrent (0=不限) 复用调度配额, 429 超限。轻量锁独立于三域锁。
         self._chat_lock = asyncio.Lock()
         self._inflight_chat: dict[str, int] = {}
+        # issue #52 原语 2 — 规则纪元: 内存态单调计数, advance 时按需广播, state_sync_loop 周期补漏。
+        # 已知限制 v0.13.0: 重启归零 / HA failover 从 0 起, guard 重新基线 (CHANGELOG 注)。
+        self._rule_epoch = 0
+        self._rule_epoch_lock = asyncio.Lock()
+        # issue #52 原语 3 — confirm 中继: master 聚合各节点 guard 确认, guard 查聚合。
+        # 不 relay HA standby (failover 丢在途 confirm, guard 重查 — CHANGELOG 注)。
+        self._confirms: dict[tuple[str, str], dict] = {}
+        self._confirms_lock = asyncio.Lock()
+        self._max_confirms = 10000
 
     # ── 节点管理 ──
 
@@ -2522,6 +2531,14 @@ class ClusterMaster:
                         await self._sync_state_to_standbys()
                     except Exception as e:
                         logger.warning(f"HA 状态同步循环异常: {e}")
+                    # issue #52: 周期重广播规则纪元补漏 (晚加入节点 / advance 时离线)。
+                    # 仅 cur_epoch>0 防空广播 spam (初始 0 无意义)。
+                    cur_epoch = await self.get_rule_epoch()
+                    if cur_epoch > 0:
+                        try:
+                            await self._broadcast_rule_epoch(cur_epoch)
+                        except Exception as e:
+                            logger.debug(f"规则纪元周期补广播异常: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -2532,6 +2549,139 @@ class ClusterMaster:
     def _on_demoted_from_leader(self) -> None:
         self._is_leader = False
         logger.warning("本节点从 Leader 降级")
+
+    # ── issue #52 原语 2: 规则纪元广播 ──
+
+    async def get_rule_epoch(self) -> int:
+        """读当前规则纪元 (guard reconcile 基线)。"""
+        async with self._rule_epoch_lock:
+            return self._rule_epoch
+
+    async def advance_rule_epoch(self, reason: str = "") -> int:
+        """leader 推进纪元 + 按需广播到全集群。standby 拒 (非 leader)。
+
+        返回新纪元值。非 leader raise RuntimeError (路由层 409)。
+        """
+        if self._election is not None and not self._is_leader:
+            raise RuntimeError("非 leader 节点不可推进规则纪元")
+        async with self._rule_epoch_lock:
+            self._rule_epoch += 1
+            new_epoch = self._rule_epoch
+        logger.info(f"规则纪元推进 → {new_epoch} (reason={reason or 'n/a'})")
+        await self._broadcast_rule_epoch(new_epoch)
+        return new_epoch
+
+    async def receive_rule_epoch(self, epoch: int, source: str = "") -> dict:
+        """agent/standby 接收纪元广播。落后拒 (防回退), 等于忽略 (幂等), 超前接受。
+
+        返回 {"status": "ok"|"rejected", "epoch": 当前}。
+        """
+        async with self._rule_epoch_lock:
+            if epoch < self._rule_epoch:
+                logger.warning(f"拒规则纪元回退: 收 {epoch} < 本地 {self._rule_epoch} (source={source})")
+                return {"status": "rejected", "reason": "纪元回退", "epoch": self._rule_epoch}
+            if epoch == self._rule_epoch:
+                return {"status": "ok", "epoch": self._rule_epoch}
+            self._rule_epoch = epoch
+        logger.info(f"接受规则纪元 → {epoch} (source={source})")
+        return {"status": "ok", "epoch": epoch}
+
+    async def _build_epoch_targets(self) -> list[tuple[str, str, int]]:
+        """构建纪元广播对端列表 (worker 经 get_online_nodes + HA peer 经选举候选)。
+
+        跳 unsafe peer (is_safe_peer_host)。返回 [(node_id, ip, port), ...]。
+        """
+        targets: list[tuple[str, str, int]] = []
+        for node in await self.get_online_nodes():
+            if node.ip_address and node.port and is_safe_peer_host(node.ip_address):
+                targets.append((node.node_id, node.ip_address, node.port))
+        if self._election and self._is_leader:
+            for peer_id in self._election._known_nodes:
+                if peer_id == self._election.node_id:
+                    continue
+                cand = self._election.get_candidate(peer_id)
+                if not cand or not cand.ip_address or not cand.port:
+                    continue
+                if not is_safe_peer_host(cand.ip_address):
+                    continue
+                targets.append((peer_id, cand.ip_address, cand.port))
+        return targets
+
+    async def _broadcast_rule_epoch(self, epoch: int) -> None:
+        """best-effort 广播纪元到全集群 worker + standby (锁外异步)。
+
+        POST /api/rules/epoch, Bearer + X-Node-Id/X-Node-Role:master, timeout 5s。
+        """
+        targets = await self._build_epoch_targets()
+        if not targets:
+            return
+        token = self._get_dispatch_token()
+        try:
+            client = await self._get_dispatch_http()
+        except Exception as e:
+            logger.warning(f"规则纪元广播获取 HTTP 客户端失败: {e}")
+            return
+        payload = {"epoch": epoch, "source": self._election.node_id if self._election else "master"}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Node-Id": self._election.node_id if self._election else "master",
+            "X-Node-Role": "master",
+        }
+        for node_id, ip, port in targets:
+            try:
+                url = build_safe_url(mtls_scheme(), ip, port, "/api/rules/epoch")
+                resp = await client.post(url, json=payload, headers=headers, timeout=5.0)
+                if resp.status_code != 200:
+                    logger.debug(f"规则纪元广播 {node_id} HTTP {resp.status_code}")
+            except Exception as e:
+                logger.debug(f"规则纪元广播 {node_id} 异常: {e}")
+
+    # ── issue #52 原语 3: confirm 中继 ──
+
+    async def receive_confirm(
+        self,
+        confirm_id: str,
+        node_id: str,
+        action: str,
+        epoch: int,
+        ts: str,
+        mac: str,
+    ) -> dict:
+        """接收 agent/guard confirm 中继, MAC 校验后存聚合表。
+
+        坏 MAC 返回 rejected (路由层 401 + 审计 confirm_relay_fail)。
+        幂等: 同 (confirm_id, node_id) 覆盖更新 received_at。
+        """
+        from fusion_multi_node.security.cluster_key import canonical_json, derive_confirm_relay_key, verify_mac
+
+        token = self._get_dispatch_token()
+        key = derive_confirm_relay_key(token)
+        record = {
+            "confirm_id": confirm_id,
+            "node_id": node_id,
+            "action": action,
+            "epoch": epoch,
+            "ts": ts,
+        }
+        if not verify_mac(key, canonical_json(record), mac):
+            logger.warning(f"confirm 中继 MAC 校验失败: confirm_id={confirm_id} node={node_id}")
+            return {"status": "rejected", "reason": "MAC 校验失败"}
+        record["received_at"] = time.time()
+        async with self._confirms_lock:
+            self._confirms[(confirm_id, node_id)] = record
+            if len(self._confirms) > self._max_confirms:
+                oldest_key = next(iter(self._confirms))
+                del self._confirms[oldest_key]
+        logger.info(f"confirm 中继存入: confirm_id={confirm_id} node={node_id} action={action} epoch={epoch}")
+        return {"status": "ok", "confirm_id": confirm_id, "node_id": node_id}
+
+    async def get_confirms(self, epoch: int | None = None) -> list[dict]:
+        """guard 查聚合 confirm, 可按 epoch 过滤。返回记录列表 (副本)。"""
+        async with self._confirms_lock:
+            records = list(self._confirms.values())
+        if epoch is not None:
+            records = [r for r in records if r.get("epoch") == epoch]
+        return records
 
     # ── 生命周期 ──
 
