@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-08-28 — 安全补丁: backup restore 路径逃逸加固
+
+### Fixed
+- **backup restore TarSlip 加固** (安全审查发现): `cli.py` `backup_restore` 原仅校验 `member.name`
+  拒 `..`/绝对路径, 漏 symlink/hardlink 的 `linkname` 越界 (TarSlip 变种 — 恶意 tar 含 symlink
+  指向 `/etc/passwd`, `extractall` 创建该 symlink 后同级 file member 经之越界写)。修: 加
+  symlink/hardlink `linkname` 越界校验 (拒绝对/`..` linkname) + `extractall(filter="data")`
+  (PEP 706, py3.12) 兜底拒 symlink/hardlink/device member。双层防护。备份为可信源 (本仓
+  `create` 产出), 但 `restore --in` 接任意路径 tar.gz — 不假设可信 (Rule 12)。
+
+### Tests
+- `tests/test_backup_cli.py` +2: symlink linkname 越界拒 / hardlink linkname 越界拒。
+  全套 1343 passed, ruff 净。
+
 ## [0.14.0] - 2026-08-28 — 企业级生产商用发布阻塞项修复 (7 项)
 
 > **生产就绪阻塞消除**: 7 项企业级商用阻塞全部落地 — HA 接线漏 / 可观测持久化 / 告警出站 /

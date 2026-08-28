@@ -825,14 +825,23 @@ def backup_restore(in_file: str, yes: bool):
     restored: list[str] = []
     try:
         with tarfile.open(in_file, "r:gz") as tar:
-            # 安全校验: 拒路径逃逸 (.. / 绝对路径), 防解包写任意位置
+            # 安全校验: 拒路径逃逸 (.. / 绝对路径 / symlink-linkname 越界), 防解包写任意位置。
+            # extractall filter='data' (PEP 706, py3.12+) 再兜底拒 symlink/hardlink/device,
+            # 双层防护: 显式校验 + filter。恶意 tar symlink → /etc/passwd 不越界写入。
             for member in tar.getmembers():
                 if member.name.startswith("/") or ".." in Path(member.name).parts:
                     logger.error(f"备份含不安全路径, 拒解包: {member.name}")
                     click.echo(f"❌ 备份含不安全路径: {member.name}", err=True)
                     raise click.Abort()
-            tar.extractall(dest)
-            restored = [m.name for m in tar.getmembers()]
+                # symlink/hardlink 目标越界校验 (linkname 指向 dest 外 = TarSlip 变种)
+                if member.issym() or member.islnk():
+                    link = member.linkname
+                    if link.startswith("/") or ".." in Path(link).parts:
+                        logger.error(f"备份含不安全链接目标, 拒解包: {member.name} → {link}")
+                        click.echo(f"❌ 备份含不安全链接: {member.name}", err=True)
+                        raise click.Abort()
+            tar.extractall(dest, filter="data")
+            restored = [m.name for m in tar.getmembers() if not (m.issym() or m.islnk())]
     except tarfile.ReadError as e:
         logger.error(f"备份文件损坏: {e}")
         click.echo(f"❌ 备份文件损坏或非 tar.gz: {e}", err=True)
