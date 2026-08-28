@@ -5,14 +5,19 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.14.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.14.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1341%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1343%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
+
+> **🔒 v0.14.1 (2026-08-28) — 安全补丁: backup restore 路径逃逸加固**
+>
+> `backup restore` TarSlip 变种修复 — symlink/hardlink `linkname` 越界校验 +
+> `extractall(filter="data")` (PEP 706) 兜底。不假设备份可信 (Rule 12)。1343 tests, ruff 净。
 
 > **📦 v0.14.0 (2026-08-28) — 企业级生产商用发布阻塞项修复 (7 项)**
 >
@@ -23,7 +28,7 @@
 > **生产可用**声明 (#33 已闭合, 真实张量 env-gated bonus); (6) CLI `backup create/restore` 一键备份恢复
 > (全量 9 文件+tls/+kv/, 原子 tar.gz 0600, 路径逃逸校验); (7) 规则纪元/confirm 持久化 (不再重启归零 /
 > HA failover 从 0, `_build_state_sync_payload` 纳入同步)。策略 = config 段 + 部署层 env 透传 + 文档引导
-> (不翻代码默认, 唯一翻默认项 `observability.persist`)。基线 1309 → 1341 测试全绿 (随机序双向绿), ruff 净。详见
+> (不翻代码默认, 唯一翻默认项 `observability.persist`)。基线 1309 → 1343 测试全绿 (随机序双向绿), ruff 净。详见
 > [CHANGELOG](docs/CHANGELOG.md)。生产 mTLS/HA 须显式开: 见 `docs/DEPLOYMENT.md`。
 
 ---

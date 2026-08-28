@@ -158,3 +158,32 @@ class TestBackupRestore:
         assert "不安全路径" in result.output
         # 验逃逸文件未被写出
         assert not (tmp_path.parent / "escape.txt").exists()
+
+    def test_restore_rejects_symlink_escape(self, isolated_home, tmp_path):
+        # TarSlip 变种: symlink linkname 越界 → restore 拒解包 (双层防护: 显式校验 + filter='data')
+        evil = tmp_path / "evil-symlink.tar.gz"
+        with tarfile.open(evil, "w:gz") as tar:
+            # symlink 指向 dest 外绝对路径
+            link = tarfile.TarInfo("evil-link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/passwd"
+            tar.addfile(link)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["backup", "restore", "--in", str(evil), "--yes"])
+        assert result.exit_code != 0
+        assert "不安全链接" in result.output
+        # 验 symlink 未被创建于 dest
+        assert not (isolated_home / ".fusion" / "multi-node" / "evil-link").exists()
+
+    def test_restore_rejects_hardlink_escape(self, isolated_home, tmp_path):
+        # hardlink linkname 越界 → restore 拒解包 (与 symlink 同校验路径)
+        evil = tmp_path / "evil-hardlink.tar.gz"
+        with tarfile.open(evil, "w:gz") as tar:
+            link = tarfile.TarInfo("evil-hard")
+            link.type = tarfile.LNKTYPE
+            link.linkname = "../escape-target"
+            tar.addfile(link)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["backup", "restore", "--in", str(evil), "--yes"])
+        assert result.exit_code != 0
+        assert "不安全链接" in result.output

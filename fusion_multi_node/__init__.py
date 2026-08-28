@@ -34,5 +34,5 @@ and storage volumes.
   leader `_build_state_sync_payload` 纳入 epoch+confirm, standby 取 max epoch 防回退) — 修重启归零 / HA failover 从 0。
 """
 
-__version__ = "0.14.0"
+__version__ = "0.14.1"
 __app_name__ = "Fusion-Multi-Node"
