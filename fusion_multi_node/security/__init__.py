@@ -7,7 +7,6 @@ from .data_scrubber import DataScrubber, ScrubRule
 from .node_approval import ApprovalStatus, NodeApprovalManager
 from .permission import NodeRole, Permission, PermissionManager, UserRole, check_user_path_access
 from .sandbox import SandboxConfig, SandboxExecutor, WorkerSandbox
-from .secure_transfer import SecureTransferPipeline
 from .user_store import UserRecord, UserStore, UserToken, load_user_store
 
 __all__ = [
@@ -24,7 +23,6 @@ __all__ = [
     "SandboxConfig",
     "SandboxExecutor",
     "ScrubRule",
-    "SecureTransferPipeline",
     "UserRecord",
     "UserRole",
     "UserStore",

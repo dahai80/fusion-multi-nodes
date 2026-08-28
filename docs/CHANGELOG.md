@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-08-28 — 迁移债清理 (#106/#61 已 CLOSED 落地)
+
+> **死模块退役**: 接收端已 CLOSED 并落地 — fusion-gateway #106 (Go 网关吸收 cloud adapter +
+> MCPClusterGateway) + fusion-cowork #61 (ast_diff + cluster_sync 已落地, 自包含不依赖多节点)。
+> 多节点侧删除死模块及其 re-export、测试与随附死代码; **保留 live cluster_sync** (agent 跨节点
+> 模型同步经 master manifest 路由, 删则丢功能)。100% 本地/离线定位强化 (cloud 路径残留彻底无)。
+> 测试 1317 → 1268 (净删 49: 19 mcp_gateway + 9 secure_transfer + 8 cloud_fallback + 6 ast_diff + 7 路由/初始化随附), ruff 净, 无 API 破坏。
+
+### 删除 (4 死模块 + 1 死 handler + 测试)
+
+- **cloud_fallback.py** — import-time 禁用守卫, 调度路径 v0.8.2 切断, 零调度引用。连同
+  `master/__init__.py` try/except 降级块 + 6 Cloud* re-export + `TestCloudFallback` (8 例) 删除。
+- **mcp_gateway/ 包** — 零路由/零实例化/零 CLI 死代码。连同 `test_mcp_gateway.py` (19 例) +
+  `test_core.py` `TestMCPGateway` (3 例) + MCP import 删除。端口 11446 归 FMP transport (非 mcp_gateway)。
+- **ast_diff.py** — 唯一消费 secure_transfer → 唯一实例化于 `fmp_server.register_data_sync_handler`
+  (全仓零调用)。连同 `TestASTDiff` (6 例) 删除。
+- **secure_transfer.py** — ast_diff 唯一链路。连同 `test_secure_transfer.py` (9 例) 删除。
+  **data_scrubber.py 保留** (live — dispatch PII 脱敏 P1-3 + KV warm_cache)。
+- **fmp_server.register_data_sync_handler** — 零调用死 handler, 闭包内 lazy-import secure_transfer
+  已随删。其余 handler (SHARD_SYNC/KV/HEARTBEAT) live 保留。
+
+### 保留 (live, 误删=丢功能)
+
+- **cluster_sync.py** — wired master_server 生命周期 + 4 路由, agent `_execute_model_sync` 经
+  master manifest 路由拉清单 = 真实跨节点模型同步。用户决策保留, 仅更新过期注释。
+
 ## [0.12.1] - 2026-08-28 — 审计 0826 P2+P3 整改 (15 项)
 
 > **收尾整改**: 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 12 P2 + 3 P3 项

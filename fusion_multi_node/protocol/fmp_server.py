@@ -215,37 +215,6 @@ class FMPServer:
 
         self.register_handler(PayloadType.SHARD_SYNC, _on_shard_sync)
 
-    def register_data_sync_handler(
-        self,
-        on_ast_sync: Any = None,
-        on_text_sync: Any = None,
-    ) -> None:
-        """注册 DATA_SYNC 处理器 — 收到 AST差分+脱敏 消息后还原并回调。"""
-
-        def _on_data_sync(msg: FMPMessage) -> None:
-            try:
-                from ..security.secure_transfer import SecureTransferPipeline
-
-                payload = msg.business.payload_as_json()
-                pipeline = SecureTransferPipeline()
-                transfer_type = payload.get("type", "")
-                if transfer_type == "ast_diff_scrubbed":
-                    base_ast = payload.get("base_ast", {})
-                    result = pipeline.apply_transfer(base_ast, payload)
-                    if on_ast_sync:
-                        on_ast_sync(result, msg.link.source_id)
-                    logger.info(f"DATA_SYNC AST还原完成 from={msg.link.source_id}")
-                elif transfer_type == "text_scrubbed":
-                    text = payload.get("text", "")
-                    if on_text_sync:
-                        on_text_sync(text, msg.link.source_id)
-                else:
-                    logger.warning(f"DATA_SYNC 未知类型: {transfer_type}")
-            except Exception as e:
-                logger.error(f"DATA_SYNC 处理异常: {e}")
-
-        self.register_handler(PayloadType.DATA_SYNC, _on_data_sync)
-
     def register_kv_handler(self, kv_store: Any = None) -> None:
         """注册 KV 存储处理器 — 收到 KV_GET/KV_PUT 后操作本地 KVStore。"""
 

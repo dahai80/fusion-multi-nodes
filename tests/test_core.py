@@ -16,7 +16,6 @@ from fusion_multi_node.master import (
     ParallelMode,
     TaskStatus,
 )
-from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
 from fusion_multi_node.observability import ClusterObservability, LogEntry
 
 # ── Cluster Master 测试 ──
@@ -194,42 +193,6 @@ class TestDistributedMLX:
         assert shard.shard_id == 0
         assert shard.node_id == "node_1"
         assert shard.layers == [0, 1, 2, 3]
-
-
-# ── MCP Gateway 测试 ──
-
-
-class TestMCPGateway:
-    def setup_method(self):
-        self.gateway = MCPClusterGateway(host="127.0.0.1", port=19756)
-
-    def test_register_tool(self):
-        tool = MCPTool(
-            name="test_tool",
-            description="A test tool",
-            parameters={"type": "object", "properties": {"input": {"type": "string"}}},
-            node_id="test_node",
-            plugin="test_plugin",
-        )
-        self.gateway.register_tool(tool)
-        assert "test_tool" in self.gateway.tools
-
-    def test_get_tools_list(self):
-        tool = MCPTool(
-            name="code_review",
-            description="Review code changes",
-            parameters={"type": "object", "properties": {"code": {"type": "string"}}},
-        )
-        self.gateway.register_tool(tool)
-        tools = self.gateway.get_tools_list()
-        assert len(tools) >= 1
-        assert tools[0]["name"] == "code_review"
-
-    def test_get_stats(self):
-        stats = self.gateway.get_stats()
-        assert "registered_tools" in stats
-        assert "total_requests" in stats
-        assert "total_token_count" in stats
 
 
 # ── Observability 测试 ──

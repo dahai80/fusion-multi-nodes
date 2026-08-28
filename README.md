@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.12.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.12.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1317%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1268%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -330,18 +330,6 @@ await master.start(ha_config={
 })
 ```
 
-### Cloud API Fallback (`fusion_multi_node.master.cloud_fallback`) — ⚠️ 合规边界外, v0.8.2 调度路径已切断
-
-> **违反"100%本地/离线"定位。** 本项目定位为本地优先离线集群, 不提供云 API 出站。**v0.8.2 起 `ClusterMaster` 调度路径已全部切断** — `setup_cloud_fallback` / `fallback_to_cloud` / `_cloud_client` / `_retry_loop` 云端分支均已删除, Master 不再可达云 API。`cloud_fallback.py` 模块文件 + 单元测试保留供独立验证, 计划迁移至 fusion-gateway (issue #106)。以下模块级 API 仍可独立使用, 但不应接入本地集群调度:
-
-```python
-from fusion_multi_node.master.cloud_fallback import CloudFallbackClient, CloudConfig
-
-client = CloudFallbackClient(config=CloudConfig(provider="openai", api_key="sk-...", max_cost_per_day=10.0))
-result = await client.chat(messages=[{"role": "user", "content": "Hello"}])
-usage = client.get_usage()  # total_requests, daily_cost, etc.
-```
-
 ### 2. Node Agent (`fusion_multi_node.agent`)
 
 Runs on every Mac — hardware metrics, heartbeat, task execution via fusion-mlx API.
@@ -626,23 +614,6 @@ kv.restore("snapshot.json", merge=True)
 # Quorum read/write for shard replication
 qr = replicator.quorum_write("shard-1", data, storage_volume=sv)
 qread = replicator.quorum_read("shard-1", storage_volume=sv)
-```
-
-### 9. MCP Cluster Gateway (`fusion_multi_node.mcp_gateway`)
-
-Unified MCP endpoint for Claude Desktop/Code, aggregating tools from all nodes.
-
-```python
-from fusion_multi_node.mcp_gateway import MCPClusterGateway, MCPTool
-
-gateway = MCPClusterGateway(host="127.0.0.1", port=11446)
-tool = MCPTool(
-    name="code_review",
-    description="Review code",
-    parameters={"type": "object", "properties": {"code": {"type": "string"}}},
-)
-gateway.register_tool(tool)
-result = await gateway.handle_tool_call("code_review", {"code": "..."}, source="claude_code")
 ```
 
 ---
