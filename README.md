@@ -5,11 +5,11 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.12.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.12.3-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1268%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1261%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
@@ -77,10 +77,8 @@
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server. ⚠️启动但从不作为派发传输 (仅 HTTP 派发) |
 | **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing. ⚠️Master 级 KV 张量同步为 no-op (跨节点 KV 仅 HTTP 元数据, 非张量; P3-28 张量级传输待长期落地) |
-| **MCP Cluster Gateway** ⚠️未接线 | Unified MCP endpoint, tool routing, Claude Desktop/Code integration. **当前零路由/零实例化/零 CLI, 死代码, 计划迁移 fusion-gateway #106** |
 | **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, OS-level sandbox-exec, data scrubbing, FMPCrypto (AES-256-GCM + ECDH), Metal AES-GCM acceleration |
 | **Observability** ✅已接线 | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions. **P0-8 接 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集指标/告警 (去重); `/api/v1/observability/{logs/export,suggestions,alerts}` 已返 200; `/api/v1/metrics` (Prometheus) 同样已接。全内存 deque, 重启即失 (P1 同类债)** |
-| **Autoscaler** ⚠️未接线 | Conservative/Balanced/Aggressive scale policies, auto scale-up/down/rebalance, hot-reload config. **当前未接入 ClusterMaster 生命周期, `/api/v1/autoscaler/*` 返回 503 not-wired (非 404); 代码留作未来启用** |
 | **Storage Volumes** | Volume abstraction, checkpoint persistence, capacity monitoring, LRU eviction. **ShardReplicator / DistributedKVStore / quorum 读写未接线生产路径, 仅库级可用** |
 
 ### Architecture
@@ -91,8 +89,7 @@
 │                           ↓                                  │
 │              fusion-multi-node Cluster Master                 │
 │  (Discovery, Scheduler, KV Pool, [Election·HA 可选],          │
-│   [Autoscaler⚠未接线], Cloud Fallback, Degradation,          │
-│   Security, Observability)                                   │
+│   Degradation, Security, Observability)                      │
 │                           ↓                                  │
 │     ┌──────────────┬──────────────┬──────────────┐           │
 │     │  Node Agent   │  Node Agent  │  Node Agent  │           │
@@ -117,7 +114,6 @@
 ┌──────────────────────────▼──────────────────────────────────┐
 │                    Control Layer                               │
 │         fusion-multi-node (Cluster Master + Node Agent)        │
-│         MCP Cluster Gateway                                   │
 └──────────────────────────┬──────────────────────────────────┘
                            │ distributed API
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -547,32 +543,7 @@ results = diagnoser.diagnose(logs)
 freq = diagnoser.analyze_frequency(logs, group_by="source")
 ```
 
-### 7. Autoscaler (`fusion_multi_node.autoscaler`) ⚠️未接线
-
-> **状态**: 代码完整但**未接入 ClusterMaster 生命周期**。`ClusterMaster._autoscaler` 从未赋值,
-> `/api/v1/autoscaler/config` GET/PUT 返回 503「Autoscaler 未接线 (not-wired)」。本节为库级 API 参考,
-> 非现网可用功能。启用需在 `ClusterMaster.start()` 中实例化并启动评估循环。
-
-Conservative/Balanced/Aggressive scale policies.
-
-```python
-from fusion_multi_node.autoscaler import (
-    Autoscaler,
-    AutoscalerConfig,
-    ScalePolicy,
-    ScaleAction,
-)
-
-scaler = Autoscaler(
-    policy=ScalePolicy.BALANCED,
-    on_scale_up=lambda n: print(f"scale up {n}"),
-    on_scale_down=lambda n: print(f"scale down {n}"),
-    get_cluster_state=lambda: {"nodes": [...], "tasks": [...]},
-)
-action = await scaler.evaluate()  # SCALE_UP, SCALE_DOWN, REBALANCE, NOOP
-```
-
-### 8. Storage Volumes (`fusion_multi_node.storage`)
+### 7. Storage Volumes (`fusion_multi_node.storage`)
 
 > **状态**: `StorageVolume`/`CheckpointManager`/`DistributedKVStore` 库级可用。
 > `ShardReplicator` 的 FMP 跨节点传输与 quorum 读写在生产路径**未接线**

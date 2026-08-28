@@ -50,7 +50,6 @@ class Permission(Enum):
     APPROVAL_LIST = "approval:list"
     APPROVAL_APPROVE = "approval:approve"
     HARDWARE_READ = "hardware:read"
-    AUTOSCALER_MANAGE = "autoscaler:manage"
 
 
 _ROLE_PERMISSIONS: dict[NodeRole, frozenset[Permission]] = {
@@ -70,7 +69,6 @@ _ROLE_PERMISSIONS: dict[NodeRole, frozenset[Permission]] = {
             Permission.CLUSTER_STATS,
             Permission.APPROVAL_LIST,
             Permission.APPROVAL_APPROVE,
-            Permission.AUTOSCALER_MANAGE,
         }
     ),
     NodeRole.WORKER: frozenset(
@@ -104,7 +102,6 @@ _PATH_PERMISSION_MAP: dict[str, Permission] = {
     "/api/approval/list": Permission.APPROVAL_LIST,
     "/api/approval/approve": Permission.APPROVAL_APPROVE,
     "/api/hardware": Permission.HARDWARE_READ,
-    "/api/autoscaler": Permission.AUTOSCALER_MANAGE,
 }
 
 
@@ -252,10 +249,8 @@ _USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
     # P1-6: Prometheus 指标端点 — VIEWER 只读可读 (集群聚合 + 节点级, 无租户隔离泄露)。
     ("GET", "/api/v1/metrics"): "cluster:stats",
     ("GET", "/api/v1/nodes/metrics"): "cluster:stats",  # /{node_id}/metrics 前缀命中
-    # P1-6: 配置热加载 / autoscaler 管理 — 仅 ADMIN。
+    # P1-6: 配置热加载 — 仅 ADMIN。
     ("POST", "/api/v1/config/reload"): "user:manage",
-    ("PUT", "/api/v1/autoscaler/config"): "user:manage",
-    ("GET", "/api/v1/autoscaler/config"): "user:manage",
     # KV 读 (USER 可查本租户; 写走集群内部 cluster_token)。
     # GET /api/kv/find/{model_name} — path-param, 由下方前缀匹配命中。
     ("GET", "/api/kv/find"): "kv:read",

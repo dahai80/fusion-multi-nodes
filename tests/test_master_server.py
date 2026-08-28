@@ -150,33 +150,6 @@ class TestMasterServerObservability:
             assert len(data["suggestions"]) >= 1  # 默认 "集群运行正常" 建议
 
 
-class TestMasterServerAutoscalerNotWired:
-    """GAP-5 (审计 §7): autoscaler 未接线 → 路由显式 503 (非歧义 enabled:False)。"""
-
-    @pytest.mark.asyncio
-    async def test_get_config_503_not_wired(self):
-        master = ClusterMaster()
-        # _autoscaler 恒 None (零实例化) — 模拟现网
-        assert getattr(master, "_autoscaler", None) is None
-        server = MasterServer(master=master, shared_token=TEST_TOKEN)
-        server._approval_manager = None
-        transport = ASGITransport(app=server.app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await c.get("/api/v1/autoscaler/config", headers=AUTH_HEADERS)
-            assert resp.status_code == 503
-            assert "not-wired" in resp.json()["detail"] or "未接线" in resp.json()["detail"]
-
-    @pytest.mark.asyncio
-    async def test_put_config_503_not_wired(self):
-        master = ClusterMaster()
-        server = MasterServer(master=master, shared_token=TEST_TOKEN)
-        server._approval_manager = None
-        transport = ASGITransport(app=server.app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await c.put("/api/v1/autoscaler/config", json={"min_nodes": 1}, headers=AUTH_HEADERS)
-            assert resp.status_code == 503
-
-
 class TestMasterServerNodeManagement:
     @pytest.mark.asyncio
     async def test_register_node(self, client, master_server):

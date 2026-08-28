@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-08-28 — autoscaler 死代码清除
+
+> **死代码清除**: `autoscaler/` 包 (469 行) 零实例化, 路由恒 503 not-wired。
+> 核心扩缩容依赖不存在的 standby 节点池 (NodeInfo 无 role 字段) — 扩容永久空操作,
+> 缩容会把真在线 Mac 设 offline (机器仍在却停服务 = 降可用), 属云端弹性模型不适配
+> 固定 Mac 池。仅 rebalance 有意义但与现有 LoadRouter 路由重复。删除无功能损失 (本就 503)。
+> 测试 1268 → 1261 (净删 7: 8 TestAutoscaler + 2 not-wired server + 2 v1 契约, 另有随附 +3 重组), ruff 净, 无 API 破坏。
+
+### 删除
+
+- **`fusion_multi_node/autoscaler/` 包** — `autoscaler.py` (469 行) + `__init__.py`。零实例化死代码,
+  `ClusterMaster._autoscaler` 从未赋值。`Autoscaler` / `AutoscalerConfig` / `ScalePolicy` / `ScaleAction`
+  全删。
+- **`master_server.py` 路由** — `GET/PUT /api/v1/autoscaler/config` (恒 503) +
+  `AutoscalerConfigUpdateRequest` / `V1AutoscalerConfigResponse` 请求模型 + 路由遮蔽注释。
+- **`permission.py` 条目** — `AUTOSCALER_MANAGE` 权限常量 + MASTER frozenset 成员 +
+  `/api/autoscaler` 路径映射 + user-RBAC `("PUT"/"GET", "/api/v1/autoscaler/config")` 2 条目。
+- **测试** — `TestAutoscaler` (8 例, test_new_features) + `TestMasterServerAutoscalerNotWired` (2 例)
+  + `test_v1_contract` autoscaler 503 契约 (2 例) + 过期注释。
+
+### 保留
+
+- `cluster_sync.py` / `data_scrubber.py` — 仍 live (v0.12.2 已确认保留)。
+- README 历史变更日志行 (autoscaler 冷却门修复等) — 历史记录, 不删。
+
 ## [0.12.2] - 2026-08-28 — 迁移债清理 (#106/#61 已 CLOSED 落地)
 
 > **死模块退役**: 接收端已 CLOSED 并落地 — fusion-gateway #106 (Go 网关吸收 cloud adapter +
