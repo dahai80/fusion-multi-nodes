@@ -12,13 +12,11 @@ and storage volumes.
   failover 即调度, 空窗 ≤ 选举超时)。**已接线, 非原型。**
 - StandbyMaster: **v0.10.2 已删** (零实例化死代码, 独立于已接线的 MasterElection)。现网单 Master
   模式 (`_election is None`) 无 HA; 多 Master 须显式配 ha_config 启动。
-- cloud fallback: 违"100%本地/离线"定位 — v0.8.2 起 ClusterMaster 调度路径已切断
-  (setup_cloud_fallback/fallback_to_cloud/_retry_loop 云端分支全部移除)。
-  cloud_fallback.py 模块文件 + 测试保留供独立验证, 不再接调度器。计划迁移至 fusion-gateway。
-- mcp_gateway: **未接线死代码** (零路由/零实例化/零 CLI), 计划迁移 fusion-gateway #106。
-- ast_diff / cluster_sync: 功能归属债 (非云合规债, 均纯本地计算), 计划迁移至
-  fusion-gateway / fusion-cowork。ast_diff 被 secure_transfer (PII 脱敏传输) 复用,
-  cluster_sync 被 master_server (LAN 模型清单同步) 复用 — 保留至迁移落地。
+- cloud_fallback / mcp_gateway / ast_diff / secure_transfer 迁移债已清理 (v0.12.2):
+  接收端 fusion-gateway #106 (Go 网关吸收 cloud adapter + MCP gateway) +
+  fusion-cowork #61 (ast_diff + cluster_sync 已 CLOSED 落地, 自包含不依赖多节点)。
+  死模块连同 re-export 与测试删除; cloud 调度路径残留彻底无。
+  **cluster_sync 保留** (live — agent 跨节点模型同步经 master manifest 路由, 删则丢功能)。
 - autoscaler: **未接线死代码** (零实例化, /api/v1/autoscaler/* 恒 503 not-wired, 非 404)。
 - PIPELINE 并行: 接 fusion-mlx `/distributed/*` (上游 issue #621/#630 已交付 closed),
   多节点客户端存根已接 + 真 E2E 验证通过。
@@ -28,5 +26,5 @@ and storage volumes.
   (张量 round-trip), 真张量为 env-gated bonus。
 """
 
-__version__ = "0.12.1"
+__version__ = "0.12.2"
 __app_name__ = "Fusion-Multi-Node"
