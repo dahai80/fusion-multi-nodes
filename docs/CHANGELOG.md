@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2-rc.1] - 2026-08-28 — Release Candidate
+
+> ⚠️ **RC 版本**: v0.14.1 final 基线打包为候选版。内容 = HEAD (v0.14.0 企业级 7 阻塞 + v0.14.1 TarSlip
+> 安全补丁), **无新增代码改动**。**非 GA**。企业级生产商用阻塞已全清 (v0.14.0), 安全补丁已合 (v0.14.1),
+> 0 open issues/PRs, CI 绿。本 RC 作为下一 patch 线的候选基线, 验证可发布性。
+
+### Changed
+- `pyproject.toml` / `__init__.py` / `README.md`: 0.14.1 → 0.14.2rc1 (RC pre-release)
+
 ## [0.14.1] - 2026-08-28 — 安全补丁: backup restore 路径逃逸加固
 
 ### Fixed
