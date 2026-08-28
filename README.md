@@ -5,7 +5,7 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.14.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.14.2rc1-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
@@ -13,6 +13,11 @@
 </p>
 
 ---
+
+> **📦 v0.14.2-rc.1 (Release Candidate) — 2026-08-28**
+>
+> RC — v0.14.1 final 基线打包为候选版。内容 = HEAD (企业级 7 阻塞 v0.14.0 + TarSlip 安全补丁 v0.14.1),
+> 无新增代码改动。**非 GA**。1343 tests, ruff 净, 随机序双向绿。详见 [CHANGELOG](docs/CHANGELOG.md)。
 
 > **🔒 v0.14.1 (2026-08-28) — 安全补丁: backup restore 路径逃逸加固**
 >
