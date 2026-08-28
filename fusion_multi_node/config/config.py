@@ -80,6 +80,12 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "scheduling.tenant_max_concurrent": _validate_nonneg_int,
     "scheduling.max_pending_queue": _validate_nonneg_int,
     "security.http_pii_scrub": _validate_bool,
+    "security.mtls.enabled": _validate_bool,
+    "security.mtls.ca_cert": _validate_str,
+    "security.mtls.node_cert": _validate_str,
+    "security.mtls.node_key": _validate_str,
+    "security.mtls.node_id": _validate_str,
+    "security.mtls.node_role": _validate_str,
     "network.http_limits.max_connections": _validate_nonneg_int,
     "network.http_limits.max_keepalive_connections": _validate_nonneg_int,
     "mlx.fusion_mlx_port": _validate_port,
@@ -93,6 +99,8 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "observability.alert_enabled": _validate_bool,
     "observability.log_level": _validate_str,
     "observability.persist": _validate_bool,
+    "observability.alerts.webhook_url": _validate_str,
+    "observability.alerts.webhook_timeout": _validate_positive_float,
 }
 
 SCHEMA_VERSION = 1
@@ -160,6 +168,17 @@ class ClusterConfig:
         # 开启时 DataScrubber.scrub 应用于 dispatch payload prompt/messages + chat 代理 + warm_cache prompt。
         "security": {
             "http_pii_scrub": False,
+            # v0.14.0 item 4: mTLS 节点互信配置段 (默认关, 企业生产须显式开)。
+            # 启动时 mtls.configure_from_config() 把本段写回 env (env 优先兼容旧部署)。
+            # enabled=True 但证书路径不全 → fail-closed raise (不回退明文, GAP-2 不变)。
+            "mtls": {
+                "enabled": False,
+                "ca_cert": "",
+                "node_cert": "",
+                "node_key": "",
+                "node_id": "",
+                "node_role": "master",
+            },
         },
         "mcp": {
             "enabled": True,
@@ -170,9 +189,16 @@ class ClusterConfig:
             "retention_hours": 24.0,
             "alert_enabled": True,
             "log_level": "info",
-            # P2-12 (审计 §6.5): 可观测 deque 持久化开关 (默认 False, 重启即失维持现状)。
-            # 开则 save()/load() 落盘 ~/.fusion/multi-node/observability.jsonl, 限最近 N 条。
-            "persist": False,
+            # v0.14.0 item 2: 可观测 deque 持久化 (默认开 — 企业生产需跨重启保留指标/告警/日志)。
+            # save()/load() 落盘 ~/.fusion/multi-node/observability.jsonl, 限最近 N 条。
+            # _cleanup_loop 周期 save (300s) 防崩溃丢 stop 后数据。
+            "persist": True,
+            # v0.14.0 item 3: 告警出站 webhook 配置段 (默认空串 = 关, 仅留内存 deque)。
+            # 非空则 _register_alert_webhook 注册 fire-and-forget POST (env 优先兼容旧部署)。
+            "alerts": {
+                "webhook_url": "",
+                "webhook_timeout": 10.0,
+            },
         },
     }
 
@@ -380,4 +406,22 @@ class ClusterConfig:
             "node_id": self.get("ha.node_id", ""),
             "priority": int(self.get("ha.priority", 0)),
             "peers": self.get("ha.peers", []) or [],
+        }
+
+    def get_mtls_config(self) -> dict[str, Any]:
+        """v0.14.0 item 4: mTLS 配置段 — 供 mtls.configure_from_config() 消费。"""
+        return {
+            "enabled": bool(self.get("security.mtls.enabled", False)),
+            "ca_cert": self.get("security.mtls.ca_cert", ""),
+            "node_cert": self.get("security.mtls.node_cert", ""),
+            "node_key": self.get("security.mtls.node_key", ""),
+            "node_id": self.get("security.mtls.node_id", ""),
+            "node_role": self.get("security.mtls.node_role", "master"),
+        }
+
+    def get_alert_webhook_config(self) -> dict[str, Any]:
+        """v0.14.0 item 3: 告警 webhook 配置段 — 供 _register_alert_webhook 消费。"""
+        return {
+            "webhook_url": self.get("observability.alerts.webhook_url", ""),
+            "webhook_timeout": float(self.get("observability.alerts.webhook_timeout", 10.0)),
         }

@@ -17,10 +17,27 @@ services:
       FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:?必须设置 FUSION_CLUSTER_TOKEN — 复制 .env.example 为 .env 并填强随机值}"
       # 可信容器网段自动审批 (免手动 cluster approve; 生产仅对可信网段开放)。
       FUSION_AUTO_APPROVE_PATTERNS: "${FUSION_AUTO_APPROVE_PATTERNS:-192.168.,10.,172.16.0.0/12}"
+      # v0.14.0 企业生产 (默认空=关/回退 config.json; env 优先, 详见 .env.example + docs/DEPLOYMENT.md)
+      # mTLS 节点互信 (生产必配): fail-closed 证书不全拒启 (GAP-2)。证书文件经下方 volumes 挂载。
+      FUSION_MTLS_ENABLED: "${FUSION_MTLS_ENABLED:-}"
+      FUSION_MTLS_CA_CERT: "${FUSION_MTLS_CA_CERT:-}"
+      FUSION_MTLS_NODE_CERT: "${FUSION_MTLS_NODE_CERT:-}"
+      FUSION_MTLS_NODE_KEY: "${FUSION_MTLS_NODE_KEY:-}"
+      FUSION_MTLS_NODE_ID: "${FUSION_MTLS_NODE_ID:-master}"
+      FUSION_MTLS_NODE_ROLE: "${FUSION_MTLS_NODE_ROLE:-master}"
+      # 告警出站 webhook (生产必配, 内网端点; 空=仅内存 deque 轮询)
+      FUSION_ALERT_WEBHOOK_URL: "${FUSION_ALERT_WEBHOOK_URL:-}"
+      # 多租户首启引导 ADMIN (空=单租户零配置向后兼容)
+      FUSION_BOOTSTRAP_ADMIN: "${FUSION_BOOTSTRAP_ADMIN:-}"
+      FUSION_USERS_FILE: "${FUSION_USERS_FILE:-}"
     ports:
       - "11452:11452"
     networks:
       - fusion-cluster
+    # v0.14.0 mTLS 证书挂载 (生产必配) — 只读挂宿主 tls 目录, FUSION_MTLS_*_CERT env 指向挂载点。
+    # mTLS 关时此挂载空目录无影响 (env 空)。生产须先 provision_cluster + provision_node 签证书。
+    volumes:
+      - "${FUSION_MTLS_HOST_DIR:-./tls}:/tls:ro"
     # P1-16 (审计 §6.4): 容器 stdout 有界 — json-file 轮转 10MB×3, 不无界填盘。
     logging:
       driver: json-file
@@ -64,10 +81,22 @@ services:
       FUSION_MLX_API_KEY: "${FUSION_MLX_API_KEY:?必须设置 FUSION_MLX_API_KEY — 填 fusion-mlx 启用的 api_key}"
       # 单 agent 并发任务上限 — 压测时调高以充分利用 MLX 后端并发。
       FUSION_AGENT_MAX_TASKS: "${FUSION_AGENT_MAX_TASKS:-4}"
+      # v0.14.0 mTLS 节点互信 (生产必配, 与 master 同 CA): 集群内 HTTP 双向证书认证。
+      # 注意: --scale agent=N 时各 agent 共享同 env → 同 node_id → 叶证书冲突;
+      #       多 agent mTLS 须各节点独立 compose/entrypoint 签独立叶证书 (见 docs/DEPLOYMENT.md)。
+      FUSION_MTLS_ENABLED: "${FUSION_MTLS_ENABLED:-}"
+      FUSION_MTLS_CA_CERT: "${FUSION_MTLS_CA_CERT:-}"
+      FUSION_MTLS_NODE_CERT: "${FUSION_MTLS_NODE_CERT:-}"
+      FUSION_MTLS_NODE_KEY: "${FUSION_MTLS_NODE_KEY:-}"
+      FUSION_MTLS_NODE_ID: "${FUSION_MTLS_NODE_ID:-agent}"
+      FUSION_MTLS_NODE_ROLE: "${FUSION_MTLS_NODE_ROLE:-worker}"
     # 不映射 host 端口 — master 经容器 bridge IP 回连, 支持无上限 --scale。
     # 宿主机无需直连 agent (压测客户端只经 master:11452 提交任务)。
     networks:
       - fusion-cluster
+    # v0.14.0 mTLS 证书挂载 (生产必配) — 与 master 同 CA; 各 agent 须独立叶证书 (见 .env.example)。
+    volumes:
+      - "${FUSION_MTLS_HOST_DIR:-./tls}:/tls:ro"
     # P1-16 (审计 §6.4): 容器 stdout 有界 — json-file 轮转 10MB×3, 不无界填盘。
     logging:
       driver: json-file

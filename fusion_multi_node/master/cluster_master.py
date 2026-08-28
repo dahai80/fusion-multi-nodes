@@ -266,6 +266,11 @@ class ClusterMaster:
         # C2: 选举状态持久化路径 (term/voted_for), 与 tasks.json 同目录。
         self._election_state_path = Path.home() / ".fusion" / "multi-node" / "election_state.json"
         self._persist_task: asyncio.Task | None = None
+        # v0.14.0 item 7: 规则纪元/confirm 持久化路径 — 重启/HA failover 不归零。
+        # 复用 pattern D (election.py:336-388): 原子 tmp+flush+fsync+os.replace, 锁外 to_thread。
+        self._rule_epoch_path = Path.home() / ".fusion" / "multi-node" / "rule_epoch.json"
+        self._rule_epoch_dirty: bool = False
+        self._last_epoch_persist_ts: float = 0.0
         # GAP-1 (Phase C): 全状态同步循环 — leader 周期推 nodes/kv/banned 到 standby,
         # standby 持有完整集群拓扑, failover 后可立即调度 (always-on)。
         self._state_sync_task: asyncio.Task | None = None
@@ -1863,6 +1868,9 @@ class ClusterMaster:
     # 超频设 _persist_dirty=True 由 _persist_loop (15s) 兜底。终态转换 (finalize/cancel)
     # 不节流 (崩溃恢复耐久性关键)。降 O(N) 全量快照频率, 防 1000 任务高派发率 O(N²)。
     _PERSIST_THROTTLE_S = 5.0
+    # v0.14.0 item 7: 规则纪元写节流 — advance/confirm 高频写距上次 < 此值则 defer,
+    # _persist_loop (15s) 兜底。与 _PERSIST_THROTTLE_S 同范式 (降盘 I/O, 防 epoch 抖动)。
+    _EPOCH_PERSIST_THROTTLE_S = 5.0
 
     def _is_local_force(self, task: ClusterTask, required_mem: float) -> bool:
         """M4-02 判断是否强制本地执行 (R7: 正则边界匹配)。"""
@@ -2446,6 +2454,27 @@ class ClusterMaster:
                 oldest = min(self.kv_cache.items(), key=lambda x: x[1].created_at)
                 del self.kv_cache[oldest[0]]
 
+        # v0.14.0 item 7: 规则纪元/confirm 合并 — standby 接收 leader 纪元, failover 不从 0 起。
+        # 纪元取 max (防回退); confirm 按 (confirm_id, node_id) 覆盖合并。锁外持久化。
+        epoch_data = state.get("rule_epoch_state")
+        if isinstance(epoch_data, dict):
+            synced_epoch = int(epoch_data.get("rule_epoch", 0))
+            confirms_raw = epoch_data.get("confirms", {})
+            async with self._rule_epoch_lock:
+                if synced_epoch > self._rule_epoch:
+                    self._rule_epoch = synced_epoch
+            if isinstance(confirms_raw, dict) and confirms_raw:
+                async with self._confirms_lock:
+                    for k, v in confirms_raw.items():
+                        if "|" in k and isinstance(v, dict):
+                            cid, nid = k.split("|", 1)
+                            self._confirms[(cid, nid)] = v
+                    while len(self._confirms) > self._max_confirms:
+                        del self._confirms[next(iter(self._confirms))]
+                await self._persist_rule_epoch_async()
+            n_confirms = len(confirms_raw) if isinstance(confirms_raw, dict) else 0
+            logger.info(f"HA 状态同步接收规则纪元: epoch={synced_epoch} confirms={n_confirms}")
+
         if any(counts.values()):
             logger.info(f"HA 状态同步接收: nodes={counts['nodes']} kv={counts['kv']} banned={counts['banned']}")
         return counts
@@ -2468,10 +2497,17 @@ class ClusterMaster:
         kv_list: list[dict[str, Any]] = []
         async with self._kv_lock:
             kv_list = [self._kv_to_dict(e) for e in self.kv_cache.values()]
+        # v0.14.0 item 7: 规则纪元 + confirm 域快照 (两锁顺取, 不与 nodes/kv 嵌套)。
+        # standby 经此同步持有 leader 推进过的纪元, failover 不从 0 起 (原纯内存态已修)。
+        epoch_snapshot: dict[str, Any] = {}
+        async with self._rule_epoch_lock:
+            async with self._confirms_lock:
+                epoch_snapshot = self._build_rule_epoch_snapshot()
         payload = {
             "nodes": nodes_list,
             "kv_cache": kv_list,
             "banned_nodes": banned_snapshot,
+            "rule_epoch_state": epoch_snapshot,
             "saved_at": now,
         }
         targets: list[tuple[str, str, int, dict[str, Any]]] = []
@@ -2569,6 +2605,8 @@ class ClusterMaster:
             new_epoch = self._rule_epoch
         logger.info(f"规则纪元推进 → {new_epoch} (reason={reason or 'n/a'})")
         await self._broadcast_rule_epoch(new_epoch)
+        # v0.14.0 item 7: 推进后持久化 (节流), 重启/HA failover 保留纪元。
+        await self._mark_rule_epoch_dirty()
         return new_epoch
 
     async def receive_rule_epoch(self, epoch: int, source: str = "") -> dict:
@@ -2584,6 +2622,8 @@ class ClusterMaster:
                 return {"status": "ok", "epoch": self._rule_epoch}
             self._rule_epoch = epoch
         logger.info(f"接受规则纪元 → {epoch} (source={source})")
+        # v0.14.0 item 7: 接受超前纪元后持久化 (standby/agent 从广播收后落盘)。
+        await self._mark_rule_epoch_dirty()
         return {"status": "ok", "epoch": epoch}
 
     async def _build_epoch_targets(self) -> list[tuple[str, str, int]]:
@@ -2673,6 +2713,8 @@ class ClusterMaster:
                 oldest_key = next(iter(self._confirms))
                 del self._confirms[oldest_key]
         logger.info(f"confirm 中继存入: confirm_id={confirm_id} node={node_id} action={action} epoch={epoch}")
+        # v0.14.0 item 7: confirm 存入后持久化 (节流), 重启/HA failover 保留聚合表。
+        await self._mark_rule_epoch_dirty()
         return {"status": "ok", "confirm_id": confirm_id, "node_id": node_id}
 
     async def get_confirms(self, epoch: int | None = None) -> list[dict]:
@@ -2683,6 +2725,74 @@ class ClusterMaster:
             records = [r for r in records if r.get("epoch") == epoch]
         return records
 
+    # ── v0.14.0 item 7: 规则纪元/confirm 持久化 (pattern D) ──
+
+    def _load_rule_epoch_state(self) -> None:
+        """启动恢复规则纪元 + confirm 聚合表。缺文件/坏盘 → 默认 0/空 (容错不抛)。"""
+        if not self._rule_epoch_path or not self._rule_epoch_path.exists():
+            return
+        try:
+            data = json.loads(self._rule_epoch_path.read_text())
+            epoch = int(data.get("rule_epoch", 0))
+            confirms_raw = data.get("confirms", {})
+            if epoch < 0:
+                epoch = 0
+            self._rule_epoch = epoch
+            self._confirms.clear()
+            for k, v in confirms_raw.items():
+                # 键 "confirm_id|node_id" → tuple 还原
+                if "|" in k:
+                    cid, nid = k.split("|", 1)
+                    if isinstance(v, dict):
+                        self._confirms[(cid, nid)] = v
+            if len(self._confirms) > self._max_confirms:
+                # 超限裁旧 (与 receive_confirm 同范式)
+                while len(self._confirms) > self._max_confirms:
+                    del self._confirms[next(iter(self._confirms))]
+            logger.info(f"规则纪元恢复: epoch={epoch} confirms={len(self._confirms)}")
+        except Exception as e:
+            # 容错: 坏盘/坏 JSON 不抛, 保留默认 0/空 (Rule 12 显式告警不静默吞)
+            logger.warning(f"规则纪元状态恢复失败, 保留默认: {e}")
+
+    def _build_rule_epoch_snapshot(self) -> dict[str, Any]:
+        """锁内快照纪元/confirm (锁外落盘, 防 to_thread 期间被改)。"""
+        return {
+            "rule_epoch": self._rule_epoch,
+            "confirms": {f"{cid}|{nid}": rec for (cid, nid), rec in self._confirms.items()},
+        }
+
+    def _save_rule_epoch_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """锁外同步落盘 (经 asyncio.to_thread 调)。原子 tmp+flush+fsync+os.replace。"""
+        if not self._rule_epoch_path:
+            return
+        try:
+            self._rule_epoch_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._rule_epoch_path.with_suffix(self._rule_epoch_path.suffix + ".tmp")
+            with open(tmp, "w") as f:
+                json.dump(snapshot, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._rule_epoch_path)
+        except Exception as e:
+            logger.warning(f"规则纪元状态落盘失败 (脏标保留待下轮): {e}")
+
+    async def _persist_rule_epoch_async(self) -> None:
+        """锁内快照 → 锁外 to_thread 落盘 (与 election._persist_state_async 同范式)。"""
+        async with self._rule_epoch_lock:
+            async with self._confirms_lock:
+                snapshot = self._build_rule_epoch_snapshot()
+        await asyncio.to_thread(self._save_rule_epoch_snapshot, snapshot)
+
+    async def _mark_rule_epoch_dirty(self) -> None:
+        """写点设脏标 (节流: 即时写距上次 < _EPOCH_PERSIST_THROTTLE_S 则 defer)。"""
+        now = time.time()
+        if now - self._last_epoch_persist_ts >= self._EPOCH_PERSIST_THROTTLE_S:
+            self._last_epoch_persist_ts = now
+            await self._persist_rule_epoch_async()
+        else:
+            self._rule_epoch_dirty = True
+            logger.debug("规则纪元写节流 defer, 由 _persist_loop 兜底")
+
     # ── 生命周期 ──
 
     def _register_alert_webhook(self) -> None:
@@ -2690,9 +2800,17 @@ class ClusterMaster:
         # 运维须轮询 /api/v1/observability/alerts。读 env FUSION_ALERT_WEBHOOK_URL,
         # 非空则注册 handler: Alert → fire-and-forget asyncio.create_task (不阻塞 create_alert 同步路径),
         # 内部 to_thread 包 httpx POST, 失败 logger.warning 不拖垮告警链。
+        # v0.14.0 item 3: config 段 observability.alerts.webhook_url (env 优先兼容旧部署)。
         webhook_url = os.environ.get("FUSION_ALERT_WEBHOOK_URL", "").strip()
+        if not webhook_url and self._cluster_config is not None:
+            try:
+                webhook_url = str(self._cluster_config.get("observability.alerts.webhook_url", "")).strip()
+            except Exception:
+                pass
         if not webhook_url:
-            logger.info("未配告警 webhook (FUSION_ALERT_WEBHOOK_URL), 告警仅留内存 deque")
+            logger.info(
+                "未配告警 webhook (FUSION_ALERT_WEBHOOK_URL / observability.alerts.webhook_url), 告警仅留内存 deque"
+            )
             return
         logger.info(f"P0-5 告警 webhook 出站通道已注册: {webhook_url}")
 
@@ -2757,6 +2875,9 @@ class ClusterMaster:
                         # P1-19: 恢复重入队走 force=True — 崩溃恢复不丢任务 (上限仅限 submit 路径防过载)。
                         self._enqueue_pending(task, force=True)
             await self._drain_pending_locked()
+
+        # v0.14.0 item 7: 恢复规则纪元 + confirm 聚合表 (重启/HA failover 不归零)。
+        self._load_rule_epoch_state()
 
         self._health_task = asyncio.create_task(self._health_check_loop())
         self._retry_task = asyncio.create_task(self._retry_loop())
@@ -2832,6 +2953,11 @@ class ClusterMaster:
                     pass
         # H3 停机前最终落盘 (保留未完成任务供下次启动恢复)
         await self._persist_tasks()
+        # v0.14.0 item 7: 停机前最终落盘规则纪元/confirm (不节流, 耐久性关键)。
+        try:
+            await self._persist_rule_epoch_async()
+        except Exception as e:
+            logger.warning(f"停机落盘规则纪元失败: {e}")
         # P1 派发: 取消在途派发任务 + 关闭 http 客户端
         for dtask in list(self._dispatch_tasks.values()):
             if not dtask.done():
@@ -2925,6 +3051,16 @@ class ClusterMaster:
                     raise
                 except Exception as e:
                     logger.warning(f"持久化循环异常: {e}")
+                # v0.14.0 item 7: 规则纪元脏标兜底 (节流 defer 的 advance/confirm 在此落盘)。
+                if self._rule_epoch_dirty:
+                    try:
+                        self._rule_epoch_dirty = False
+                        self._last_epoch_persist_ts = time.time()
+                        await self._persist_rule_epoch_async()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"规则纪元持久化循环异常: {e}")
         except asyncio.CancelledError:
             pass
 

@@ -25,6 +25,13 @@
          @@LOGDIR@@    = <repo>/logs
          @@HOST@@      = 127.0.0.1
          @@PORT@@      = 11452
+         @@REPO@@      = <repo>
+         v0.14.0 生产 env 透传 (空串=关/回退 config.json + 文件, 显式设值开启):
+         @@MTLS_*@@         = FUSION_MTLS_{ENABLED,CA_CERT,NODE_CERT,NODE_KEY,NODE_ID,NODE_ROLE}
+         @@ALERT_WEBHOOK_URL@@ = FUSION_ALERT_WEBHOOK_URL
+         @@CLUSTER_TOKEN@@    = FUSION_CLUSTER_TOKEN (空=回退 .cluster_token 文件)
+         @@BOOTSTRAP_ADMIN@@  = FUSION_BOOTSTRAP_ADMIN
+         @@USERS_FILE@@       = FUSION_USERS_FILE
     -->
     <key>ProgramArguments</key>
     <array>
@@ -47,6 +54,33 @@
         <!-- P1-16 (审计 §6.4): 应用日志走 RotatingFileHandler (10MB×5 有界) 落 @@LOGDIR@@/app_master.log -->
         <key>FUSION_MULTINODE_LOG_FILE</key>
         <string>@@LOGDIR@@/app_master.log</string>
+
+        <!-- v0.14.0 生产 env 透传 (默认空串=关/回退 config.json + 文件); 生产显式设值开启 -->
+        <!-- mTLS 节点互信 (生产必配, 见 docs/DEPLOYMENT.md): 空=关, fail-closed 证书不全拒启 -->
+        <key>FUSION_MTLS_ENABLED</key>
+        <string>@@MTLS_ENABLED@@</string>
+        <key>FUSION_MTLS_CA_CERT</key>
+        <string>@@MTLS_CA_CERT@@</string>
+        <key>FUSION_MTLS_NODE_CERT</key>
+        <string>@@MTLS_NODE_CERT@@</string>
+        <key>FUSION_MTLS_NODE_KEY</key>
+        <string>@@MTLS_NODE_KEY@@</string>
+        <key>FUSION_MTLS_NODE_ID</key>
+        <string>@@MTLS_NODE_ID@@</string>
+        <key>FUSION_MTLS_NODE_ROLE</key>
+        <string>@@MTLS_NODE_ROLE@@</string>
+        <!-- 告警出站 webhook (生产必配, 内网端点; 空=仅内存 deque 轮询) -->
+        <key>FUSION_ALERT_WEBHOOK_URL</key>
+        <string>@@ALERT_WEBHOOK_URL@@</string>
+        <!-- 集群共享密钥 (多 Mac HA 须全节点一致; 空=回退 ~/.fusion/multi-node/.cluster_token 文件) -->
+        <key>FUSION_CLUSTER_TOKEN</key>
+        <string>@@CLUSTER_TOKEN@@</string>
+        <!-- 多租户首启引导 ADMIN (见 docs/OPERATIONS.md; 空=单租户零配置向后兼容) -->
+        <key>FUSION_BOOTSTRAP_ADMIN</key>
+        <string>@@BOOTSTRAP_ADMIN@@</string>
+        <!-- 用户库路径覆盖 (默认 ~/.fusion/multi-node/users.json) -->
+        <key>FUSION_USERS_FILE</key>
+        <string>@@USERS_FILE@@</string>
     </dict>
 
     <key>WorkingDirectory</key>

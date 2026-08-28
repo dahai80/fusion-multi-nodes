@@ -197,6 +197,16 @@ install_launchd() {
         -e "s|@@HOST@@|${HOST}|g" \
         -e "s|@@PORT@@|${PORT}|g" \
         -e "s|@@REPO@@|${SCRIPT_DIR}|g" \
+        -e "s|@@MTLS_ENABLED@@|${FUSION_MTLS_ENABLED:-}|g" \
+        -e "s|@@MTLS_CA_CERT@@|${FUSION_MTLS_CA_CERT:-}|g" \
+        -e "s|@@MTLS_NODE_CERT@@|${FUSION_MTLS_NODE_CERT:-}|g" \
+        -e "s|@@MTLS_NODE_KEY@@|${FUSION_MTLS_NODE_KEY:-}|g" \
+        -e "s|@@MTLS_NODE_ID@@|${FUSION_MTLS_NODE_ID:-}|g" \
+        -e "s|@@MTLS_NODE_ROLE@@|${FUSION_MTLS_NODE_ROLE:-}|g" \
+        -e "s|@@ALERT_WEBHOOK_URL@@|${FUSION_ALERT_WEBHOOK_URL:-}|g" \
+        -e "s|@@CLUSTER_TOKEN@@|${FUSION_CLUSTER_TOKEN:-}|g" \
+        -e "s|@@BOOTSTRAP_ADMIN@@|${FUSION_BOOTSTRAP_ADMIN:-}|g" \
+        -e "s|@@USERS_FILE@@|${FUSION_USERS_FILE:-}|g" \
         "$PLIST_TEMPLATE" > "$LAUNCHD_PLIST"
     log_info "渲染 launchd plist → $LAUNCHD_PLIST"
 

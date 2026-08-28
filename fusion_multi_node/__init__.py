@@ -30,8 +30,9 @@ and storage volumes.
   消费。多节点仅定义 TRANSPORT + IDENTITY + KEY SCHEME — 审计链 HMAC (链段拉取端点
   /api/v1/audit/chain) + 全集群规则纪元广播 (/api/v1/rules/epoch) + 跨节点 confirm 中继
   (/api/confirm)。层边界: guard 实现 federated 链验证 / RuleSet reconcile / confirm 聚合。
-  100% 本地/LAN, 无云。已知限制: 纪元内存态重启归零 / confirm 不 relay HA standby (guard 重基线/重查)。
+  100% 本地/LAN, 无云。**v0.14.0 纪元/confirm 持久化** (rule_epoch.json 原子落盘, start 恢复;
+  leader `_build_state_sync_payload` 纳入 epoch+confirm, standby 取 max epoch 防回退) — 修重启归零 / HA failover 从 0。
 """
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 __app_name__ = "Fusion-Multi-Node"
