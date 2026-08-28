@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-08-28 — issue #52 跨节点 guard TRANSPORT 原语
+
+> **新功能 (minor)**: 跨节点 guard 契约 — fusion-guard 消费的 3 个 TRANSPORT 原语。
+> 多节点仅定义 **TRANSPORT + IDENTITY + KEY SCHEME**, guard 实现消费方 (federated 链验证 /
+> RuleSet reconcile / confirm 聚合)。链 fusion-guard issue #4。100% 本地/LAN, 无云。
+
+### Added
+- **cluster_key HKDF 派生** (`security/cluster_key.py`): HKDF-SHA256 从 cluster_token 域分离
+  派生 3 原语独立 MAC 密钥 (审计链 / 规则纪元 / confirm 中继)。**不新增秘密** — cluster_token
+  已是集群成员根信源。公开: `derive_audit_chain_key` / `derive_rule_epoch_key` /
+  `derive_confirm_relay_key` / `mac_payload` / `verify_mac` (常量时间) / `canonical_json` /
+  `post_confirm` (agent/guard→master POST 助手)。
+- **原语 1 — 审计链 HMAC** (`security/audit_log.py`): `seq` 单调 / `prev_hash` 链接 (含 mac 完整
+  前序记录 sha256) / `mac` 篡改检出。链计算失败降级写无链字段 (保「审计不丢事件」契约)。
+  链段拉取端点 `GET /api/v1/audit/chain?since_seq=N` (master + agent) — guard 拉本节点链段聚合。
+- **原语 2 — 规则纪元广播** (`master/cluster_master.py`): `advance_rule_epoch` (leader 推进 +
+  best-effort 广播 worker + HA peer) / `receive_rule_epoch` (落后拒防回退, 等于幂等, 超前接受) /
+  `_state_sync_loop` 周期重广播补漏。端点 `GET /api/v1/rules/epoch` + `POST /api/v1/rules/epoch/advance`
+  + `POST /api/rules/epoch` (agent 接收端)。
+- **原语 3 — confirm 中继** (`master/cluster_master.py`): `receive_confirm` (MAC 校验, 坏 MAC 拒)
+  / `get_confirms` (按 epoch 过滤聚合)。端点 `POST /api/confirm` + `GET /api/v1/confirms?epoch=N`。
+- **RBAC**: 6 用户 RBAC 项 (`CLUSTER_INTERNAL` 哨兵拒所有用户令牌 / `cluster:stats` USER+VIEWER 可读 /
+  `user:manage` 仅 ADMIN) + 2 agent node-RBAC 项 (`NODE_LIST` / `NODE_HEARTBEAT`)。
+- **API 文档**: `docs/API.md` 加 Guard Transport 章节 (漂移检测契约测试守护)。
+- **测试**: 4 新文件 51 tests — `test_cluster_key.py` (12) / `test_audit_chain.py` (13) /
+  `test_rule_epoch.py` (14) / `test_confirm_relay.py` (12)。全 ASGI in-process 无真 socket。
+
+### 层边界
+- 多节点 = 调度 + 传输, guard = 每主机鉴权。不引 fusion-guard import (跨仓零依赖, 多节点自包含)。
+- guard 持 cluster_token + `X-Node-Id: master` 拉 agent 端点 (复用 MASTER 角色)。
+
+### 已知限制
+- 规则纪元内存态: 重启归零, HA failover 从 0 起 (guard 重新基线)。
+- confirm 不 relay HA standby: failover 丢在途 confirm (guard 重查)。非缺陷, 契约允许。
+
+### Stale 分支清理
+- 删除 19 个落后 main 的 stale 分支 (含 v0.12.2/v0.12.3 已删死代码 — 合并=重新引入死代码)。
+
+### 测试
+- 1309 passed, 0 failed, 7 skipped (random-order 双向 seed=0/1 绿)。
+- lint: ruff check 净; format: ruff format --check 净。
+
 ## [0.12.3] - 2026-08-28 — autoscaler 死代码清除
 
 > **死代码清除**: `autoscaler/` 包 (469 行) 零实例化, 路由恒 503 not-wired。

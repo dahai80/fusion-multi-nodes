@@ -16,6 +16,7 @@ OpenAPI schema at `/openapi.json`; interactive docs at `/docs`.
 - [Autoscaler](#autoscaler)
 - [User Management (ADMIN only)](#user-management-admin-only)
 - [Config Hot-Reload](#config-hot-reload)
+- [Guard Transport — Issue #52](#guard-transport--issue-52)
 - [Legacy `/api/*` Routes](#legacy-apiroutes)
 
 ---
@@ -158,6 +159,36 @@ GAP-8 Phase F2. Requires user token with ADMIN role.
 ### `POST /api/v1/config/reload` (P2-20)
 
 Re-reads `config.json` + re-applies `scheduling.tenant_max_concurrent`. Port/HA/mDNS require restart → response `restart_required` hint. `503` if no config injected.
+
+---
+
+## Guard Transport — Issue #52
+
+跨节点 guard TRANSPORT 原语 (fusion-guard 消费)。多节点仅定义 TRANSPORT + IDENTITY + KEY SCHEME — HKDF-SHA256 从 cluster_token 域分离派生 3 原语独立 MAC 密钥 (不新增秘密)。100% 本地/LAN, 无云。层边界: guard 实现 federated 链验证 / RuleSet reconcile / confirm 聚合消费方。
+
+### `GET /api/v1/audit/chain?since_seq=N`
+
+拉本节点审计链段 (HMAC 链 — `seq` 单调 / `prev_hash` 链接 / `mac` 篡改检出)。`since_seq` 过滤 `seq>=N`, 缺 `seq` 基线记录一律返。`node_id` = master 或 agent node_id。RBAC: CLUSTER_INTERNAL (集群令牌 + `X-Node-Id`, 用户令牌 403)。
+
+### `GET /api/v1/rules/epoch`
+
+查全集群规则纪元 (master 内存态, 重启归零 — guard 重新基线)。RBAC: `cluster:stats` (USER/VIEWER 可读)。
+
+### `POST /api/v1/rules/epoch/advance`
+
+leader 推进纪元 → best-effort 广播到 worker + HA peer (锁外异步, `build_safe_url` + SSRF guard)。非 leader 返 409。RBAC: `user:manage` (仅 ADMIN)。
+
+### `POST /api/rules/epoch`
+
+agent/standby 接收端 (集群内部)。落后拒 (防回退), 等于幂等, 超前接受。RBAC: CLUSTER_INTERNAL。
+
+### `POST /api/confirm`
+
+agent/guard → master confirm 中继 (MAC 校验 — `derive_confirm_relay_key` 派生密钥, 坏 MAC 401)。存聚合表 (同 `(confirm_id,node_id)` 幂等覆盖)。RBAC: CLUSTER_INTERNAL。
+
+### `GET /api/v1/confirms?epoch=N`
+
+guard 查 confirm 聚合, 可按 epoch 过滤。RBAC: CLUSTER_INTERNAL。
 
 ---
 

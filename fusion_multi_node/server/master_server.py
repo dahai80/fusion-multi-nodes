@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -28,6 +29,9 @@ from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.security.permission import NodeRole, PermissionManager, UserRole, check_user_path_access
+
+# issue #52: 共享 Pydantic 模型从 agent_server 反向 import (cycle-safe — agent 零 import master)。
+from fusion_multi_node.server.agent_server import RuleEpochReceiveRequest, V1AuditChainResponse
 from fusion_multi_node.utils.auth import (
     BearerAuthMiddleware,
     build_safe_url,
@@ -352,6 +356,30 @@ class V1ClusterStatsResponse(BaseModel):
 class V1ObservabilitySuggestionsResponse(BaseModel):
     suggestions: list[dict[str, Any]] = []
     error: str = ""
+
+
+# issue #52 跨节点 guard 契约 — master 专有模型 (共享模型见 agent_server import)。
+class RuleEpochAdvanceRequest(BaseModel):
+    reason: str = ""
+
+
+class V1RuleEpochResponse(BaseModel):
+    epoch: int
+    advanced_at: str = ""
+
+
+class ConfirmRelayRequest(BaseModel):
+    confirm_id: str
+    node_id: str
+    action: str
+    epoch: int
+    ts: str
+    mac: str
+
+
+class V1ConfirmListResponse(BaseModel):
+    confirms: list[dict[str, Any]]
+    count: int
 
 
 # ── Master Server ──
@@ -1962,6 +1990,82 @@ class MasterServer:
                 raise HTTPException(status_code=400, detail="缺少 leader_id")
             await self.master.handle_heartbeat(req.leader_id, req.term)
             return {"status": "ok"}
+
+        # ── issue #52 跨节点 guard 契约原语 (3 原语 6 路由) ──
+        # 多节点仅定义 TRANSPORT + IDENTITY + KEY SCHEME; fusion-guard 实现消费方
+        # (federated 链验证 / RuleSet reconcile / confirm 聚合)。100% 本地/LAN, 无云。
+
+        # 原语 1 — 审计链段拉取: guard 聚合各节点审计链做跨节点 federated 验证。
+        @app.get("/api/v1/audit/chain")
+        async def audit_chain(request: Request, since_seq: int = 0):
+            _enforce_user_rbac(request, "/api/v1/audit/chain", "GET")
+            records = self._audit.read()
+            filtered = [r for r in records if r.get("seq", 0) >= since_seq or "seq" not in r]
+            return V1AuditChainResponse(
+                node_id="master",
+                records=filtered,
+                fetched_at=datetime.now(UTC).isoformat(),
+            )
+
+        # 原语 2 — 规则纪元: guard reconcile 基线。advance 仅 ADMIN; get USER/VIEWER 可读。
+        @app.get("/api/v1/rules/epoch")
+        async def get_rule_epoch(request: Request):
+            _enforce_user_rbac(request, "/api/v1/rules/epoch", "GET")
+            epoch = await self.master.get_rule_epoch()
+            return V1RuleEpochResponse(epoch=epoch)
+
+        @app.post("/api/v1/rules/epoch/advance")
+        async def advance_rule_epoch(req: RuleEpochAdvanceRequest, request: Request):
+            _enforce_user_rbac(request, "/api/v1/rules/epoch/advance", "POST")
+            try:
+                epoch = await self.master.advance_rule_epoch(req.reason)
+            except RuntimeError as e:
+                self._audit.log(
+                    action="rule_epoch_advance",
+                    actor=_resolve_actor(request),
+                    result="error",
+                    detail=str(e),
+                )
+                raise HTTPException(status_code=409, detail=str(e))
+            self._audit.log(
+                action="rule_epoch_advance",
+                actor=_resolve_actor(request),
+                detail=f"epoch={epoch} reason={req.reason}",
+            )
+            return V1RuleEpochResponse(epoch=epoch, advanced_at=datetime.now(UTC).isoformat())
+
+        # 原语 2 接收端 — standby/agent 广播接收 (集群内部, CLUSTER_INTERNAL)。
+        @app.post("/api/rules/epoch")
+        async def receive_rule_epoch(req: RuleEpochReceiveRequest, request: Request):
+            _enforce_user_rbac(request, "/api/rules/epoch", "POST")
+            result = await self.master.receive_rule_epoch(req.epoch, req.source)
+            if result["status"] == "rejected":
+                raise HTTPException(status_code=409, detail=result.get("reason", "纪元回退"))
+            return result
+
+        # 原语 3 — confirm 中继: agent/guard POST 确认到 master 聚合 (MAC 鉴集群成员身份)。
+        @app.post("/api/confirm")
+        async def confirm_relay(req: ConfirmRelayRequest, request: Request):
+            _enforce_user_rbac(request, "/api/confirm", "POST")
+            result = await self.master.receive_confirm(
+                req.confirm_id, req.node_id, req.action, req.epoch, req.ts, req.mac
+            )
+            if result["status"] == "rejected":
+                self._audit.log(
+                    action="confirm_relay_fail",
+                    actor=req.node_id,
+                    result="denied",
+                    detail=f"confirm_id={req.confirm_id} reason={result.get('reason')}",
+                )
+                raise HTTPException(status_code=401, detail=result.get("reason", "MAC 校验失败"))
+            return result
+
+        # 原语 3 — guard 查聚合 confirm (可按 epoch 过滤)。
+        @app.get("/api/v1/confirms")
+        async def list_confirms(request: Request, epoch: int | None = None):
+            _enforce_user_rbac(request, "/api/v1/confirms", "GET")
+            confirms = await self.master.get_confirms(epoch)
+            return V1ConfirmListResponse(confirms=confirms, count=len(confirms))
 
     def _liveness_checks(self) -> dict[str, Any]:
         """C11: 本地 liveness 检查 — 磁盘可写 / 内存充足 / task-store 可写。

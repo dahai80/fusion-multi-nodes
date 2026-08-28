@@ -25,7 +25,13 @@ and storage volumes.
   (合成默认 / MLX 真张量 env-gated FUSION_KV_TENSOR_BACKEND=mlx 待上游 #650) 编排
   源 agent /api/kv/export → 目标 /api/kv/import, 返 True。合成后端满足 #33 验收
   (张量 round-trip), 真张量为 env-gated bonus。
+- issue #52 跨节点 guard TRANSPORT 原语 (v0.13.0): HKDF-SHA256 从 cluster_token 域分离
+  派生 3 原语独立 MAC 密钥 (审计链 / 规则纪元 / confirm 中继, 不新增秘密), 供 fusion-guard
+  消费。多节点仅定义 TRANSPORT + IDENTITY + KEY SCHEME — 审计链 HMAC (链段拉取端点
+  /api/v1/audit/chain) + 全集群规则纪元广播 (/api/v1/rules/epoch) + 跨节点 confirm 中继
+  (/api/confirm)。层边界: guard 实现 federated 链验证 / RuleSet reconcile / confirm 聚合。
+  100% 本地/LAN, 无云。已知限制: 纪元内存态重启归零 / confirm 不 relay HA standby (guard 重基线/重查)。
 """
 
-__version__ = "0.12.3"
+__version__ = "0.13.0"
 __app_name__ = "Fusion-Multi-Node"

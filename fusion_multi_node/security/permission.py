@@ -102,6 +102,11 @@ _PATH_PERMISSION_MAP: dict[str, Permission] = {
     "/api/approval/list": Permission.APPROVAL_LIST,
     "/api/approval/approve": Permission.APPROVAL_APPROVE,
     "/api/hardware": Permission.HARDWARE_READ,
+    # issue #52 跨节点 guard 契约 — agent 接收端 node-RBAC。
+    # /api/v1/audit/chain: guard 拉 agent 审计链 (持 cluster_token, X-Node-Id: master → MASTER 角色)。
+    "/api/v1/audit/chain": Permission.NODE_LIST,
+    # /api/rules/epoch: master 广播到 agent, MASTER + WORKER 皆可收 (NODE_HEARTBEAT 两角色共有)。
+    "/api/rules/epoch": Permission.NODE_HEARTBEAT,
 }
 
 
@@ -279,6 +284,19 @@ _USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
     ("POST", "/api/nodes/reject"): "CLUSTER_INTERNAL",
     ("POST", "/api/kv/register"): "CLUSTER_INTERNAL",
     ("POST", "/api/kv/sync"): "CLUSTER_INTERNAL",
+    # issue #52 跨节点 guard 契约 — 3 原语路由鉴权。
+    # 审计链段含跨租户事件 → 仅集群内部 (guard 持 cluster_token 拉, 非用户令牌)。
+    ("GET", "/api/v1/audit/chain"): "CLUSTER_INTERNAL",
+    # 规则纪元读 — USER/VIEWER 可读 (guard reconcile 基线, 无租户泄露)。
+    ("GET", "/api/v1/rules/epoch"): "cluster:stats",
+    # 规则纪元推进 — 仅 ADMIN (集群规则变更, 高敏感)。
+    ("POST", "/api/v1/rules/epoch/advance"): "user:manage",
+    # 纪元广播接收端 (standby/agent) — 集群内部。
+    ("POST", "/api/rules/epoch"): "CLUSTER_INTERNAL",
+    # confirm 中继 — 集群内部 (agent/guard 持 cluster_token + MAC)。
+    ("POST", "/api/confirm"): "CLUSTER_INTERNAL",
+    # confirm 聚合查询 — 仅集群内部 (guard 持 cluster_token)。
+    ("GET", "/api/v1/confirms"): "CLUSTER_INTERNAL",
 }
 
 # P1-5 (审计 §3.4): 健康检查/文档/根 — 任何令牌放行 (鉴权中间件已豁免, 此处双保险)。
