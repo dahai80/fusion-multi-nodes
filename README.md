@@ -16,68 +16,68 @@
 
 > **📦 v0.14.2-rc.1 (Release Candidate) — 2026-08-28**
 >
-> RC — v0.14.1 final 基线打包为候选版。内容 = HEAD (企业级 7 阻塞 v0.14.0 + TarSlip 安全补丁 v0.14.1),
-> 无新增代码改动。**非 GA**。1343 tests, ruff 净, 随机序双向绿。详见 [CHANGELOG](docs/CHANGELOG.md)。
+> RC — v0.14.1 final baseline packaged as a candidate. Content = HEAD (enterprise 7 blockers v0.14.0 + TarSlip security patch v0.14.1),
+> no new code changes. **Not GA.** 1343 tests, ruff clean, randomized-order bidirectional green. See [CHANGELOG](docs/CHANGELOG.md).
 
-> **🔒 v0.14.1 (2026-08-28) — 安全补丁: backup restore 路径逃逸加固**
+> **🔒 v0.14.1 (2026-08-28) — Security patch: backup restore path-escape hardening**
 >
-> `backup restore` TarSlip 变种修复 — symlink/hardlink `linkname` 越界校验 +
-> `extractall(filter="data")` (PEP 706) 兜底。不假设备份可信 (Rule 12)。1343 tests, ruff 净。
+> `backup restore` TarSlip variant fix — symlink/hardlink `linkname` out-of-bounds validation +
+> `extractall(filter="data")` (PEP 706) backstop. Does not assume backups are trusted (Rule 12). 1343 tests, ruff clean.
 
-> **📦 v0.14.0 (2026-08-28) — 企业级生产商用发布阻塞项修复 (7 项)**
+> **📦 v0.14.0 (2026-08-28) — Enterprise production-readiness blockers fixed (7 items)**
 >
-> 7 项企业级商用阻塞全部落地: (1) HA `cluster start` 接线漏修复 (原该路径永不启 HA);
-> (2) 可观测持久化默认开 (`observability.persist=True` + `_cleanup_loop` 300s 周期 save, 不再重启即失);
-> (3) 告警出站 webhook config 段 (env 优先, 非 0 配置无告警); (4) mTLS config 段 + lazy `is_enabled()` +
-> `configure_from_config` config→env 桥 (fail-closed 不变, 仍默认关保测试兼容); (5) 合成 KV 跨节点传输
-> **生产可用**声明 (#33 已闭合, 真实张量 env-gated bonus); (6) CLI `backup create/restore` 一键备份恢复
-> (全量 9 文件+tls/+kv/, 原子 tar.gz 0600, 路径逃逸校验); (7) 规则纪元/confirm 持久化 (不再重启归零 /
-> HA failover 从 0, `_build_state_sync_payload` 纳入同步)。策略 = config 段 + 部署层 env 透传 + 文档引导
-> (不翻代码默认, 唯一翻默认项 `observability.persist`)。基线 1309 → 1343 测试全绿 (随机序双向绿), ruff 净。详见
-> [CHANGELOG](docs/CHANGELOG.md)。生产 mTLS/HA 须显式开: 见 `docs/DEPLOYMENT.md`。
+> All 7 enterprise production blockers landed: (1) HA `cluster start` wiring-gap fix (that path never started HA before);
+> (2) observability persistence on by default (`observability.persist=True` + `_cleanup_loop` 300s periodic save, no longer lost on restart);
+> (3) alert outbound webhook config section (env-first, non-zero config means no alerts); (4) mTLS config section + lazy `is_enabled()` +
+> `configure_from_config` config→env bridge (fail-closed unchanged, still off by default for test compatibility); (5) synthetic KV cross-node transport
+> declared **production-ready** (#33 closed, real tensor env-gated bonus); (6) CLI `backup create/restore` one-shot backup/restore
+> (full 9 files + tls/ + kv/, atomic tar.gz 0600, path-escape validation); (7) rule-epoch/confirm persistence (no longer reset to zero on restart /
+> HA failover from 0, `_build_state_sync_payload` included in sync). Strategy = config sections + deploy-layer env passthrough + doc guidance
+> (no default flips except `observability.persist`). Baseline 1309 → 1343 tests green (randomized-order bidirectional), ruff clean. See
+> [CHANGELOG](docs/CHANGELOG.md). Production mTLS/HA must be explicitly enabled: see `docs/DEPLOYMENT.md`.
 
 ---
 
-> **📦 v0.12.1 (2026-08-28) — 审计 0826 P2+P3 整改 (15 项)**
+> **📦 v0.12.1 (2026-08-28) — Audit 0826 P2+P3 remediation (15 items)**
 >
-> 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 12 P2 + 3 P3 项全部代码修复落地
-> (含设计取舍项 env-gated 破开, 非仅文档)。安全/资源 (3): mTLS 证书 SAN + `check_hostname=True` /
-> MLXKVTransport SSRF 守卫 / docker-compose 资源上限。KV 容量 (2): export size 同步 / ban 期满主动探测。
-> 事件/选举 (3): 选举锁外 I/O / 事件丢弃告警 / F2 动态子路径全 op。容器/隔离设计取舍破开 (4):
-> sandbox rlimit / PARTIAL 崩溃补全 / PIPELINE 段级检查点 / observability deque 持久化 (均 env-gated)。
-> 部署/配置 (3): autoscaler 措辞 503 / AgentServer KV 落盘 critical 告警 / MIGRATED 自动语义校准。
-> 资源泄漏 (1): AgentServer.stop 调 kv_manager.close。基线 1262 → 1317 测试全绿。详见
-> [CHANGELOG](docs/CHANGELOG.md)。至此审计 0826 全 47 项 (5 P0 + 27 P1 + 12 P2 + 3 P3) 落地完成。
+> Audit `fusion-multi-node-audit-result-product-0826.md` ruled all 12 P2 + 3 P3 items fixed in code
+> (incl. design-tradeoff items broken open via env-gate, not docs-only). Security/resource (3): mTLS cert SAN + `check_hostname=True` /
+> MLXKVTransport SSRF guard / docker-compose resource limits. KV capacity (2): export-size sync / proactive probe at ban expiry.
+> Events/election (3): election I/O outside lock / event-drop alert / F2 dynamic subpath all ops. Container/isolation design-tradeoff break-open (4):
+> sandbox rlimit / PARTIAL crash completion / PIPELINE segment-level checkpoint / observability deque persistence (all env-gated).
+> Deploy/config (3): autoscaler wording 503 / AgentServer KV persist critical alert / MIGRATED auto semantic calibration.
+> Resource leak (1): AgentServer.stop calls kv_manager.close. Baseline 1262 → 1317 tests green. See
+> [CHANGELOG](docs/CHANGELOG.md). This completes all 47 audit-0826 items (5 P0 + 27 P1 + 12 P2 + 3 P3).
 
 ---
 
-> **📦 v0.12.0 (2026-08-27) — 审计 0826 P1 整改 (27 项)**
+> **📦 v0.12.0 (2026-08-27) — Audit 0826 P1 remediation (27 items)**
 >
-> 审计 `fusion-multi-node-audit-result-product-0826.md` 判定 27 P1 项全部代码修复落地。
-> 容错调度 (8): H3 RUNNING→PENDING 重派补 `exclude_nodes` / 节点 OFFLINE 自动迁移在途 /
-> `_pending_queue` 上限 503 / 重试指数退避 / agent_server 429 不累熔断 / 增量持久化 /
-> httpx 连接池显式配置 / `sync_kv_cache` 异常分类。KV 张量 (2): `import_tensor` 区分降级
-> vs 真失败 / 跨节点异常分类 + 连续失败告警。安全 (7): HTTP 派发可选 PII 脱敏 / cloud_fallback
-> import-time 禁用守卫 / RBAC fail-closed + 全路由登记 / 审计写失败告警 / `compare_digest` /
-> manual_join mTLS scheme。API 契约 (1): 9 raw dict → pydantic (422 not 400)。Agent (3):
-> `/api/hardware` to_thread / 选举空窗 503 / 本地 `max_tasks` 过载 gate。性能/运维 (6): 真推理
-> 吞吐基准 / Prometheus 节点级指标 / HA doc 校准 / kv+user fsync / 日志文件 stderr 提示。
-> 基线 1213 → 1262 测试全绿。详见 [CHANGELOG](docs/CHANGELOG.md)。P2/P3 整改续 (v0.12.1)。
+> Audit `fusion-multi-node-audit-result-product-0826.md` ruled all 27 P1 items fixed in code.
+> Fault-tolerant scheduling (8): H3 RUNNING→PENDING re-dispatch with `exclude_nodes` / node OFFLINE auto-migrate in-flight /
+> `_pending_queue` cap 503 / retry exponential backoff / agent_server 429 not counted toward circuit breaker / incremental persistence /
+> httpx connection pool explicit config / `sync_kv_cache` exception classification. KV tensor (2): `import_tensor` distinguishes degradation
+> vs real failure / cross-node exception classification + consecutive-failure alert. Security (7): optional PII scrubbing on HTTP dispatch / cloud_fallback
+> import-time disable guard / RBAC fail-closed + full-route registry / audit-write-failure alert / `compare_digest` /
+> manual_join mTLS scheme. API contract (1): 9 raw dict → pydantic (422 not 400). Agent (3):
+> `/api/hardware` to_thread / election gap 503 / local `max_tasks` overload gate. Perf/ops (6): real-inference
+> throughput benchmark / Prometheus node-level metrics / HA doc calibration / kv+user fsync / log-file stderr hint.
+> Baseline 1213 → 1262 tests green. See [CHANGELOG](docs/CHANGELOG.md). P2/P3 remediation continues (v0.12.1).
 
 ---
 
-> **📦 v0.11.0 (2026-08-27) — GAP-7 KV 张量跨节点传输 (close #33)**
+> **📦 v0.11.0 (2026-08-27) — GAP-7 KV tensor cross-node transport (close #33)**
 >
-> `ClusterMaster.sync_kv_cache` 经可插拔张量后端 (合成默认 / MLX 真张量 env-gated
-> `FUSION_KV_TENSOR_BACKEND=mlx`) 编排源 agent `/api/kv/export` → 目标 `/api/kv/import`,
-> 返 `True`。`KVShard` 加 `tensor` 字段 (base64 压缩随 JSON 传输, `store_local` 预算门)。
-> 合成后端满足 #33 验收 (张量 round-trip 跨 2 agent); 真张量待上游 fusion-mlx issue #650
-> 落地激活 (env-gated bonus, 404→降级合成 + warn)。新增 `kv_tensor_transport.py` +
-> 三组测试 (`test_kv_tensor_serialize.py` 11, `test_kv_export_import_routes.py` 6,
-> `test_kv_tensor_e2e.py` 4+1 skip) + 改写 `test_new_features.py` sync 用例。
-> 详见 [CHANGELOG](docs/CHANGELOG.md)。
+> `ClusterMaster.sync_kv_cache` orchestrates via a pluggable tensor backend (synthetic default / MLX real-tensor env-gated
+> `FUSION_KV_TENSOR_BACKEND=mlx`) source agent `/api/kv/export` → target `/api/kv/import`,
+> returns `True`. `KVShard` adds a `tensor` field (base64-compressed over JSON, `store_local` budget gate).
+> Synthetic backend satisfies #33 acceptance (tensor round-trip across 2 agents); real tensor awaits upstream fusion-mlx issue #650
+> to activate (env-gated bonus, 404→degrade to synthetic + warn). New `kv_tensor_transport.py` +
+> three test groups (`test_kv_tensor_serialize.py` 11, `test_kv_export_import_routes.py` 6,
+> `test_kv_tensor_e2e.py` 4+1 skip) + rewrote `test_new_features.py` sync cases.
+> See [CHANGELOG](docs/CHANGELOG.md).
 >
-> 已完成 (Phase A-F + GAP-7): issues/PR → RC → GAP-1 always-on → GAP-6 限流 → GAP-5 死代码 → F1-F5 多租户 → GAP-7 KV 张量传输。
+> Completed (Phase A-F + GAP-7): issues/PR → RC → GAP-1 always-on → GAP-6 rate-limit pacing → GAP-5 dead-code → F1-F5 multi-tenant → GAP-7 KV tensor transport.
 
 ---
 
@@ -89,21 +89,21 @@
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
-| **Pipeline Parallelism** | Split large models (70B+) across multiple Macs, each handling a subset of layers | Run超大本地模型 |
+| **Pipeline Parallelism** | Split large models (70B+) across multiple Macs, each handling a subset of layers | Run oversized local models |
 | **Data Parallelism** | Load the same model on multiple Macs, distribute batch requests for higher throughput | High-throughput batch inference |
 
 ### Core Modules
 
 | Module | Responsibility |
 |--------|---------------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, 真实张量 PIPELINE 层切分链 (接 fusion-mlx `/distributed/*`, ✅上游端点已交付 issue #621/#630 closed; 多节点客户端存根 `load_shard`/`pipeline_step` 已接, ⚠️真模型端到端验证待长期落地), master→agent 派发循环, **H3 任务持久化+崩溃恢复** (RUNNING/PENDING 原子落盘, 崩溃重启自动重派)。HA 选举接 `start(ha_config=)` (默认关闭单 Master; StandbyMaster 类为死代码原型)。cloud_fallback 调度路径 v0.8.2 已切断 (100% 本地) |
-| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (上游 `/distributed/load_shard`+`pipeline_step` 已交付 issue #621 closed, b64.npy 激活跨节点, ⚠️真模型端到端待长期落地) |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, real-tensor PIPELINE layer-split chain (to fusion-mlx `/distributed/*`, ✅upstream endpoints delivered issue #621/#630 closed; multi-node client stubs `load_shard`/`pipeline_step` wired, ⚠️real-model end-to-end verification pending long-term), master→agent dispatch loop, **H3 task persistence + crash recovery** (RUNNING/PENDING atomic disk write, auto-re-dispatch on crash restart). HA election wired to `start(ha_config=)` (off by default single Master; StandbyMaster class is a dead-code prototype). cloud_fallback scheduling path cut in v0.8.2 (100% local) |
+| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (upstream `/distributed/load_shard`+`pipeline_step` delivered issue #621 closed, b64.npy activates cross-node, ⚠️real-model end-to-end pending long-term) |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
-| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server. ⚠️启动但从不作为派发传输 (仅 HTTP 派发) |
-| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing. ✅跨节点 KV 传输生产可用 (GAP-7/#33, v0.11.0): `SyntheticKVTransport` 默认后端合成 KVCacheEntry 跨节点路由; 真实张量 `MLXKVTransport` env-gated 实验性 bonus (`FUSION_KV_TENSOR_BACKEND=mlx`, 待上游 #650) |
+| **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server. ⚠️Starts but never used as dispatch transport (HTTP dispatch only) |
+| **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing. ✅Cross-node KV transport production-ready (GAP-7/#33, v0.11.0): `SyntheticKVTransport` default backend routes synthetic KVCacheEntry cross-node; real-tensor `MLXKVTransport` env-gated experimental bonus (`FUSION_KV_TENSOR_BACKEND=mlx`, awaits upstream #650) |
 | **Security** | Node approval, Master/Worker permission isolation, Worker sandbox, OS-level sandbox-exec, data scrubbing, FMPCrypto (AES-256-GCM + ECDH), Metal AES-GCM acceleration |
-| **Observability** ✅已接线 | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions. **P0-8 接 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集指标/告警 (去重); `/api/v1/observability/{logs/export,suggestions,alerts}` 已返 200; `/api/v1/metrics` (Prometheus) 同样已接。v0.14.0 持久化默认开 (`observability.persist=True`, `observability.jsonl` 落盘, `_cleanup_loop` 300s 周期 save)** |
-| **Storage Volumes** | Volume abstraction, checkpoint persistence, capacity monitoring, LRU eviction. **ShardReplicator / DistributedKVStore / quorum 读写未接线生产路径, 仅库级可用** |
+| **Observability** ✅Wired | Metrics, logs, alerts, log store & export, intelligent fault diagnosis, optimization suggestions. **P0-8 wired to `ClusterMaster.start/stop` lifecycle + `_health_check_loop` periodic metric/alert collection (deduped); `/api/v1/observability/{logs/export,suggestions,alerts}` now returns 200; `/api/v1/metrics` (Prometheus) also wired. v0.14.0 persistence on by default (`observability.persist=True`, `observability.jsonl` to disk, `_cleanup_loop` 300s periodic save)** |
+| **Storage Volumes** | Volume abstraction, checkpoint persistence, capacity monitoring, LRU eviction. **ShardReplicator / DistributedKVStore / quorum read-write not wired into the production path, library-level only** |
 
 ### Architecture
 
@@ -112,7 +112,7 @@
 │                    Claude Code / API / fusion-desk UI         │
 │                           ↓                                  │
 │              fusion-multi-node Cluster Master                 │
-│  (Discovery, Scheduler, KV Pool, [Election·HA 可选],          │
+│  (Discovery, Scheduler, KV Pool, [Election·HA optional],      │
 │   Degradation, Security, Observability)                      │
 │                           ↓                                  │
 │     ┌──────────────┬──────────────┬──────────────┐           │
@@ -195,19 +195,19 @@ fusion-multi-node kv stats/warm                # KV cache management
 
 ### 1. Cluster Master (`fusion_multi_node.master`)
 
-The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache, master election, cloud fallback, task auto-degradation, 真实张量 PIPELINE 层切分链。
+The single source of truth for the cluster — node registration, health checks, task scheduling, KV cache, master election, cloud fallback, task auto-degradation, real-tensor PIPELINE layer-split chain.
 
 #### Health endpoints (C11 — readiness vs liveness)
 
-- `GET /api/health` — **liveness**: 本地依赖 (磁盘剩余 >512MB / 内存 >256MB / task-store 可写), 不检上游/节点 quorum。恒 HTTP 200, body `status: "ok"|"degraded"`。供 `start.sh` / docker livenessProbe — 进程活着即可, 不 block 启动。
-- `GET /api/health/deep` — **readiness**: liveness + 节点 quorum (≥1 ONLINE 节点)。body `status: "ok"|"degraded"`, 含 `online_nodes` 计数。供 LB / 编排器 drain 半坏 master (本机健康但无可用节点 → 不 ready)。**不用于 inter-service depends_on** (会与 agent 启动死锁)。
-- 两端点均豁免 Bearer 鉴权 (k8s probe 不带 token)。
+- `GET /api/health` — **liveness**: local dependencies (disk free >512MB / memory >256MB / task-store writable), does not check upstream/node quorum. Always HTTP 200, body `status: "ok"|"degraded"`. For `start.sh` / docker livenessProbe — process alive is enough, does not block startup.
+- `GET /api/health/deep` — **readiness**: liveness + node quorum (≥1 ONLINE node). body `status: "ok"|"degraded"`, includes `online_nodes` count. For LB / orchestrator to drain a half-broken master (host healthy but no usable nodes → not ready). **Not for inter-service depends_on** (would deadlock with agent startup).
+- Both endpoints are exempt from Bearer auth (k8s probes carry no token).
 
-#### Pipeline Parallelism — 真实张量层切分 (接 fusion-mlx `/distributed/*`, #621)
+#### Pipeline Parallelism — real-tensor layer split (to fusion-mlx `/distributed/*`, #621)
 
-PIPELINE 模式按 `model_shards` 把模型切成多段, 每节点跑一段层前向。首段带 `input_ids`
-(embed + layers), 后续段带上一段出口 `hidden_states` (b64.npy, 仅 layers)。激活张量
-经调度器顺序链传到末节点, 末节点出口 = 最终 hidden_states。
+PIPELINE mode splits the model into segments per `model_shards`; each node runs one layer-forward segment. The first segment carries `input_ids`
+(embed + layers); subsequent segments carry the previous segment's output `hidden_states` (b64.npy, layers only). Activation tensors
+are chained in order by the scheduler to the last node; the last node's output = final hidden_states.
 
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, ParallelMode
@@ -228,12 +228,12 @@ task = ClusterTask(
     },
 )
 await master.assign_task(task)
-# → 末节点返回 hidden_states (shape [1,4,2048] float16, b64.npy)
-# lm_head/解码超上游 /distributed/* 首版范围 — 调度器只负责层前向链, 不做 token 生成
+# → last node returns hidden_states (shape [1,4,2048] float16, b64.npy)
+# lm_head / decode is beyond upstream /distributed/* first-version scope — scheduler only does the layer-forward chain, not token generation
 ```
 
-> 真模型 E2E 已验证 (Llama-3.2-1B-Instruct-4bit, 16 层切 [0,8]/[8,16],
-> 见 `tests/test_pipeline_e2e.py`)。需 fusion-mlx 运行 + `mlx.fusion_mlx_api_key` 配置。
+> Real-model E2E verified (Llama-3.2-1B-Instruct-4bit, 16 layers split [0,8]/[8,16],
+> see `tests/test_pipeline_e2e.py`). Requires fusion-mlx running + `mlx.fusion_mlx_api_key` configured.
 
 ```python
 from fusion_multi_node.master import ClusterMaster, ClusterTask, NodeInfo, ParallelMode
@@ -248,7 +248,7 @@ node = NodeInfo(
     total_memory_gb=64.0,
     available_memory_gb=48.0,
 )
-await master.register_node(node)  # 再注册 = PATCH (保留运行态), 返回 bool (ban 期内 False)
+await master.register_node(node)  # re-register = PATCH (preserves runtime state), returns bool (False during ban)
 
 task = ClusterTask(
     task_id="task_1",
@@ -266,77 +266,77 @@ master.complete_task("task_1")
 
 **Key capabilities**: Load-aware routing (BALANCED/VRAM_FIRST/LOCALITY_FIRST/LOW_LATENCY, thread-safe strategy switching), local-force gate (≤0.5B models), VRAM-first scheduling (≥13B), score-based node selection with capability filtering, task lifecycle (PENDING→RUNNING→COMPLETED/FAILED/TIMEOUT/MIGRATED), recursive cancel, model auto-degradation chain, migration, KV cache pool with FMP sync, AST diff-only transmission, task sharding (inference/AST/vectorize, shard timeout), heartbeat timeout, task-level circuit breaker (S1 dispatch-fault auto-ban).
 
-#### 节点注册幂等 + 故障黑名单 (F-A12 / F-A13, #20)
+#### Idempotent node registration + fault blacklist (F-A12 / F-A13, #20)
 
-- **F-A12 幂等注册**: 同一 `node_id` 再注册 = PATCH 语义 — 保留 Master 权威运行态字段
-  (`active_tasks`/`max_tasks`/`network_rtt_ms`/`status`), 只更新硬件声明字段
-  (内存/CPU/GPU/hostname/port)。节点重启不丢运行态, 不会冲掉派发中的任务计数。
-- **F-A13 故障黑名单**: `report_fault` 在 `_FAULT_WINDOW_S` (60s) 窗口内累积达
-  `_FAULT_THRESHOLD` (3) → 自动 ban `_BAN_DURATION_S` (300s)。ban 期内 `register_node`
-  返回 `False` (HTTP 403 拒绝)。`unregister_node(reason="banned")` 主动拉黑。
-  到期惰性自动解封; `is_node_banned()` / `unban_node()` 手动查询/解封。
+- **F-A12 idempotent registration**: re-registering the same `node_id` = PATCH semantics — preserves Master-authoritative runtime-state fields
+  (`active_tasks`/`max_tasks`/`network_rtt_ms`/`status`), only updates hardware-declared fields
+  (memory/CPU/GPU/hostname/port). Node restart does not lose runtime state and does not wipe in-flight dispatch counts.
+- **F-A13 fault blacklist**: `report_fault` accumulates within the `_FAULT_WINDOW_S` (60s) window to
+  `_FAULT_THRESHOLD` (3) → auto-ban for `_BAN_DURATION_S` (300s). During ban `register_node`
+  returns `False` (HTTP 403 rejected). `unregister_node(reason="banned")` proactively blacklists.
+  Lazy auto-unban on expiry; `is_node_banned()` / `unban_node()` for manual query/unban.
 
 ```python
-# 故障熔断: 连报 3 次 → ban 5 分钟, ban 期内拒绝再注册
+# Fault circuit breaker: 3 reports in a row → ban 5 min, re-registration rejected during ban
 await master.report_fault("node_1", "oom", "out of memory")
 assert not master.is_node_banned("node_1")
-await master.report_fault("node_1", "oom", "again")  # 第 3 次触发 ban
+await master.report_fault("node_1", "oom", "again")  # 3rd report triggers ban
 assert master.is_node_banned("node_1")
-assert await master.register_node(node) is False       # ban 期拒绝
-master.unban_node("node_1")                            # 手动解封
+assert await master.register_node(node) is False       # rejected during ban
+master.unban_node("node_1")                            # manual unban
 ```
 
-#### 任务级熔断器 (S1, #70) — 派发失败自动 ban
+#### Task-level circuit breaker (S1, #70) — auto-ban on dispatch failure
 
-- **派发失败报故障**: `_dispatch_to_node` 失败 (SSRF 拒绝 / agent HTTP 非 200 / agent 返回非 ok)
-  → 自动调 `report_fault(node_id, "dispatch_failed")`, 计入 F-A13 故障窗口。
-- **调度跳过 ban 节点**: `select_nodes` 候选过滤跳过 ban 期内节点 — 原仅 `register_node`
-  拦截, 调度路径漏拦, 故障节点会被反复派发; S1 补齐调度侧拦截。
-- 连续派发失败达 `_FAULT_THRESHOLD` (3) 自动 ban, ban 期内不再被选中; 到期/解封后恢复可选。
+- **Dispatch-failure fault report**: `_dispatch_to_node` failure (SSRF rejection / agent HTTP non-200 / agent returns non-ok)
+  → auto-calls `report_fault(node_id, "dispatch_failed")`, counted into the F-A13 fault window.
+- **Scheduling skips banned nodes**: `select_nodes` candidate filter skips nodes within ban — originally only `register_node`
+  intercepted, the scheduling path missed it, so faulty nodes were dispatched repeatedly; S1 closes the scheduling-side gap.
+- Consecutive dispatch failures reaching `_FAULT_THRESHOLD` (3) auto-ban; not selected during ban; selectable again after expiry/unban.
 
 ```python
-# 派发失败 3 次 → 节点自动 ban, select_nodes 不再选它
+# 3 dispatch failures → node auto-banned, select_nodes no longer picks it
 for i in range(master._FAULT_THRESHOLD):
     await master._dispatch_task(task_failing_on_node_1)
 assert master.is_node_banned("node_1")
-assert await master.select_nodes(ParallelMode.DATA, count=1) == []  # 全 ban 返回空
+assert await master.select_nodes(ParallelMode.DATA, count=1) == []  # all banned → empty
 ```
 
-#### 生产监控指标端点 (S2, #71) — Prometheus exposition
+#### Production metrics endpoint (S2, #71) — Prometheus exposition
 
-- **`GET /api/v1/metrics`**: 纯文本 Prometheus 0.0.4 exposition, 无外部依赖, 可被 Prometheus / Grafana agent 直接抓取。
-- 集群级聚合指标:
-  - 节点: `fusion_cluster_nodes_total` / `fusion_cluster_nodes_online`
-  - 任务: `fusion_cluster_tasks_total` / `_running` / `_pending` / `_completed` / `_failed`
-  - 重试: `fusion_cluster_task_retries_total` (counter)
+- **`GET /api/v1/metrics`**: plain-text Prometheus 0.0.4 exposition, no external deps, scrapable directly by Prometheus / Grafana agent.
+- Cluster-level aggregate metrics:
+  - Nodes: `fusion_cluster_nodes_total` / `fusion_cluster_nodes_online`
+  - Tasks: `fusion_cluster_tasks_total` / `_running` / `_pending` / `_completed` / `_failed`
+  - Retries: `fusion_cluster_task_retries_total` (counter)
   - KV: `fusion_cluster_kv_cache_entries`
-  - 内存: `fusion_cluster_memory_total_gb` / `_available_gb`
-  - 派发延迟: `fusion_cluster_dispatch_latency_seconds` (summary, p50/p90/p99 + sum/count)
-- 复用 `get_stats` + 派发延迟 (`completed_at - started_at`) + `_retry_count`。Bearer 鉴权不豁免 — 内部抓取携带集群 token。
+  - Memory: `fusion_cluster_memory_total_gb` / `_available_gb`
+  - Dispatch latency: `fusion_cluster_dispatch_latency_seconds` (summary, p50/p90/p99 + sum/count)
+- Reuses `get_stats` + dispatch latency (`completed_at - started_at`) + `_retry_count`. Bearer auth not exempt — internal scrape carries the cluster token.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:11452/api/v1/metrics
 ```
 
-### Master Election (`fusion_multi_node.master.election`) — P4 已接 start(), 默认关闭
+### Master Election (`fusion_multi_node.master.election`) — P4 wired to start(), off by default
 
-> **当前状态: P4 + P0-1 已接线 `ClusterMaster.start(ha_config=...)`。** `ha.enabled=True` 时调
-> `setup_election` 启动选举循环; 默认 `enabled=False` 单 Master 向后兼容。Raft-simplified
-> 优先级投票, `on_elected`/`on_deposed` 回调。leader 心跳广播 + term/voted_for 持久化
-> (`~/.fusion/multi-node/election_state.json`) 已接 (P0-1, 修 term churn 重选)。
-> **注意:** `StandbyMaster` 类 (独立于 MasterElection) 仍为死代码原型, 非生产可用。
+> **Current status: P4 + P0-1 wired into `ClusterMaster.start(ha_config=...)`.** When `ha.enabled=True` it calls
+> `setup_election` to start the election loop; default `enabled=False` single-Master backward-compatible. Raft-simplified
+> priority voting, `on_elected`/`on_deposed` callbacks. Leader heartbeat broadcast + term/voted_for persistence
+> (`~/.fusion/multi-node/election_state.json`) wired (P0-1, fixes term-churn re-election).
+> **Note:** the `StandbyMaster` class (independent of MasterElection) is still a dead-code prototype, not production-ready.
 >
-> **H3 任务持久化 (v0.8.2, 已接):** 即使单 Master 无完整 HA, RUNNING/PENDING 任务会原子落盘
-> (`~/.fusion/multi-node/tasks.json`), Master 进程崩溃后重启 `start()` 自动 `_restore_tasks`
-> 恢复 (RUNNING→PENDING 重派), 不丢任务。
+> **H3 task persistence (v0.8.2, wired):** even single-Master without full HA, RUNNING/PENDING tasks are atomically written to disk
+> (`~/.fusion/multi-node/tasks.json`); after a Master crash and `start()` restart, `_restore_tasks` auto-recovers
+> (RUNNING→PENDING re-dispatch), no task loss.
 >
-> **H2 崩溃自愈 (v0.8.2, 已接):** launchd 进程守护 — `./start.sh install-launchd` 渲染
-> `deploy/com.dahai80.fusion-multi-node.plist` (KeepAlive 崩溃 10s 节流自动重启) → launchctl load。
-> 崩溃 → launchd 重启 → H3 恢复任务 = 自愈闭环, 不丢任务。详见 `docs/HA-CRASH-RECOVERY.md`。
+> **H2 crash self-healing (v0.8.2, wired):** launchd process supervisor — `./start.sh install-launchd` renders
+> `deploy/com.dahai80.fusion-multi-node.plist` (KeepAlive crash 10s-throttled auto-restart) → launchctl load.
+> Crash → launchd restart → H3 task recovery = self-healing closed loop, no task loss. See `docs/HA-CRASH-RECOVERY.md`.
 >
-> **部署方案**: 单机 nohup / 单机 launchd 守护 / docker-compose 多机小集群 / 多 Master HA (技术预览)。
-> 本项目定位 local-first Apple Silicon 小集群, **非 K8s 编排目标** — 详见 `docs/DEPLOYMENT.md`。
-> **运维手册**: 故障处置 (节点/Master 下线、脑裂、磁盘满、fusion-mlx 不可达、任务积压) + 版本升级/备份恢复/Token 轮换 — 详见 `docs/OPERATIONS.md`。
+> **Deployment options**: single-machine nohup / single-machine launchd supervisor / docker-compose multi-machine small cluster / multi-Master HA (technical preview).
+> This project targets local-first Apple Silicon small clusters, **not K8s orchestration** — see `docs/DEPLOYMENT.md`.
+> **Operations runbook**: fault handling (node/Master offline, split-brain, disk full, fusion-mlx unreachable, task backlog) + version upgrade/backup restore/token rotation — see `docs/OPERATIONS.md`.
 
 ```python
 from fusion_multi_node.master import ClusterMaster
@@ -354,7 +354,7 @@ await master.start(ha_config={
 
 Runs on every Mac — hardware metrics, heartbeat, task execution via fusion-mlx API.
 
-**Health endpoints (C11)**: `GET /api/health` (liveness — 磁盘/内存 + fusion-mlx 端口探测, 无 HTTP 出站) / `GET /api/health/deep` (readiness — liveness + 真 HTTP 探 fusion-mlx `/v1/models`, 判定 agent 是否真能推理)。两端点豁免 Bearer 鉴权。
+**Health endpoints (C11)**: `GET /api/health` (liveness — disk/memory + fusion-mlx port probe, no outbound HTTP) / `GET /api/health/deep` (readiness — liveness + real HTTP probe to fusion-mlx `/v1/models`, determines whether the agent can actually infer). Both endpoints exempt from Bearer auth.
 
 ```python
 from fusion_multi_node.agent import NodeAgent, AgentConfig
@@ -483,50 +483,50 @@ transfer = pipeline.prepare_transfer(old_ast, new_ast)  # diff + scrub
 restored = pipeline.apply_transfer(base_ast, transfer)  # rebuild
 ```
 
-#### mTLS 节点互信 (#80)
+#### mTLS node mutual trust (#80)
 
-集群内节点互连可选双向 TLS (mTLS), 私有 CA + 每节点叶证书。env 开关 `FUSION_MTLS_ENABLED=1` 启用, 关闭则全 http no-op (不破坏现有测试/CLI)。
+Intra-cluster node connections optionally use mutual TLS (mTLS), private CA + per-node leaf certs. Env switch `FUSION_MTLS_ENABLED=1` enables it; off = all-HTTP no-op (does not break existing tests/CLI).
 
 ```python
 from fusion_multi_node.security import mtls
 
-# 生成集群 CA (3650 天) + 每节点叶证书 (CN=node_id, O=role, 365 天)
+# Generate cluster CA (3650 days) + per-node leaf cert (CN=node_id, O=role, 365 days)
 ca_cert, ca_key = mtls.provision_cluster("/path/to/ca")
 node_cert, node_key = mtls.provision_node("worker-1", "worker", ca_cert, ca_key, "/path/to/worker-1")
 
-# 服务端: uvicorn.Config(**server_ssl_kwargs()) — 要求对端客户端证书 (CERT_REQUIRED)
-# 客户端: httpx.AsyncClient(**client_kwargs()) — verify=ctx 同时验服务端证书 + 呈递客户端证书
+# Server: uvicorn.Config(**server_ssl_kwargs()) — requires peer client cert (CERT_REQUIRED)
+# Client: httpx.AsyncClient(**client_kwargs()) — verify=ctx validates server cert + presents client cert
 # URL scheme: mtls.scheme() → "https" / "http"
 ```
 
-细粒度权限 (mTLS 开启时强制): AgentServer 从 `X-Node-Id`/`X-Node-Role` header 取调用方身份 → `PermissionManager` 校验路径权限。
-- MASTER: 全部 API (含 execute + cancel)
-- WORKER: execute / heartbeat / KV lookup-transfer / hardware; **无** cancel
-- 强制模式缺 `X-Node-Id` → 403; 角色无权 → 403
-- 兼容模式 (mTLS 关) 无 header → 放行 (现有 http 测试/CLI 不带头)
+Fine-grained permissions (enforced when mTLS is on): AgentServer reads caller identity from `X-Node-Id`/`X-Node-Role` headers → `PermissionManager` validates path permissions.
+- MASTER: all APIs (incl. execute + cancel)
+- WORKER: execute / heartbeat / KV lookup-transfer / hardware; **no** cancel
+- Enforce mode missing `X-Node-Id` → 403; role lacks permission → 403
+- Compat mode (mTLS off) missing header → allow (existing http tests/CLI carry no header)
 
-#### 多租户配额 + 优先级队列 (#81)
+#### Multi-tenant quota + priority queue (#81)
 
-P1-H 多租户调度: 全局默认每租户最大并发运行任务数, 超额入优先级队列 (非拒绝); 高优先级任务排队时优先获得空闲节点 (非抢占, 不杀运行中任务)。
+P1-H multi-tenant scheduling: global default max concurrent running tasks per tenant; over-quota tasks enter a priority queue (not rejected); high-priority queued tasks get free nodes first (non-preemptive, does not kill running tasks).
 
 ```python
 from fusion_multi_node.master import ClusterMaster
 
 master = ClusterMaster()
-master.configure_scheduling(tenant_max_concurrent=4)  # 0 = 不限配额 (节点容量仍限)
+master.configure_scheduling(tenant_max_concurrent=4)  # 0 = unlimited quota (node capacity still limits)
 
-# 超配额任务自动入队, assign_task 返回 True (非拒绝)
+# Over-quota tasks auto-enqueue, assign_task returns True (not rejected)
 await master.assign_task(task)
-# 队列按 priority 降序, 节点上线 / 任务完成 / 取消占槽任务 → 排空队首
+# Queue ordered by priority desc; node online / task complete / cancel a slot task → drain queue head
 ```
 
-- 配额全局默认: 配置键 `scheduling.tenant_max_concurrent` (默认 4, 0=不限), CLI 启动自动加载
-- 超额入队: 租户运行任务达配额 → 新任务 `TaskStatus.PENDING` 入队, `assign_task` 返 True
-- 无节点入队: `select_nodes` 无可用节点 → 入队 (不再返 503), 节点上线排空
-- 优先级: `ClusterTask.priority` (TaskPriority: LOW=0/NORMAL=1/HIGH=2/CRITICAL=3), 队列降序排
-- 排空触发: `complete_task` / `register_node` / `cancel_task` (取消占槽任务释放并发槽)
-- HTTP: `POST /api/tasks/submit` 入队返回 `202 {"queued": true}` (派发成功仍返 200)
-- 取消: `cancel_task` 递归移除队列中主/子任务; 队列任务注册于 `master.tasks` 可查/可取消
+- Quota global default: config key `scheduling.tenant_max_concurrent` (default 4, 0=unlimited), auto-loaded on CLI startup
+- Over-quota enqueue: tenant running tasks reach quota → new task `TaskStatus.PENDING` enqueued, `assign_task` returns True
+- No-node enqueue: `select_nodes` finds no available node → enqueue (no longer returns 503), drains on node online
+- Priority: `ClusterTask.priority` (TaskPriority: LOW=0/NORMAL=1/HIGH=2/CRITICAL=3), queue sorted desc
+- Drain triggers: `complete_task` / `register_node` / `cancel_task` (canceling a slot task frees the concurrency slot)
+- HTTP: `POST /api/tasks/submit` enqueue returns `202 {"queued": true}` (successful dispatch still returns 200)
+- Cancel: `cancel_task` recursively removes main/sub tasks from the queue; queued tasks are registered in `master.tasks` and are queryable/cancelable
 
 ### 6. Observability (`fusion_multi_node.observability`)
 
@@ -569,11 +569,11 @@ freq = diagnoser.analyze_frequency(logs, group_by="source")
 
 ### 7. Storage Volumes (`fusion_multi_node.storage`)
 
-> **状态**: `StorageVolume`/`CheckpointManager`/`DistributedKVStore` 库级可用。
-> `ShardReplicator` 的 FMP 跨节点传输与 quorum 读写在生产路径**未接线**
-> (`set_fmp_interface` 无人调用)。quorum 读写已加 E9 守卫: 无 `storage_volume` 时
-> 一律拒绝 (`error=no_storage_volume`), 不再退回内存自洽, 避免谎报多数持久化成功。
-> 本节为库级 API 参考。
+> **Status**: `StorageVolume`/`CheckpointManager`/`DistributedKVStore` library-level available.
+> `ShardReplicator` FMP cross-node transport and quorum read-write are **not wired** into the production path
+> (`set_fmp_interface` has no caller). Quorum read-write has an E9 guard: without a `storage_volume` it
+> always rejects (`error=no_storage_volume`), no longer falls back to in-memory self-consistency, avoiding false reports of majority-persistence success.
+> This section is a library-level API reference.
 
 Volume abstraction, shard replication, checkpoint persistence.
 
@@ -656,7 +656,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 }
 ```
 
-**端口迁移**: v0.6.5 旧端口（master 9753 / discovery 9754 / agent 9755 / mcp 9756 / fusion_mlx 8000）会在加载配置时自动迁移到当前默认值，并把误设的 `master_host=0.0.0.0` 回退为 `127.0.0.1`，迁移后写回 `config.json`。`ClusterConfig` 加载使用深拷贝，`set()` 不会污染类级 `DEFAULT_CONFIG`。
+**Port migration**: v0.6.5 legacy ports (master 9753 / discovery 9754 / agent 9755 / mcp 9756 / fusion_mlx 8000) are auto-migrated to current defaults on config load, and a mis-set `master_host=0.0.0.0` is reverted to `127.0.0.1`; the migration is written back to `config.json`. `ClusterConfig` load uses a deep copy, so `set()` does not pollute the class-level `DEFAULT_CONFIG`.
 
 
 ---
@@ -666,7 +666,7 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```bash
 pip install -e ".[test]"
 
-# Run all tests (888 tests)
+# Run all tests (1343 tests)
 pytest tests/ -v
 
 # With coverage
@@ -678,96 +678,96 @@ pytest tests/test_protocol.py -v
 pytest tests/test_new_features.py -v
 ```
 
-### 真实模型 E2E (需 fusion-mlx 运行)
+### Real-model E2E (requires fusion-mlx running)
 
 ```bash
-~/claude-home/fusion-mlx/start.sh start        # 启动推理引擎 (端口 11434)
+~/claude-home/fusion-mlx/start.sh start        # start inference engine (port 11434)
 
-# DATA 并行 2 节点真推理 (skip-gate: fusion-mlx alive + 模型在 /v1/models 列表)
+# DATA parallel 2-node real inference (skip-gate: fusion-mlx alive + model in /v1/models list)
 pytest tests/test_data_parallelism_e2e.py -v
 
-# 跨节点 KV 缓存共享 (合成数据, 无需模型, 无 skip-gate)
+# Cross-node KV cache sharing (synthetic data, no model needed, no skip-gate)
 pytest tests/test_kv_sharing_e2e.py -v
 
-# Pipeline 并行层切分真推理
+# Pipeline parallel layer-split real inference
 pytest tests/test_pipeline_e2e.py -v
 
-~/claude-home/fusion-mlx/start.sh stop         # 用完关闭
+~/claude-home/fusion-mlx/start.sh stop         # shut down when done
 ```
 
-> 默认模型 `mlx-community-Llama-3.2-1B-Instruct-4bit`, api_key 走配置 `mlx.fusion_mlx_api_key`。
-> fusion-mlx 停时 E2E 自动跳过 (skip-gate), 不阻塞 CI 全绿。
+> Default model `mlx-community-Llama-3.2-1B-Instruct-4bit`, api_key via config `mlx.fusion_mlx_api_key`.
+> When fusion-mlx is stopped, E2E auto-skips (skip-gate), does not block CI green.
 
-### 跨机真网络 E2E (#76)
+### Cross-machine real-network E2E (#76)
 
-真 bind 端口 + 真 HTTP 跨进程 (非 ASGITransport) — 进程内起真 uvicorn 真端口, 跨 TCP socket 通信。
+Real port bind + real HTTP cross-process (not ASGITransport) — starts a real uvicorn real-port server in-process, communicates over real TCP sockets.
 
 ```bash
-# 真端口跨进程: 注册 / 派发 / 掉线重连 (免真模型, FakeBackend)
+# Real-port cross-process: register / dispatch / offline-reconnect (no real model, FakeBackend)
 pytest tests/test_real_network_e2e.py -v
 
-# 容器跨机: docker-compose 1 Master + 2 Agent (skip-gate docker 可用)
+# Container cross-machine: docker-compose 1 Master + 2 Agent (skip-gate docker available)
 pytest tests/test_real_network_e2e.py::TestContainerE2E -v
 ```
 
-- 真注册: agent 经真 HTTP `/api/nodes/register` 到 master (真 socket)
-- 真派发: master → agent `/api/execute` 跨 HTTP (FakeBackend 完成非真推理)
-- 掉线重连: 停 agent → master 心跳超时标 OFFLINE → 重启同节点 → 重连恢复 ONLINE + 可派
-- 容器 E2E: `docker compose up --scale agent=2` 跨容器注册 + 派发; docker 不可用时 skip
+- Real register: agent over real HTTP `/api/nodes/register` to master (real socket)
+- Real dispatch: master → agent `/api/execute` over HTTP (FakeBackend completes non-real inference)
+- Offline-reconnect: stop agent → master heartbeat timeout marks OFFLINE → restart same node → reconnect restores ONLINE + dispatchable
+- Container E2E: `docker compose up --scale agent=2` cross-container register + dispatch; skips when docker unavailable
 
-### 跨机 KV 共享规模化压测 (#79)
+### Cross-machine KV sharing scale stress (#79)
 
-N 真端口 agent 跨 HTTP 验 KV 缓存大规模迁移 — warm_cache 规模 + transfer 迁移 + 延迟 + 0 丢失 (合成 KVCacheEntry, 免真模型)。
+N real-port agents over HTTP validate large-scale KV cache migration — warm_cache scale + transfer migration + latency + 0 loss (synthetic KVCacheEntry, no real model).
 
 ```bash
-# 4 压测用例: warm 规模 / warm 延迟 / warm→transfer 迁移 / 显存累计
+# 4 stress cases: warm scale / warm latency / warm→transfer migration / VRAM accumulation
 pytest tests/test_kv_stress.py -v
 ```
 
-- warm 规模: M prompt × N node 全成功 (0 丢失)
-- warm 延迟: 单次 warm p99 < 1.0s
-- transfer 迁移: warm 到 node-0 → transfer 拉取到 node-1, 跨节点 0 丢失 (推模型: 源节点回传序列化 entry → 目标 store_local)
-- 显存累计: local_entries / total_size_bytes 代理显存占用
+- warm scale: M prompt × N node all succeed (0 loss)
+- warm latency: single warm p99 < 1.0s
+- transfer migration: warm to node-0 → transfer pulls to node-1, cross-node 0 loss (push model: source node returns serialized entry → target deserializes + store_local)
+- VRAM accumulation: local_entries / total_size_bytes proxy for VRAM usage
 
-> KV transfer 推模型修复 (v0.8.4): 原 `/api/kv/transfer` 路由回调 `transfer_from_remote` 致递归 + source_node 含冒号过 sanitize 失败 — 改推模型 (源节点查本地回传 entry, 目标反序列化 + store_local), 补 `_serialize_entry` + `lookup_local_by_id`。
+> KV transfer push-model fix (v0.8.4): the original `/api/kv/transfer` route callback `transfer_from_remote` caused recursion + source_node containing a colon failed sanitize — switched to push model (source node looks up local and returns entry, target deserializes + store_local), added `_serialize_entry` + `lookup_local_by_id`.
 
-### 容器节点自动审批 (v0.8.4)
+### Container node auto-approval (v0.8.4)
 
-`docker-compose` master 默认配 `FUSION_AUTO_APPROVE_PATTERNS` (可信网段子串匹配) — 容器/LAN 节点免手动 `cluster approve` 自动加入。
+`docker-compose` master is configured by default with `FUSION_AUTO_APPROVE_PATTERNS` (trusted-subnet substring match) — container/LAN nodes auto-join without manual `cluster approve`.
 
 ```bash
-# compose 默认: 192.168. / 10. / 172.16.0.0/12 网段自动审批
+# compose default: 192.168. / 10. / 172.16.0.0/12 subnets auto-approved
 docker compose up -d --scale agent=2
 
-# 裸机自定义可信网段 (逗号分隔; CIDR 优先精确匹配, 非 CIDR 回退子串/通配)
+# Bare-metal custom trusted subnet (comma-separated; CIDR takes precedence for exact match, non-CIDR falls back to substring/wildcard)
 FUSION_AUTO_APPROVE_PATTERNS="10.0.1." ./start.sh start
 ```
 
-> 生产仅对可信网段开放自动审批; 未配 env 则走手动审批门 (`fusion-multi-node cluster approve <node_id>`)。
+> Production should open auto-approval only for trusted subnets; without the env, it falls back to the manual approval gate (`fusion-multi-node cluster approve <node_id>`).
 
-### 端口冲突明确报错 (v0.8.7)
+### Port-conflict explicit error (v0.8.7)
 
-issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (与 fusion-comfyui 解冲突, `_STALE_PORT_MAP` 自动迁移旧配置)。本次补 bind 失败明确报错 — `AgentServer.start` / `MasterServer.start` 捕获 `OSError`, 对已知冲突端口 (comfyui 11445 / fusion-mlx 11432/11434 / master 11452 / mDNS 11450 / MCP 11446) 附提示 "(与 {服务} 默认端口冲突)", 非通用 bind 错误。测试: `test_start_port_conflict_raises_with_hint` (agent + master, mock uvicorn serve 抛 EADDRINUSE)。全量 946 passed 1 skipped。
+Follow-up to issue #25: the NodeAgent default port was moved off 11445 → 11458 in v0.8.0 (resolved conflict with fusion-comfyui, `_STALE_PORT_MAP` auto-migrates old configs). This adds an explicit error on bind failure — `AgentServer.start` / `MasterServer.start` catch `OSError` and, for known conflict ports (comfyui 11445 / fusion-mlx 11432/11434 / master 11452 / mDNS 11450 / MCP 11446), append a hint "(conflicts with {service} default port)", rather than a generic bind error. Test: `test_start_port_conflict_raises_with_hint` (agent + master, mock uvicorn serve raises EADDRINUSE). Full suite 946 passed 1 skipped.
 
-### Phase 4 故障注入 E2E (v0.8.6)
+### Phase 4 fault-injection E2E (v0.8.6)
 
-调度器对真实故障的端到端自愈验证 (真 ASGI 路由, 非单元 mock; 推理用合成 FakeBackend, 不触 fusion-mlx):
+End-to-end self-healing validation of the scheduler against real faults (real ASGI routes, not unit mocks; inference uses synthetic FakeBackend, does not touch fusion-mlx):
 
-1. **agent 宕机 → 超时 → 重试 → 重派存活节点** — agent-a 移出路由 (模拟宕机, 派发 404), 任务超时 `check_timeouts` → `_enqueue_retry` (TIMEOUT→PENDING) → 排空重试队列 `assign_task` (select_nodes 跳过 ban 的 agent-a) → 落 agent-b → COMPLETED。锁全链路: 超时入队 + 重派存活 + 任务完成。
+1. **agent crash → timeout → retry → re-dispatch to a live node** — agent-a removed from routing (simulated crash, dispatch 404), task timeout `check_timeouts` → `_enqueue_retry` (TIMEOUT→PENDING) → drain retry queue `assign_task` (select_nodes skips banned agent-a) → lands on agent-b → COMPLETED. Full-chain locking: timeout-enqueue + re-dispatch-to-live + task completion.
 
-2. **反复派发失败 → ban → 新任务路由存活节点** — agent-a 宕机, 连续派发 `_FAULT_THRESHOLD` 次均 404 → `report_fault` 窗口内达阈值自动 ban → 新任务 `select_nodes` 跳过 ban 节点 → 路由 agent-b → COMPLETED。集成级验证 (现有 `test_task_circuit_breaker` 为单元级)。
+2. **Repeated dispatch failure → ban → new task routed to a live node** — agent-a crash, consecutive dispatches `_FAULT_THRESHOLD` times all 404 → `report_fault` reaches threshold within the window and auto-bans → new task `select_nodes` skips the banned node → routes to agent-b → COMPLETED. Integration-level validation (existing `test_task_circuit_breaker` is unit-level).
 
-3. **HA leader 故障 → standby 升 leader → 恢复派发 + 同步任务可读** — m1 (leader) 持有任务经 `_persist_tasks` → HTTP 推送到 m2 (standby) `receive_synced_tasks` 落盘; m1 降级 + m2 升 leader (`_on_demoted_from_leader`/`_on_elected_leader` 翻 `_is_leader`) → m2 `assign_task` 不再因 standby 守卫返回 False → 同步任务接管后不丢失。
+3. **HA leader failure → standby promoted to leader → dispatch resumes + synced tasks readable** — m1 (leader) holds a task via `_persist_tasks` → HTTP push to m2 (standby) `receive_synced_tasks` to disk; m1 demoted + m2 promoted to leader (`_on_demoted_from_leader`/`_on_elected_leader` flip `_is_leader`) → m2 `assign_task` no longer returns False due to the standby guard → synced tasks are taken over without loss.
 
-测试: `tests/test_fault_injection.py` (3 场景, PortRoutingTransport + 真 AgentServer `/api/execute` + FakeBackend)。全量 943 passed 1 skipped。
+Tests: `tests/test_fault_injection.py` (3 scenarios, PortRoutingTransport + real AgentServer `/api/execute` + FakeBackend). Full suite 943 passed 1 skipped.
 
-### KV 跨节点 lookup 契约修复 + 审批 CIDR 精确匹配 (v0.8.5)
+### KV cross-node lookup contract fix + approval CIDR exact match (v0.8.5)
 
-两处严格审视暴露的缺陷修复:
+Two defect fixes exposed by strict review:
 
-1. **`lookup_remote` 永远返回 None** — `/api/kv/lookup` 路由返扁平 dict (无 `found`/`entry` 键), `lookup_remote` 解码 `data.get("found")` 恒 falsy → 跨节点 KV 复用查找静默失效。单元 mock 捏造 `{"found":True,"entry":{...}}` 形状掩盖此 bug (假信心测试)。修复: route 对齐契约返 `{"found":True,"entry":_serialize_entry}`, 补真链路 E2E 锁契约 (`test_kv_lookup_remote_cross_node_contract` — store node-a, node-b 经 HTTP 查回, 非 mock)。
+1. **`lookup_remote` always returned None** — the `/api/kv/lookup` route returned a flat dict (no `found`/`entry` keys), so `lookup_remote` decoding `data.get("found")` was always falsy → cross-node KV reuse lookup silently failed. A unit mock fabricating `{"found":True,"entry":{...}}` shape hid this bug (false-confidence test). Fix: route aligned to contract returns `{"found":True,"entry":_serialize_entry}`, plus a real-chain E2E contract lock (`test_kv_lookup_remote_cross_node_contract` — store on node-a, node-b queries back over HTTP, not mock).
 
-2. **自动审批 `"172."` 子串过匹配公网** — compose 默认 `172.` 子串匹配公网 `172.0–15`/`172.32–255` (私网仅 `172.16.0.0/12`)。修复: CIDR 优先精确匹配 (`ipaddress.ip_network` 包含判定), 非 CIDR 回退子串/通配兼容旧配置; compose 默认改 `172.16.0.0/12`。补回归测试 (`test_auto_approve_cidr_precision` — `172.16.1.5` 放行 / `172.1.2.3` 拒绝)。
+2. **Auto-approval `"172."` substring over-matched public networks** — compose default `172.` substring matched public `172.0–15`/`172.32–255` (private is only `172.16.0.0/12`). Fix: CIDR takes precedence for exact match (`ipaddress.ip_network` containment test), non-CIDR falls back to substring/wildcard for old-config compatibility; compose default changed to `172.16.0.0/12`. Added regression test (`test_auto_approve_cidr_precision` — `172.16.1.5` allowed / `172.1.2.3` rejected).
 
 ---
 
@@ -789,112 +789,112 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 
 ## 📋 Changelog
 
-### v0.7.0 ✅ (Current) — 对抗性审查修复 (AR 2026-08-24)
+### v0.7.0 ✅ (Current) — Adversarial review fixes (AR 2026-08-24)
 
-**P0 安全地基重构**
-- [x] F1-F2 path traversal 防护: cluster_sync 路径遍历拦截 (NUL/绝对/drive/normpath + is_safe_path_segment)
-- [x] F3-F4 SSRF 守卫: is_safe_peer_host 拒环回/链路本地/元数据/多播, build_safe_url 强制 scheme
-- [x] F5 TLS key 持久化: 私钥 NoEncryption + 文件权限 0600
-- [x] F6 TLS pinning: 无 pin fail-closed (raise), pin 指纹 CERT_REQUIRED+VERIFY_PEER+DER 回调
-- [x] F7 FMP protobuf 二进制 payload base64, 禁 utf-8 replace 损坏
-- [x] F8 fmp_server shard_id/file_path 路径校验
-- [x] F9 mDNS sticky-master + node_id 绑定 cluster_hash, 防 Worker 伪造 master
-- [x] F10 validate_node_id 拆 is_safe_path_segment + is_safe_peer_host, 所有 sink 加固
+**P0 Security foundation refactor**
+- [x] F1-F2 path traversal guard: cluster_sync path-traversal interception (NUL/absolute/drive/normpath + is_safe_path_segment)
+- [x] F3-F4 SSRF guard: is_safe_peer_host rejects loopback/link-local/metadata/multicast, build_safe_url enforces scheme
+- [x] F5 TLS key persistence: private key NoEncryption + file mode 0600
+- [x] F6 TLS pinning: no pin → fail-closed (raise), pin fingerprint CERT_REQUIRED+VERIFY_PEER+DER callback
+- [x] F7 FMP protobuf binary payload base64, forbid utf-8 replace corruption
+- [x] F8 fmp_server shard_id/file_path path validation
+- [x] F9 mDNS sticky-master + node_id bound to cluster_hash, prevents Worker forging master
+- [x] F10 validate_node_id split into is_safe_path_segment + is_safe_peer_host, all sinks hardened
 
-**P1 现网路径正确性 + 生命周期**
-- [x] #8 assign_task TOCTOU 消除: re-check-inside-lock
-- [x] #9 heartbeat/fault 路由走加锁方法, 未知节点 404 (fail-visible)
-- [x] #10 真任务取消: CANCELLED 状态, Master→Agent /api/tasks/cancel 中止运行推理
-- [x] #11 SIGTERM + 优雅关停 drain: asyncio.Event + 信号处理 + 在途 task 协程 gather
-- [x] #12 config.save() 原子写: temp + os.fsync + os.replace
-- [x] #13 task_id uuid4 替 int(time.time())
+**P1 Production-path correctness + lifecycle**
+- [x] #8 assign_task TOCTOU elimination: re-check-inside-lock
+- [x] #9 heartbeat/fault routing via locked methods, unknown node 404 (fail-visible)
+- [x] #10 real task cancellation: CANCELLED state, Master→Agent /api/tasks/cancel aborts running inference
+- [x] #11 SIGTERM + graceful shutdown drain: asyncio.Event + signal handling + in-flight task coroutine gather
+- [x] #12 config.save() atomic write: temp + os.fsync + os.replace
+- [x] #13 task_id uuid4 replaces int(time.time())
 
-**P1 HA 接线或砍 + 合规边界**
-- [x] #14 砍 HA 虚假宣称: StandbyMaster/MasterElection/setup_election 标未接线死代码, 现网单 Master 无 HA
-- [x] #15 合规边界: cloud_fallback **v0.8.2 调度路径已切断** (ClusterMaster 不再可达云 API); mcp_gateway/ast_diff/cluster_sync 功能归属债待迁移 fusion-gateway (#106) / fusion-cowork (#61); cluster_sync LAN-only is_safe_peer_host 加固
+**P1 HA wiring-or-cut + compliance boundary**
+- [x] #14 Cut false HA claims: StandbyMaster/MasterElection/setup_election marked as un-wired dead code, production single-Master has no HA
+- [x] #15 Compliance boundary: cloud_fallback **v0.8.2 scheduling path severed** (ClusterMaster no longer reaches cloud API); mcp_gateway/ast_diff/cluster_sync functional-debt pending migration to fusion-gateway (#106) / fusion-cowork (#61); cluster_sync LAN-only is_safe_peer_host hardening
 
-**P2 未接线原型门禁 + security 接线 + 无界增长**
-- [x] #17 DataScrubber 补 openai_key/github_pat/slack_token/jwt_token + 数字边界修 CJK 邻接; DataIsolation realpath+commonpath 防符号链接绕过; PermissionManager block-by-default (已验证 fail-closed)
-- [x] #18 _metric_times list→deque(maxlen=10000) 对齐 metrics, 修无界增长+索引错位
-- [x] #24 WorkerSandbox 接 NodeAgent 执行路径: `execute_task` 入口 `_sandbox_gate` 校验任务携带路径/网络 (`check_path_access`/`check_network_access`), 拒则不派发 (硬伤5: security/ 原死代码零过滤 → 进程内 gate 实防御); `_execute_model_sync` 走 `is_safe_peer_host`+`build_safe_url`+`is_safe_path_segment` (与 master_server 一致, 修弱 `.replace()`); 不接 `apply_limits`/`setrlimit` (进程级资源限制误杀单长跑 agent), `SandboxExecutor` 仅子进程插件适用
-- [x] #23 M9/M10 集成测试门禁 — 硬伤4 四处契约 bug 修复+回归门禁 (audit 允许: 接线 OR pragma/移除; 选修复, 真 correctness, 可单测):
-  - caveman 字典压缩静默损坏: 变长 2/4 字节码无定界 → 解压只读 2 字节永不匹配。改定长 2 字节码 (`>H`, `dictionary_size` 截断 65536) + 长度前缀记录 (控制字节 0x01=字典命中/0x02=原始透传)
-  - autoscaler 冷却门绕过: `update_config` 清零 `_last_action_time` → 热重载即绕冷却, 连续扩缩容风暴。改为保留上次动作时间, 冷却跨热更新连续生效
-  - kv_store/fmp_server 签名不匹配: `_on_kv_get` 调 `get_entry(key, partition)`, 原签名 1 参 → inbound KV_GET 必 TypeError。`get_entry` 增可选 `partition`, 给定校验分区匹配; `ttl` None→`or 0.0` 防 `is_expired` TypeError
-  - shard_replication quorum 虚假宣称: `_sync_via_fmp` fire-and-forget (`ensure_future` 不 await) 却返 `success=True`/`checksum_verified=True` → quorum 写保证虚构。诚实化: 仅同步 `await` 的 send 称 `success`, fire-and-forget 标 `success=False`+"未确认"日志, `checksum_verified` 恒 False (无应用层 ACK)
-- [x] M9/M10/shard_replication 未接线原型标非生产 (audit 允许: 接线 OR pragma/移除); WorkerSandbox 已接 (#24), M9/M10 契约 bug 已修 (#23)
+**P2 Un-wired-prototype gating + security wiring + unbounded growth**
+- [x] #17 DataScrubber adds openai_key/github_pat/slack_token/jwt_token + numeric-boundary fix for CJK adjacency; DataIsolation realpath+commonpath prevents symlink bypass; PermissionManager block-by-default (verified fail-closed)
+- [x] #18 _metric_times list→deque(maxlen=10000) aligned with metrics, fixes unbounded growth + index misalignment
+- [x] #24 WorkerSandbox wired to NodeAgent execution path: `execute_task` entry `_sandbox_gate` validates task-carried paths/network (`check_path_access`/`check_network_access`), rejects dispatch on failure (defect 5: security/ was dead code with zero filtering → in-process gate is a real defense); `_execute_model_sync` uses `is_safe_peer_host`+`build_safe_url`+`is_safe_path_segment` (consistent with master_server, fixes weak `.replace()`); does not call `apply_limits`/`setrlimit` (process-level resource limits would mis-kill a single long-running agent), `SandboxExecutor` is for subprocess plugins only
+- [x] #23 M9/M10 integration-test gating — defect 4, four contract-bug fixes + regression gate (audit allows: wire OR pragma/remove; chose fix, real correctness, unit-testable):
+  - caveman dictionary compression silent corruption: variable-length 2/4-byte codes with no delimiter → decompression only reads 2 bytes, never matches. Changed to fixed-length 2-byte codes (`>H`, `dictionary_size` truncated to 65536) + length-prefixed records (control byte 0x01=dictionary hit/0x02=raw passthrough)
+  - autoscaler cooldown gate bypass: `update_config` zeroed `_last_action_time` → hot-reload bypassed cooldown, continuous scale-up/down storms. Changed to preserve last-action time, cooldown stays continuous across hot reloads
+  - kv_store/fmp_server signature mismatch: `_on_kv_get` calls `get_entry(key, partition)`, original signature 1 param → inbound KV_GET always TypeError. `get_entry` adds optional `partition`, validates partition match when given; `ttl` None→`or 0.0` prevents `is_expired` TypeError
+  - shard_replication quorum false claim: `_sync_via_fmp` fire-and-forget (`ensure_future` not awaited) yet returns `success=True`/`checksum_verified=True` → quorum write guarantee fabricated. Honest: only `await`-ed sends are `success`, fire-and-forget marked `success=False`+"unconfirmed" log, `checksum_verified` always False (no application-layer ACK)
+- [x] M9/M10/shard_replication un-wired prototypes marked non-production (audit allows: wire OR pragma/remove); WorkerSandbox wired (#24), M9/M10 contract bugs fixed (#23)
 
-回归: 826 tests passed, 0 ruff errors.
+Regression: 826 tests passed, 0 ruff errors.
 
-### v0.7.1 ✅ — 二轮架构审计修复 (2026-08-24, 22 项)
+### v0.7.1 ✅ — Second-round architecture audit fixes (2026-08-24, 22 items)
 
-> 审计源: `audit/fusion-multi-node-audit-report-0824.md` (363 行, H1-H5 / R1-R8 / E1-E9)。
-> 流程: 涉上游问题先提 issue → 落地 code (PR #18, 分支 `release/v0.7.0-ar-audit-fixes`)。
+> Audit source: `audit/fusion-multi-node-audit-report-0824.md` (363 lines, H1-H5 / R1-R8 / E1-E9).
+> Process: upstream issues filed first → code landed (PR #18, branch `release/v0.7.0-ar-audit-fixes`).
 
-**P0 (H1/H4/E2/E7) — 伪实现/死代码/诚实性**
-- [x] H1 核实 fusion-mlx 无 `/distributed/*` 端点 → 上游 issue #621; distributed_bridge Pipeline 标未实现 + 诚实报错 (in-repo)。注: 上游 #621/#630 后续已交付, 真 E2E `tests/test_pipeline_e2e.py` 验证通过
-- [x] H4 四死子系统 (HA/autoscaler/cluster_sync/shard_replication) 标未接线 + 移除对外暴露路由
-- [x] E2 kv_transfer `source_node` 用真实节点地址 (非 `localhost`)
-- [x] E7 kv_warm 目标节点从在线节点表取 (非空集默认值)
+**P0 (H1/H4/E2/E7) — fake-impl/dead-code/honesty**
+- [x] H1 Verified fusion-mlx has no `/distributed/*` endpoint → upstream issue #621; distributed_bridge Pipeline marked unimplemented + honest error (in-repo). Note: upstream #621/#630 later delivered, real E2E `tests/test_pipeline_e2e.py` verified passing
+- [x] H4 Four dead subsystems (HA/autoscaler/cluster_sync/shard_replication) marked un-wired + externally-exposed routes removed
+- [x] E2 kv_transfer `source_node` uses real node address (not `localhost`)
+- [x] E7 kv_warm target node taken from the online-node table (not empty-set default)
 
-**P1 (H2/H5/R1/R2/R8/E3/R6) — 并发/性能/正确性**
-- [x] H2 拆 ClusterMaster 单锁按资源域 (nodes / tasks / kv)
-- [x] H5 LoadRouter/KVSharing threading.Lock → asyncio (去跨线程阻塞)
-- [x] R1 硬件信息启动缓存, 心跳只取动态字段
-- [x] R2 task_id uuid4 替 `int(time.time())`
-- [x] R8+E3 distributed_bridge `raise_for_status` + 响应 schema 校验 + 错误日志
-- [x] R6 `get_online_nodes` 纯快照 (不触发副作用)
+**P1 (H2/H5/R1/R2/R8/E3/R6) — concurrency/performance/correctness**
+- [x] H2 Split ClusterMaster single lock by resource domain (nodes / tasks / kv)
+- [x] H5 LoadRouter/KVSharing threading.Lock → asyncio (removes cross-thread blocking)
+- [x] R1 Hardware info cached at startup, heartbeat takes only dynamic fields
+- [x] R2 task_id uuid4 replaces `int(time.time())`
+- [x] R8+E3 distributed_bridge `raise_for_status` + response schema validation + error logging
+- [x] R6 `get_online_nodes` pure snapshot (no side effects)
 
-**P2 (H3/R3/R4/R5/R7/E1/E4/E5/E6/E8/E9) — 原型门禁/安全/健壮性**
-- [x] H3 HA 死代码 (StandbyMaster/MasterElection) 文档降级标注
-- [x] R3 `sync_kv_cache` 经张量后端编排骨跨节点传输, 返 True (P3-28 / GAP-7 / #33 已交付 v0.11.0; 合成默认 + MLX 真张量 env-gated 待上游 #650)
-- [x] R4 `cancel_task` 改 `asyncio.gather` + 复用单 AsyncClient (去顺序通知)
-- [x] R5 agent `_running_tasks` set + 五维负载上报
-- [x] R7 模型大小正则边界匹配 (防 `1b` 误匹配 `10b/100b`)
-- [x] E1 `ClusterSyncManager` 移到 `__init__` + `start()`/`stop()` 生命周期 (4 路由折叠)
-- [x] E4 config 字段级校验表 + `schema_version` + `set_many` 批量单落盘 + 加载自修复脏值
-- [x] E5 plugin/action/model_name `is_safe_path_segment` 净化 + `_sandbox_gate` 覆盖全任务类型
-- [x] E6 `model_config` 失败 raise 不静默吞
-- [x] E8 mDNS `_discovered` 跨线程加 `threading.Lock` (修 dict changed size race)
-- [x] E9 quorum 读写无 `storage_volume` 一律拒绝 (不再内存自洽谎报多数持久化)
+**P2 (H3/R3/R4/R5/R7/E1/E4/E5/E6/E8/E9) — prototype gating/security/robustness**
+- [x] H3 HA dead code (StandbyMaster/MasterElection) documentation downgraded
+- [x] R3 `sync_kv_cache` orchestrates cross-node transport via tensor backend, returns True (P3-28 / GAP-7 / #33 delivered in v0.11.0; synthetic default + MLX real-tensor env-gated pending upstream #650)
+- [x] R4 `cancel_task` changed to `asyncio.gather` + reuses single AsyncClient (removes sequential notification)
+- [x] R5 agent `_running_tasks` set + five-dimensional load reporting
+- [x] R7 Model-size regex boundary matching (prevents `1b` mis-matching `10b/100b`)
+- [x] E1 `ClusterSyncManager` moved to `__init__` + `start()`/`stop()` lifecycle (4 routes folded)
+- [x] E4 Config field-level validation table + `schema_version` + `set_many` batch single-persist + load self-repair of dirty values
+- [x] E5 plugin/action/model_name `is_safe_path_segment` sanitization + `_sandbox_gate` covers all task types
+- [x] E6 `model_config` failure raises, not silently swallowed
+- [x] E8 mDNS `_discovered` cross-thread `threading.Lock` (fixes dict-changed-size race)
+- [x] E9 Quorum read/write without `storage_volume` always rejected (no longer self-consistently falsely reporting majority persistence)
 
-回归: 849 tests passed, 0 ruff errors.
+Regression: 849 tests passed, 0 ruff errors.
 
 ---
 
 ## 🛣️ Roadmap
 
-### v0.10.3 ✅ — GAP-8 Phase F1: 多租户令牌基座 (2026-08-27)
-- [x] **per-user 令牌存储** (`security/user_store.py`) — `UserStore` 文件持久化 `users.json` (scrypt 哈希, 0600, 原子写), 令牌格式 `fmu_<uid>_<secret>`, 多活签发/吊销/轮换
-- [x] **UserRole** (`security/permission.py`) — 与 NodeRole 正交的 ADMIN/USER/VIEWER + `check_user_path_access` 路径鉴权
-- [x] **双令牌中间件** (`utils/auth.py`) — `BearerAuthMiddleware` 按 `fmu_` 前缀分流到 UserStore, cluster_token 热路径 O(1) 不变; 无 user_store 回退纯 cluster_token (单租户零配置向后兼容)
-- [x] **首启引导** — `FUSION_BOOTSTRAP_ADMIN` env 自动创建 ADMIN + 签发首令牌
-- [x] 28 个新测试 (test_user_store 22 + TestUserTokenAuth 6); 1112 tests, 0 ruff errors
+### v0.10.3 ✅ — GAP-8 Phase F1: multi-tenant token foundation (2026-08-27)
+- [x] **per-user token store** (`security/user_store.py`) — `UserStore` file-persisted `users.json` (scrypt hash, 0600, atomic write), token format `fmu_<uid>_<secret>`, multiple-active issue/revoke/rotate
+- [x] **UserRole** (`security/permission.py`) — ADMIN/USER/VIEWER orthogonal to NodeRole + `check_user_path_access` path authorization
+- [x] **Dual-token middleware** (`utils/auth.py`) — `BearerAuthMiddleware` routes by `fmu_` prefix to UserStore, cluster_token hot path O(1) unchanged; falls back to pure cluster_token without user_store (single-tenant zero-config backward compatibility)
+- [x] **First-boot bootstrap** — `FUSION_BOOTSTRAP_ADMIN` env auto-creates ADMIN + issues first token
+- [x] 28 new tests (test_user_store 22 + TestUserTokenAuth 6); 1112 tests, 0 ruff errors
 
-### v0.10.2 ✅ — GAP-5 死代码清理/标注 (2026-08-26)
-- [x] **autoscaler 路由显式 not-wired** (GAP-5) — `GET/PUT /api/v1/autoscaler/config` 由歧义 `{"enabled":False}` 改 503 + detail 明示未接线; 模块保留待迁移
-- [x] **StandbyMaster 死代码删除** (GAP-5) — 零实例化/零 import/零测试/零引用, 独立于已接线的 MasterElection; HA 路径唯一化为 MasterElection
-- [x] 2 个 autoscaler not-wired 测试; 1085 tests, 0 ruff errors
+### v0.10.2 ✅ — GAP-5 dead-code cleanup/annotation (2026-08-26)
+- [x] **autoscaler route explicit not-wired** (GAP-5) — `GET/PUT /api/v1/autoscaler/config` changed from ambiguous `{"enabled":False}` to 503 + detail stating un-wired; module kept pending migration
+- [x] **StandbyMaster dead code deleted** (GAP-5) — zero instantiation/zero import/zero test/zero reference, independent of the wired MasterElection; HA path unified to MasterElection
+- [x] 2 autoscaler not-wired tests; 1085 tests, 0 ruff errors
 
-### v0.10.1 ✅ — GAP-6 限流适配 (2026-08-26)
-- [x] **客户端限流适配** (GAP-6) — `agent/rate_pacer.py` 拦截 fusion-mlx 429: 读 `Retry-After`, 指数退避重试 (3 次, 10s 预算, 确定性无 jitter), 耗尽抛 `RateLimitExhausted`
-- [x] `FusionMLXBackend.chat`/`embed` 经 `dispatch_with_pacing` 包裹 (不再直接 `raise_for_status` 误判 429 为逻辑错误)
-- [x] master 限流归类修正 — `rate_limited` → 瞬时失败 (`transient_fail`, 可重试), 不进 `logic_fail`, **不调 `report_fault`, 不 ban 健康节点**
-- [x] 上游 fusion-mlx #635 CLOSED (PR #637, `--rate-limit 0` 真正关闭限流, 默认关); 显式上限 429 由退避吸收
-- [x] 16 个限流测试 (14 unit + 2 集成); 1083 tests, 0 ruff errors
+### v0.10.1 ✅ — GAP-6 rate-limit adaptation (2026-08-26)
+- [x] **Client-side rate-limit adaptation** (GAP-6) — `agent/rate_pacer.py` intercepts fusion-mlx 429: reads `Retry-After`, exponential backoff retry (3 attempts, 10s budget, deterministic no jitter), raises `RateLimitExhausted` when exhausted
+- [x] `FusionMLXBackend.chat`/`embed` wrapped via `dispatch_with_pacing` (no longer directly `raise_for_status` mis-classifying 429 as a logic error)
+- [x] Master rate-limit classification fix — `rate_limited` → transient failure (`transient_fail`, retryable), not `logic_fail`, **does not call `report_fault`, does not ban healthy nodes**
+- [x] Upstream fusion-mlx #635 CLOSED (PR #637, `--rate-limit 0` truly disables rate limiting, default off); explicit-ceiling 429 absorbed by backoff
+- [x] 16 rate-limit tests (14 unit + 2 integration); 1083 tests, 0 ruff errors
 
 ### v0.10.0 ✅ — GAP-1 always-on SLA (2026-08-26)
-- [x] **HA 全状态同步** (GAP-1) — leader 周期推 nodes/kv_cache/banned_nodes 到 standby; standby 持完整拓扑, failover 即调度 (always-on 空窗 ≤ 选举超时 ~10s)。HA 仍 opt-in, 2+ Master 显式配置获 always-on, 单 Master 部署不变
-- [x] `/api/ha/sync-state` 端点 + `receive_synced_state` 幂等合并 (锁序 nodes→kv 不嵌套); `_state_sync_loop` (5s) 接 `start()`/`stop()` 生命周期
-- [x] 6 个 HA 状态同步测试 (拓扑同步 / 幂等 / failover 立即调度 / 端点 round-trip / 单 Master 无目标 / 非法 status 回退)
+- [x] **HA full-state sync** (GAP-1) — leader periodically pushes nodes/kv_cache/banned_nodes to standby; standby holds the complete topology, failover dispatches immediately (always-on gap ≤ election timeout ~10s). HA remains opt-in, 2+ Masters with explicit config get always-on, single-Master deployment unchanged
+- [x] `/api/ha/sync-state` endpoint + `receive_synced_state` idempotent merge (lock order nodes→kv non-nested); `_state_sync_loop` (5s) wired to `start()`/`stop()` lifecycle
+- [x] 6 HA state-sync tests (topology sync / idempotent / failover immediate dispatch / endpoint round-trip / single-Master no target / illegal status fallback)
 - [x] 1067 tests, 0 ruff errors
 
 ### v0.10.0-rc.1 🔶 — Release Candidate (2026-08-26)
-- [x] #31 重试节点规避 — `exclude_nodes` 硬黑名单 (select_nodes 过滤 + assign_task 透传 + 补选遵守, 打破重试回坏节点死循环)
-- [x] GAP-4 CI 修复 — `pytest-randomly` 声明 + 3 个 Linux x86_64 不兼容测试 skip-gate
-- [x] 复审计 §8 发布条件 2/4/5 披露补齐 — GAP-1 HA SPOF / GAP-6 吞吐上限 / GAP-5 死代码 + GAP-7 KV no-op
-- [x] 单租户 LAN 可带条件商用; 多租户/远程 SaaS + always-on SLA 阻塞声明
-- [x] 1061 tests, 0 ruff errors, CI 全绿
+- [x] #31 retry node avoidance — `exclude_nodes` hard blocklist (select_nodes filter + assign_task passthrough + backup selection honors it, breaks the retry-back-to-bad-node loop)
+- [x] GAP-4 CI fix — `pytest-randomly` declared + 3 Linux x86_64-incompatible tests skip-gated
+- [x] Re-audit §8 release conditions 2/4/5 disclosure completed — GAP-1 HA SPOF / GAP-6 throughput ceiling / GAP-5 dead code + GAP-7 KV no-op
+- [x] Single-tenant LAN conditionally commercial-ready; multi-tenant/remote SaaS + always-on SLA blockers declared
+- [x] 1061 tests, 0 ruff errors, CI green
 
 ### v0.1.0 ✅
 - [x] Cluster Master — node discovery, scheduler, task lifecycle, fault tolerance
@@ -942,7 +942,7 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 - [x] M6-04 FMPCrypto (AES-256-GCM with ECDH-negotiated session keys)
 - [x] M7-06 Monitoring API v1 (/api/v1/nodes/{id}/metrics, /api/v1/tasks/{id}/progress)
 - [x] M7-06 /api/v1/cluster/stats + /api/v1/tasks/{id}/timeline endpoints
-- [x] M8-01 LogLevel standard enum (INFO/WARN/ERROR/FATAL) + Master全节点日志汇总 (collect_node_logs)
+- [x] M8-01 LogLevel standard enum (INFO/WARN/ERROR/FATAL) + Master all-node log aggregation (collect_node_logs)
 - [x] M8 Log store & export (JSON/CSV/text)
 - [x] M8 Intelligent fault diagnosis (pattern matching + root cause)
 - [x] M9-02/03 Storage data transfer + capacity monitoring + LRU eviction
@@ -969,78 +969,78 @@ issue #25 后续: NodeAgent 默认端口已于 v0.8.0 迁出 11445 → 11458 (�
 - [x] P2: CLI --transport fmp wiring (FMPServer + FMPConnectionManager)
 - [x] 805 tests, 0 ruff errors
 
-### v0.8.2 ✅ — 生产就绪硬阻断 + 软债 (2026-08-25)
-- [x] H3 Master 任务持久化 + 崩溃启动恢复 (原子落盘, RUNNING→PENDING 重派)
-- [x] H2 launchd 进程守护 — 崩溃自愈闭环 (KeepAlive 重启 + H3 恢复)
-- [x] H4 cloud_fallback 调度路径切断 (100% 本地合规); 功能归属债待迁移 fusion-gateway/fusion-cowork
-- [x] H1 PIPELINE token 输出 — 上游 fusion-mlx #630 decode 端点已交付 (closed); 真 E2E `tests/test_pipeline_e2e.py` 验证通过
-- [x] S1 任务级熔断器 — 派发失败报故障 + select_nodes 跳过 ban 节点
-- [x] S2 生产监控指标端点 /api/v1/metrics (Prometheus exposition)
-- [x] S3 负载/压测基线测试 (调度层吞吐 / 尾延迟 / 无丢失)
-- [x] S4 真实模型集成测试覆盖 (DATA 并行 E2E 真推理 + KV 共享 E2E 真 ASGI 路由链; 附修 3 生产 bug: FusionMLXBackend `/v1/*` 漏鉴权 / KVSharingManager 跨节点 HTTP 漏鉴权 / KVWarmRequest 契约错配)
+### v0.8.2 ✅ — Production-readiness hard blockers + soft debt (2026-08-25)
+- [x] H3 Master task persistence + crash-startup recovery (atomic persist, RUNNING→PENDING re-dispatch)
+- [x] H2 launchd process supervisor — crash self-healing loop (KeepAlive restart + H3 recovery)
+- [x] H4 cloud_fallback scheduling path severed (100% local compliance); functional-debt pending migration to fusion-gateway/fusion-cowork
+- [x] H1 PIPELINE token output — upstream fusion-mlx #630 decode endpoint delivered (closed); real E2E `tests/test_pipeline_e2e.py` verified passing
+- [x] S1 task-level circuit breaker — dispatch failure reports fault + select_nodes skips banned nodes
+- [x] S2 production metrics endpoint /api/v1/metrics (Prometheus exposition)
+- [x] S3 load/stress baseline tests (scheduling-layer throughput / tail latency / zero loss)
+- [x] S4 real-model integration-test coverage (DATA parallel E2E real inference + KV sharing E2E real ASGI route chain; plus 3 production bug fixes: FusionMLXBackend `/v1/*` missing auth / KVSharingManager cross-node HTTP missing auth / KVWarmRequest contract mismatch)
 - [x] 888 tests, 0 ruff errors
 
-### v0.8.3 ✅ — 容器规模化压测 + 调度 TOCTOU 修复 (2026-08-25)
-- [x] P0-A HA 双 Master 选举接 `start(ha_config=)` 默认开 (election HTTP vote 层复用, 无外部依赖)
-- [x] P0-B 容器化 — `Dockerfile` + `docker-compose.yml` (1 Master + N Agent, `--scale agent=N` 无上限扩容); agent 经容器 bridge IP 回连, 不占主机端口; 推理引擎裸机 `host.docker.internal:11434` 回连
-- [x] BUG#3 Agent 容器内本机 IP 探测 — 跨平台 socket UDP connect (零依赖, 取 master 回连源 IP), 替代 macOS-only `ipconfig`
-- [x] BUG#4 NodeApprovalManager 审批路径丢硬件元数据 — register 透传 metadata, approve 从 metadata 重建 NodeInfo (mem/max_tasks/cpu 不再回退默认 0/4)
-- [x] **调度 TOCTOU 竞态修复** — `select_nodes` 锁外执行 → 并发抢占首选节点满载 → 锁内补选空闲节点 (`_select_free_nodes_locked`), 不再直接 503。c8 并发 40 任务 0× 503 验证
-- [x] `FUSION_AGENT_MAX_TASKS` env — 单 agent 并发上限可调 (压测时 16)
-- [x] 容器压测客户端 `scripts/stress_live.py` — 经 master:11452 并发提交, 测吞吐/尾延迟/成功率; `--rps` 客户端速率门对齐上游限流桶
-- [x] 集群运维工具 `scripts/cluster_ops.py` — approve-all / status / unban-all
-- [x] P1-E 观测栈模板 — Grafana dashboard / Prometheus / Alertmanager (deploy/observability/)
-- [x] 阶段3 调度压测通过 — 4 节点 50 任务 success 1.0, c8 contention 40 任务 success 1.0, 0× 503
-- [x] 上游阻塞 fusion-mlx #635 — `--rate-limit 0` 不禁用模块级 60rpm 限流器, 多 agent 共享 api_key 撞 1 桶, 已提 issue (本仓不可修)
+### v0.8.3 ✅ — Container scale stress + scheduling TOCTOU fix (2026-08-25)
+- [x] P0-A HA dual-Master election wired to `start(ha_config=)` default-on (election HTTP vote layer reused, no external deps)
+- [x] P0-B Containerization — `Dockerfile` + `docker-compose.yml` (1 Master + N Agent, `--scale agent=N` unlimited scale-out); agent reconnects via container bridge IP, does not occupy host ports; inference engine bare-metal `host.docker.internal:11434` reconnect
+- [x] BUG#3 Agent in-container local-IP detection — cross-platform socket UDP connect (zero deps, takes master reconnect source IP), replaces macOS-only `ipconfig`
+- [x] BUG#4 NodeApprovalManager approval path dropped hardware metadata — register passes through metadata, approve rebuilds NodeInfo from metadata (mem/max_tasks/cpu no longer falls back to default 0/4)
+- [x] **Scheduling TOCTOU race fix** — `select_nodes` ran outside the lock → concurrent preemption of the preferred node when full → in-lock backup selection of free nodes (`_select_free_nodes_locked`), no longer returns 503 outright. c8 concurrent 40 tasks 0× 503 verified
+- [x] `FUSION_AGENT_MAX_TASKS` env — per-agent concurrency cap tunable (16 during stress)
+- [x] Container stress client `scripts/stress_live.py` — concurrent submission via master:11452, measures throughput/tail latency/success rate; `--rps` client rate gate aligned to upstream rate-limit bucket
+- [x] Cluster ops tool `scripts/cluster_ops.py` — approve-all / status / unban-all
+- [x] P1-E Observability stack template — Grafana dashboard / Prometheus / Alertmanager (deploy/observability/)
+- [x] Phase-3 scheduling stress passed — 4 nodes 50 tasks success 1.0, c8 contention 40 tasks success 1.0, 0× 503
+- [x] Upstream blocker fusion-mlx #635 — `--rate-limit 0` does not disable the module-level 60rpm limiter, multiple agents sharing one api_key hit one bucket, issue filed (not fixable in this repo)
 - [x] 911 tests, 0 ruff errors
 
-### v0.8.8 ✅ — 企业级审计 P0 整改 (2026-08-26, AR #24)
+### v0.8.8 ✅ — Enterprise audit P0 remediation (2026-08-26, AR #24)
 
-> 审计源: `audit/fusion-multi-node-audit-result-0826.md` (29 项, P0×8)。本批落地 P0-1~P0-8 (P0 全清)。
-- [x] **P0-1 HA leader 心跳 + term/voted_for 持久化** — 修多 Master term churn 持续重选; `election_state.json` 原子落盘, 重启恢复投票状态
-- [x] **P0-2 派发失败重试** — `_dispatch_to_node` HTTP 非-200/status!=ok raise → `report_fault("dispatch_failed")` + 重试; 重试超限 FAILED (非云端回退)
-- [x] **P0-3 agent 内部错误进熔断器** — 200+ok 但 result.error (OOM/坏模型) → `report_fault("agent_internal_error")` + 节点 FAULT + 任务 FAILED (非重试)
-- [x] **P0-4 默认安全姿态** — E5 路径穿越 gate 无沙箱时也强制 (plugin/action/model_name 段校验); README 披露默认安全边界 + 最小加固步骤 + Preview 定位
-- [x] **P0-5 SSRF 校验统一** — H1 register 拒云元数据/链路本地 IP; H2 cancel 通知走 build_safe_url; H3 KV 跨节点出站守卫 (3 处); 新增 `is_registerable_host`/`is_safe_outbound_host` 两语义分离
-- [x] **P0-6 深度健康检查** — `/api/health` liveness (磁盘/内存/task-store, HTTP 200 body status) + `/api/health/deep` readiness (master +节点 quorum / agent +fusion-mlx `/v1/models`); compose healthcheck 验 body status; 两端点豁免 Bearer
-- [x] **P0-7 声明对齐** — README 修 MCP/Observability/FMP/KV-张量/PIPELINE 死代码标注; `__init__.py` 分离 MasterElection(已接) vs StandbyMaster(死); cluster_sync docstring 修过时; CLAUDE.md 单锁 → 三锁
-- [x] **P0-8 Observability 接线** — `ClusterObservability` 接 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集节点指标/告警规则 (按 node_id+title 去重, 防 deque 灌满); cli 注入带配置 retention 的实例; `/api/v1/observability/{logs/export,suggestions,alerts}` 不再 503
+> Audit source: `audit/fusion-multi-node-audit-result-0826.md` (29 items, P0×8). This batch landed P0-1~P0-8 (P0 fully cleared).
+- [x] **P0-1 HA leader heartbeat + term/voted_for persistence** — fixes multi-Master term churn causing continuous re-election; `election_state.json` atomic persist, restart recovers voting state
+- [x] **P0-2 dispatch-failure retry** — `_dispatch_to_node` HTTP non-200/status!=ok raises → `report_fault("dispatch_failed")` + retry; retry-exhausted → FAILED (not cloud fallback)
+- [x] **P0-3 agent internal error into circuit breaker** — 200+ok but result.error (OOM/bad model) → `report_fault("agent_internal_error")` + node FAULT + task FAILED (not retry)
+- [x] **P0-4 default security posture** — E5 path-traversal gate enforced even without sandbox (plugin/action/model_name segment validation); README discloses default security boundary + minimal hardening steps + Preview positioning
+- [x] **P0-5 SSRF validation unified** — H1 register rejects cloud-metadata/link-local IP; H2 cancel notification goes through build_safe_url; H3 KV cross-node outbound guard (3 sites); added `is_registerable_host`/`is_safe_outbound_host` two-semantics separation
+- [x] **P0-6 deep health check** — `/api/health` liveness (disk/mem/task-store, HTTP 200 body status) + `/api/health/deep` readiness (master +node quorum / agent +fusion-mlx `/v1/models`); compose healthcheck validates body status; both endpoints Bearer-exempt
+- [x] **P0-7 declaration alignment** — README fixed MCP/Observability/FMP/KV-tensor/PIPELINE dead-code annotations; `__init__.py` separates MasterElection(wired) vs StandbyMaster(dead); cluster_sync docstring fixed out-of-date; CLAUDE.md single-lock → three-locks
+- [x] **P0-8 Observability wiring** — `ClusterObservability` wired to `ClusterMaster.start/stop` lifecycle + `_health_check_loop` periodically collects node metrics/alert rules (dedup by node_id+title, prevents deque flooding); cli injects an instance with configured retention; `/api/v1/observability/{logs/export,suggestions,alerts}` no longer 503
 - [x] 994 tests, 0 ruff errors
 
-### v0.8.8 ✅ — 企业级审计 P1 整改 (2026-08-26, AR #24)
+### v0.8.8 ✅ — Enterprise audit P1 remediation (2026-08-26, AR #24)
 
-> 审计源: `audit/fusion-multi-node-audit-result-0826.md` (29 项, P1×9)。本批逐项落地 P1-9~P1-18。
-- [x] **P1-9 KV 缓存持久化** (C12) — `KVSharingManager` 加磁盘 `save()`/`load()` (原子 tmp+replace, 跳过期条目); `AgentServer.start` 恢复本地 KV 缓存, `stop` 落盘 → agent 重启可恢复/预热 (审计 §6.3, 原纯内存 OrderedDict 重启即失)
-- [x] **P1-10 async 阻塞消除** (C13/§4.1/§4.5) — async handler/路径内同步阻塞 (psutil 100ms、system_profiler 至 10s、sysctl、airport、ifconfig) 全部 `asyncio.to_thread` 移出事件循环: master_server `get_node_load`、node_agent `report_hardware`、cluster_master `_start_mdns`、network_topology `detect()` 全链 (5 处 subprocess + `_get_interface_type` 转 async); 新增 3 跨线程断言测试 (调用线程 ≠ 事件循环线程)
-- [x] **P1-11 fsync 移出锁** (C14/§4.2) — `_persist_tasks_locked` 拆为锁内快照 + 锁外 `_write_task_store` (含 `os.fsync` 阻塞 I/O); 7 处状态写点 (assign/complete_dispatch/cancel/receive_synced_tasks/_persist_tasks) 改锁内快照→释放锁→落盘; 新增断言测试 (落盘时 `_tasks_lock.locked()` 为 False)
-- [x] **P1-12 find_kv_cache 锁序修正** (C15/§2.4/§4.4) — `find_kv_cache` 原持 `_kv_lock` 内 `await _is_node_online` (跨域取 `_nodes_lock`) = kv→nodes 嵌套持锁, 违反 nodes→kv 约定, 死锁风险; 改为先 `_nodes_lock` 下快照在线节点集合→释放→再 `_kv_lock` 下匹配, 两锁域不嵌套持有; 新增断言测试 (`_kv_lock` 持有区不得获取 `_nodes_lock`)
-- [x] **P1-13 单任务 HTTP 超时** (C16/§5.4) — `_dispatch_to_node` HTTP 超时原固定客户端默认 300s, >300s 任务被提前掐断 → FAILED 无重试; 改为单请求 `timeout=task.timeout_seconds+30` 缓冲 (下限 30s), 让任务级超时 (`_check_task_timeouts`→TIMEOUT+重试) 先于 HTTP 死代理兜底; 新增 2 测试 (600s→630s, 1s→下限 31s)
-- [x] **P1-14 派发去重 token** (C17/§5.3) — `/api/execute` payload 原硬编码 `task_id=""` → agent 无法识别重复派发 (master 重派同 task_id 到同节点双重推理); master `_dispatch_to_node` 传真实 task_id (pipeline 各段 `{task_id}-step{N}`), `ExecuteRequest` 加 task_id 字段透传, `NodeAgent.execute_task` 拒同 task_id 已在运行 (返回 dedup_blocked → master 归类逻辑错误不重试); 无 task_id 直接调用分配匿名 id 防 `_running_task_handles` 撞键; 新增 2 测试 (拒重复 / 匿名序号递增)
-- [x] **P1-15 H3 持久化失败可见** (C18/§5.6) — `_write_task_store` 落盘失败原仅 `logger.error` 静默吞 (任务落盘是崩溃恢复根基, 失败则 Master 崩溃后 RUNNING 任务全失); 改为接 P0-8 Observability 发 `critical` 告警 (含磁盘/权限指引) + `task_persist_failed` 指标; 新增测试 (失败→critical 告警 + 指标 1.0)
-- [x] **P1-16 日志轮转** (§6.4) — `setup_logger` 设环境变量 `FUSION_MULTINODE_LOG_FILE` 时追加 `RotatingFileHandler` (10MB×5 有界); `start.sh` nohup stdout → `/dev/null` (应用日志走文件 handler 落盘轮转, 避免与 nohup stdout.log 重复无界增长), stderr 仍落盘捕获崩溃栈; launchd plist `StandardOutPath`→`/dev/null` + 传 `FUSION_MULTINODE_LOG_FILE` env; `docker-compose.yml` 两服务加 `logging: json-file max-size 10m max-file 3`; 新增 4 测试 (env 触发 / 无 env 单 handler / 写入+上限 / 坏路径回退控制台)
-- [x] **P1-17 协议版本兼容校验** (§6.7) — `NodeRegisterRequest` 加 `protocol_version` 字段 (多节点协议版本, 非 mlx_version); `NodeAgent` 注册上报 `__version__`; `master_server` `_check_protocol_compat` 比对 agent 版本 ≥ `MIN_COMPAT_PROTOCOL_VERSION` (0.8.0), 低于则拒 400 + 降级指引 (升级至 ≥ min); 空串/非标准格式放行 + warn (灰度期向后兼容, 不误拒); 新增 4 测试 (拒不兼容 / 放行兼容 / 放行旧客户端空串 / 放行非标准格式)
-- [x] **P1-18 失败推送通道** (§5.5) — `ClusterMaster` 加任务状态事件总线 (`_event_subscribers` asyncio.Queue 列表, `subscribe_task_events`/`unsubscribe_task_events`/`_emit_task_event` 非阻塞广播, 满队列丢最旧); `_finalize_task`(completed/failed)/`_enqueue_retry`(retry/failed)/`assign_task`(running)/`cancel_task`(cancelled) 状态转换点全接 emit (锁内纯内存, 不阻塞调度); 新增 `GET /api/tasks/events` SSE 端点 (text/event-stream, ready 首帧 + 15s keepalive, BearerAuthMiddleware 鉴权, 路由注册先于 `/api/tasks/{task_id}` 避免 path-param 捕获); 新增 8 测试 (FAILED/COMPLETED/retry 耗尽/cancel emit / 满队列丢最旧 / unsubscribe 停推 / SSE 路由契约 / 401 鉴权)
+> Audit source: `audit/fusion-multi-node-audit-result-0826.md` (29 items, P1×9). This batch landed P1-9~P1-18 item by item.
+- [x] **P1-9 KV cache persistence** (C12) — `KVSharingManager` adds disk `save()`/`load()` (atomic tmp+replace, skips expired entries); `AgentServer.start` restores local KV cache, `stop` persists → agent restart can recover/pre-warm (audit §6.3, original pure-memory OrderedDict lost on restart)
+- [x] **P1-10 async blocking elimination** (C13/§4.1/§4.5) — sync blocking inside async handler/path (psutil 100ms, system_profiler up to 10s, sysctl, airport, ifconfig) all moved off the event loop via `asyncio.to_thread`: master_server `get_node_load`, node_agent `report_hardware`, cluster_master `_start_mdns`, network_topology `detect()` full chain (5 subprocess sites + `_get_interface_type` converted to async); added 3 cross-thread assertion tests (calling thread ≠ event-loop thread)
+- [x] **P1-11 fsync moved out of lock** (C14/§4.2) — `_persist_tasks_locked` split into in-lock snapshot + out-of-lock `_write_task_store` (includes `os.fsync` blocking I/O); 7 state-write sites (assign/complete_dispatch/cancel/receive_synced_tasks/_persist_tasks) changed to in-lock snapshot→release lock→persist; added assertion test (`_tasks_lock.locked()` is False during persist)
+- [x] **P1-12 find_kv_cache lock-order fix** (C15/§2.4/§4.4) — `find_kv_cache` originally held `_kv_lock` while `await _is_node_online` (cross-domain `_nodes_lock`) = kv→nodes nested lock-holding, violating the nodes→kv convention, deadlock risk; changed to snapshot the online-node set under `_nodes_lock`→release→match under `_kv_lock`, the two lock domains are not nested; added assertion test (`_kv_lock` holding region must not acquire `_nodes_lock`)
+- [x] **P1-13 per-task HTTP timeout** (C16/§5.4) — `_dispatch_to_node` HTTP timeout was fixed client default 300s, >300s tasks pre-empted → FAILED without retry; changed to per-request `timeout=task.timeout_seconds+30` buffer (floor 30s), letting the task-level timeout (`_check_task_timeouts`→TIMEOUT+retry) trigger before the HTTP dead-agent backstop; added 2 tests (600s→630s, 1s→floor 31s)
+- [x] **P1-14 dispatch dedup token** (C17/§5.3) — `/api/execute` payload originally hardcoded `task_id=""` → agent cannot detect duplicate dispatch (master re-dispatches same task_id to same node = double inference); master `_dispatch_to_node` passes real task_id (pipeline segments `{task_id}-step{N}`), `ExecuteRequest` adds task_id field passthrough, `NodeAgent.execute_task` rejects same task_id already running (returns dedup_blocked → master classifies as logic error, no retry); direct calls without task_id get an anonymous id to prevent `_running_task_handles` key collision; added 2 tests (reject duplicate / anonymous sequence increment)
+- [x] **P1-15 H3 persist-failure visible** (C18/§5.6) — `_write_task_store` persist failure originally only `logger.error` silently swallowed (task persistence is the foundation of crash recovery; failure means Master crash loses all RUNNING tasks); changed to wire P0-8 Observability emitting a `critical` alert (with disk/permission guidance) + `task_persist_failed` metric; added test (failure→critical alert + metric 1.0)
+- [x] **P1-16 log rotation** (§6.4) — `setup_logger` appends a `RotatingFileHandler` (10MB×5 bounded) when env `FUSION_MULTINODE_LOG_FILE` is set; `start.sh` nohup stdout → `/dev/null` (app logs go through the file handler for bounded rotation, avoids duplicate unbounded growth with nohup stdout.log), stderr still captured for crash stacks; launchd plist `StandardOutPath`→`/dev/null` + passes `FUSION_MULTINODE_LOG_FILE` env; `docker-compose.yml` both services add `logging: json-file max-size 10m max-file 3`; added 4 tests (env trigger / no-env single handler / write+cap / bad-path fallback to console)
+- [x] **P1-17 protocol-version compat check** (§6.7) — `NodeRegisterRequest` adds `protocol_version` field (multi-node protocol version, not mlx_version); `NodeAgent` reports `__version__` on register; `master_server` `_check_protocol_compat` compares agent version ≥ `MIN_COMPAT_PROTOCOL_VERSION` (0.8.0), below rejects 400 + downgrade guidance (upgrade to ≥ min); empty/non-standard format passes through + warn (gray-period backward compat, no false reject); added 4 tests (reject incompatible / pass compatible / pass old-client empty / pass non-standard format)
+- [x] **P1-18 failure push channel** (§5.5) — `ClusterMaster` adds a task-status event bus (`_event_subscribers` asyncio.Queue list, `subscribe_task_events`/`unsubscribe_task_events`/`_emit_task_event` non-blocking broadcast, full queue drops oldest); `_finalize_task`(completed/failed)/`_enqueue_retry`(retry/failed)/`assign_task`(running)/`cancel_task`(cancelled) state-transition points all emit (in-lock pure-memory, does not block scheduling); added `GET /api/tasks/events` SSE endpoint (text/event-stream, ready first-frame + 15s keepalive, BearerAuthMiddleware auth, route registered before `/api/tasks/{task_id}` to avoid path-param capture); added 8 tests (FAILED/COMPLETED/retry-exhausted/cancel emit / full-queue drop-oldest / unsubscribe stops push / SSE route contract / 401 auth)
 - [x] 1029 tests, 0 ruff errors
 
-### v0.8.8 ✅ — 企业级审计 P2 整改 (2026-08-26, AR #24)
+### v0.8.8 ✅ — Enterprise audit P2 remediation (2026-08-26, AR #24)
 
-> 审计源: `audit/fusion-multi-node-audit-result-0826.md` (29 项, P2×8)。本批逐项落地 P2-19~P2-26。
+> Audit source: `audit/fusion-multi-node-audit-result-0826.md` (29 items, P2×8). This batch landed P2-19~P2-26 item by item.
 
-- [x] **P2-22 Master 限流** (§3.8) — `MasterServer` 加 `RateLimitMiddleware` (复用 agent_server `InMemoryRateLimiter`, 120 req/60s/IP, 阈值高于 agent 因集群内部 heartbeat 10s×N + 派发流量); 健康检查/文档豁免; 防 DoS + 审批队列 (`max_pending=100`) 耗尽。新增 2 测试 (429 突发 / health 豁免)
-- [x] **P2-26 重试计数持久化** (§5.7) — `_retry_count` 为动态属性, `asdict` 不序列化 → Master 崩溃重启归零 → 允许额外重试超 `_max_retry_attempts`。`_task_to_dict` 显式序列化 `_retry_count`, `_task_from_dict` 恢复; 持久化闭环测试 (落盘含字段 + 新 Master 恢复保留预算不归零)
-- [x] **P2-25 过时文档清理** (§1.8/§2.4) — 三处过时声明已校正: `cluster_sync.py:5` docstring (自述"未接入" → 实已接 master_server 生命周期)、CLAUDE.md 单锁描述 (→ "拆三锁 nodes→tasks→kv")、`__init__.py` HA 描述 (MasterElection 已接线 / StandbyMaster 死代码边界澄清); 核实 autoscaler "未接线死代码 (恒 404)" 声明仍属实
-- [x] **P2-23 compose 默认凭据去除** (§6.10) — `docker-compose.yml` 去除 `FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me` 与 `FUSION_MLX_API_KEY:-dahai168` 弱默认, 改用 `${VAR:?提示}` 未设则 compose 启动失败并提示; 新增 `.env.example` 模板 (含强随机值生成指引); `.gitignore` 加 `.env` 防真实凭据入库
-- [x] **P2-24 PII 脱敏作用域文档化** (§3.7) — 核实 `data_scrubber`/`FMPCrypto`/`SecureTransferPipeline` 仅 FMP 路径实例化 (`fmp_server.py:230` DATA_SYNC), 默认 HTTP 派发路径明文无脱敏无加密; README 安全边界表 + Capabilities 已标 "FMP path only"; CLAUDE.md security 模块加作用域注 (审计允许 "或明确仅 FMP 路径保护"); 同步修正 Master 限流行 (P2-22 后已非"无限流")
-- [x] **P2-19 部署方案文档** (§6.5) — 新增 `docs/DEPLOYMENT.md` 明确 local-first Apple Silicon 小集群定位: 四模式 (单机 nohup / 单机 launchd / docker-compose 多机 / 多 Master HA 技术预览) + 扩容资源 + "非目标-为何无 K8s" (平台绑定 MLX/Metal / 离线约束 / 规模错配 / 运维成本, 企业编排属 fusion-gateway 职责); README 链接; 顺带校正 `docs/HA-CRASH-RECOVERY.md` 过时声明 (MasterElection 已接线非原型)
-- [x] **P2-20 配置热加载** (§6.8) — 新增 `POST /api/v1/config/reload` 端点 (Bearer 鉴权): 重读 `config.json` + 重应用运行时可调字段 (`scheduling.tenant_max_concurrent` → `configure_scheduling`); 须重启字段 (端口/ha_config/mdns) 响应中 `restart_required` 列出提示; `MasterServer(config=)` + `ClusterMaster.start(config=)` 注入 `ClusterConfig`, CLI 传 `_config`; 未注入返 503; 新增 3 测试 (热加载重应用配额 / 改盘后再 reload 生效 / 未注入 503 / 无鉴权 401)
-- [x] **P2-21 运维 runbook** (§6.9) — 新增 `docs/OPERATIONS.md` 覆盖 10 类处置流程 (诊断入口 / 节点下线 / Master 下线 / 脑裂 / 磁盘满 / fusion-mlx 不可达 / 任务积压 / 版本升级 / 备份恢复 / Token 轮换), 每节含 症状/诊断/处置/恢复验证; 命令含 health/metrics/alerts 端点 + `~/.fusion/multi-node/` 持久化路径 + 端口 (11452/11458) + H3 恢复/熔断/优先级队列交叉引用; README 链接
+- [x] **P2-22 Master rate limiting** (§3.8) — `MasterServer` adds `RateLimitMiddleware` (reuses agent_server `InMemoryRateLimiter`, 120 req/60s/IP, threshold higher than agent because intra-cluster heartbeat 10s×N + dispatch traffic); health-check/docs exempt; prevents DoS + approval queue (`max_pending=100`) exhaustion. Added 2 tests (429 burst / health exempt)
+- [x] **P2-26 retry-count persistence** (§5.7) — `_retry_count` is a dynamic attribute, `asdict` does not serialize it → Master crash-restart zeroes it → allows extra retries beyond `_max_retry_attempts`. `_task_to_dict` explicitly serializes `_retry_count`, `_task_from_dict` restores it; persistence loop test (persist includes field + new Master restores preserving budget, not zeroed)
+- [x] **P2-25 stale-doc cleanup** (§1.8/§2.4) — three stale declarations corrected: `cluster_sync.py:5` docstring (self-described "not wired" → actually wired to master_server lifecycle), CLAUDE.md single-lock description (→ "split into three locks nodes→tasks→kv"), `__init__.py` HA description (MasterElection wired / StandbyMaster dead-code boundary clarified); verified autoscaler "un-wired dead code (always 404)" declaration still holds
+- [x] **P2-23 compose default-credential removal** (§6.10) — `docker-compose.yml` removed `FUSION_CLUSTER_TOKEN:-dev-cluster-token-change-me` and `FUSION_MLX_API_KEY:-dahai168` weak defaults, switched to `${VAR:?hint}` so compose fails to start with a hint when unset; added `.env.example` template (with strong-random-value generation guidance); `.gitignore` adds `.env` to prevent real credentials entering the repo
+- [x] **P2-24 PII redaction scope documented** (§3.7) — verified `data_scrubber`/`FMPCrypto`/`SecureTransferPipeline` only instantiated on the FMP path (`fmp_server.py:230` DATA_SYNC), default HTTP dispatch path is plaintext with no redaction no encryption; README security-boundary table + Capabilities already mark "FMP path only"; CLAUDE.md security module adds scope note (audit allows "or explicitly FMP-path-only protection"); also corrected the Master rate-limit line (no longer "unlimited" after P2-22)
+- [x] **P2-19 deployment-plan docs** (§6.5) — added `docs/DEPLOYMENT.md` clarifying the local-first Apple Silicon small-cluster positioning: four modes (single-machine nohup / single-machine launchd / docker-compose multi-machine / multi-Master HA tech-preview) + scale-out resources + "non-goal — why no K8s" (platform-bound MLX/Metal / offline constraint / scale mismatch / ops cost, enterprise orchestration is fusion-gateway's job); README links; also corrected `docs/HA-CRASH-RECOVERY.md` stale declaration (MasterElection is wired, not a prototype)
+- [x] **P2-20 config hot-reload** (§6.8) — added `POST /api/v1/config/reload` endpoint (Bearer auth): re-reads `config.json` + re-applies runtime-tunable fields (`scheduling.tenant_max_concurrent` → `configure_scheduling`); fields requiring restart (port/ha_config/mdns) are listed in the response's `restart_required` hint; `MasterServer(config=)` + `ClusterMaster.start(config=)` inject `ClusterConfig`, CLI passes `_config`; without injection returns 503; added 3 tests (hot-reload re-applies quota / edit-disk-then-reload takes effect / no-injection 503 / no-auth 401)
+- [x] **P2-21 ops runbook** (§6.9) — added `docs/OPERATIONS.md` covering 10 handling flows (diagnosis entry / node offline / Master offline / split-brain / disk-full / fusion-mlx unreachable / task backlog / version upgrade / backup-restore / token rotation), each section has symptom/diagnosis/handling/recovery-verify; commands include health/metrics/alerts endpoints + `~/.fusion/multi-node/` persistence paths + ports (11452/11458) + H3 recovery/circuit-breaker/priority-queue cross-refs; README links
 
-### P3 — 长期 (审计 §5.9 / 功能完整度)
+### P3 — Long-term (audit §5.9 / feature completeness)
 
-- [x] **P3-27 PIPELINE 端到端** — 上游 fusion-mlx `/distributed/*` 已交付 (issue #621/#630 closed: load_shard/pipeline_step/decode/sync_weights); 多节点客户端存根 `node_agent.load_shard`/`pipeline_step` + `_execute_pipeline_step` 已接; 真 E2E `tests/test_pipeline_e2e.py` (Llama-3.2-1B 16 层切 [0,8]/[8,16] b64.npy 张量 round-trip) 验证通过
-- [x] **P3-28 张量级 KV 跨节点传输** (GAP-7, #33) — v0.11.0 交付: `sync_kv_cache` 经可插拔张量后端 (合成默认 / MLX 真张量 env-gated `FUSION_KV_TENSOR_BACKEND=mlx`) 编排源 `/api/kv/export` → 目标 `/api/kv/import`, 返 True; `KVShard.tensor` base64 压缩随 JSON 跨节点; 合成后端满足 #33 验收 (张量 round-trip 跨 2 agent); 真张量待上游 fusion-mlx issue #650 落地激活 (404→降级合成 + warn)
+- [x] **P3-27 PIPELINE end-to-end** — upstream fusion-mlx `/distributed/*` delivered (issue #621/#630 closed: load_shard/pipeline_step/decode/sync_weights); multi-node client stubs `node_agent.load_shard`/`pipeline_step` + `_execute_pipeline_step` wired; real E2E `tests/test_pipeline_e2e.py` (Llama-3.2-1B 16 layers split [0,8]/[8,16] b64.npy tensor round-trip) verified passing
+- [x] **P3-28 tensor-level KV cross-node transport** (GAP-7, #33) — delivered in v0.11.0: `sync_kv_cache` via a pluggable tensor backend (synthetic default / MLX real-tensor env-gated `FUSION_KV_TENSOR_BACKEND=mlx`) orchestrates source `/api/kv/export` → target `/api/kv/import`, returns True; `KVShard.tensor` base64-compressed travels with JSON cross-node; synthetic backend satisfies #33 acceptance (tensor round-trip across 2 agents); real tensor awaits upstream fusion-mlx issue #650 to activate (404→degrade to synthetic + warn)
 - [x] 1203 tests, 0 ruff errors
-- [x] **P3-29 部分成功语义** (§5.9) — DATA 并行部分节点成功部分失败不再整任务 FAILED: 新增 `TaskStatus.PARTIAL` 终态 (不重试, 保留 `result.outputs` 供客户端取部分结果); `_dispatch_data` 聚合三态 (全成功 COMPLETED / 部分成功 PARTIAL / 全失败 FAILED); `_finalize_task(partial=)` 分支 + 事件总线 emit `partial`; stats `partial_tasks` 计数 + Prometheus gauge `fusion_cluster_tasks_partial`; CLI 🟡 图标; `/api/tasks` 进度事件 `partial`; 崩溃恢复 PARTIAL 终态保持 (不重派); 集成测试 `test_data_parallel_partial_success` (agent-a 成功 + agent-b 失败 → PARTIAL 保留 output)
+- [x] **P3-29 partial-success semantics** (§5.9) — DATA parallel with some nodes succeeding and some failing no longer marks the whole task FAILED: added `TaskStatus.PARTIAL` terminal state (no retry, preserves `result.outputs` for the client to take partial results); `_dispatch_data` aggregates three states (all-success COMPLETED / partial-success PARTIAL / all-failed FAILED); `_finalize_task(partial=)` branch + event bus emits `partial`; stats `partial_tasks` count + Prometheus gauge `fusion_cluster_tasks_partial`; CLI 🟡 icon; `/api/tasks` progress event `partial`; crash-recovery PARTIAL terminal state preserved (not re-dispatched); integration test `test_data_parallel_partial_success` (agent-a success + agent-b fail → PARTIAL preserves output)
 - [x] 1036 tests, 0 ruff errors
 
 ### Future
