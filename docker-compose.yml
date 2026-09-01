@@ -129,3 +129,4 @@ services:
 networks:
   fusion-cluster:
     driver: bridge
+    name: fusion-cluster   # pin 名 — overlay external:true 引用此精确名 (issue #58), 免 project 前缀拼接
