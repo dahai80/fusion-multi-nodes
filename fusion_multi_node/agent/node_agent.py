@@ -429,7 +429,10 @@ class NodeAgent:
         total_gb = mem.total / (1024**3)
         avail_gb = mem.available / (1024**3)
         # #64: 抓 MLX Metal 显存 — base_url/api_key 含 env 覆盖 (#60 property)。
-        mlx_mem = await fetch_mlx_memory(self._backend.base_url, self._backend.api_key)
+        # getattr 防御: 自定义 backend (FakeBackend 等) 无 base_url/api_key → 离线安全 None。
+        _mlx_url = getattr(self._backend, "base_url", "")
+        _mlx_key = getattr(self._backend, "api_key", "")
+        mlx_mem = await fetch_mlx_memory(_mlx_url, _mlx_key) if _mlx_url else None
         metal_util = 0.0
         gpu_used_gb = 0.0
         gpu_total_gb = 0.0
