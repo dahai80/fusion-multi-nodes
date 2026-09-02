@@ -205,8 +205,13 @@ class LoadRouter:
         candidate_ids: list[str],
         preferred_node_id: str = "",
         required_uma_ratio: float = 0.0,
+        task_tier: str = "general",
+        node_roles: dict[str, str] | None = None,
     ) -> RoutingResult | None:
-        """从候选节点中选择最优节点。"""
+        """从候选节点中选择最优节点。
+
+        #63: task_tier=="heavy" 时 heavy 角色节点 +0.15 软亲和 (镜像 preferred +0.10)。
+        """
         now = time.time()
         snapshot = dict(self._metrics)
         current_weights = self._weights
@@ -228,10 +233,14 @@ class LoadRouter:
 
             score = self.compute_score(m, current_weights)
             preferred_bonus = 0.1 if nid == preferred_node_id else 0.0
-            final_score = min(1.0, score + preferred_bonus)
+            # #63: heavy 任务亲和 heavy 角色节点 (软加分, 非硬过滤)
+            tier_bonus = 0.15 if (task_tier == "heavy" and node_roles and node_roles.get(nid) == "heavy") else 0.0
+            final_score = min(1.0, score + preferred_bonus + tier_bonus)
             breakdown = self.score_breakdown(m, current_weights)
             if nid == preferred_node_id:
                 breakdown["preferred_bonus"] = preferred_bonus
+            if tier_bonus:
+                breakdown["tier_affinity_bonus"] = tier_bonus
 
             candidates.append(
                 RoutingResult(
@@ -261,8 +270,13 @@ class LoadRouter:
         count: int = 1,
         preferred_node_id: str = "",
         required_uma_ratio: float = 0.0,
+        task_tier: str = "general",
+        node_roles: dict[str, str] | None = None,
     ) -> list[RoutingResult]:
-        """选择 top-N 个最优节点。"""
+        """选择 top-N 个最优节点。
+
+        #63: task_tier=="heavy" 时 heavy 角色节点 +0.15 软亲和。
+        """
         now = time.time()
         snapshot = dict(self._metrics)
         current_weights = self._weights
@@ -281,10 +295,13 @@ class LoadRouter:
 
             score = self.compute_score(m, current_weights)
             preferred_bonus = 0.1 if nid == preferred_node_id else 0.0
-            final_score = min(1.0, score + preferred_bonus)
+            tier_bonus = 0.15 if (task_tier == "heavy" and node_roles and node_roles.get(nid) == "heavy") else 0.0
+            final_score = min(1.0, score + preferred_bonus + tier_bonus)
             breakdown = self.score_breakdown(m, current_weights)
             if nid == preferred_node_id:
                 breakdown["preferred_bonus"] = preferred_bonus
+            if tier_bonus:
+                breakdown["tier_affinity_bonus"] = tier_bonus
 
             candidates.append(
                 RoutingResult(

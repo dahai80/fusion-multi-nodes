@@ -122,6 +122,11 @@ class ClusterConfig:
             "heartbeat_interval": 3.0,
             "report_interval": 15.0,
         },
+        # #63/#65: 节点角色配置 — agent 注册时带 role, master 调度据此亲和。
+        # worker(默认, 无特殊角色) / general(通用推理) / heavy(大模型/pipeline shard 亲和)。
+        "node": {
+            "role": "general",
+        },
         # P4 HA 选举 — 默认关闭 (单 Master, 向后兼容); 多 Master 部署开启。
         # peers = 候选 Master node_id 列表; node_id = 本 Master 在选举集群中的标识。
         # 注意: 选举投票传输层 (集群内 /api/vote 端点) 尚未实现, 现网单 Master 无 HA。
@@ -132,6 +137,9 @@ class ClusterConfig:
             "peers": [],
             # P1-17: leader→standby 全状态同步周期 (秒)。5s→2s 减滞后, 平衡负载。
             "state_sync_interval": 2.0,
+            # #63: HA 模式 — "standby"(默认, 选举单 leader 派发 standby 503) | "active-active"
+            # (双主均派发, 双向 peer 同步 + owner-wins 收敛, 无选举)。默认 standby 向后兼容。
+            "mode": "standby",
         },
         "parallel": {
             "default_mode": "pipeline",
@@ -139,6 +147,12 @@ class ClusterConfig:
             "data_parallel_timeout": 120.0,
             "caveman_compress": True,
             "communication": "auto",
+            # #65: pipeline 并行开关。默认 False — 上游 fusion-mlx /distributed/* 未实现
+            # (#621), 启用须上游落地。False 时 submit mode=pipeline 早拒 400 (明确报错,
+            # 不走下游 404)。
+            "pipeline_enabled": False,
+            # #65: pipeline shard 只派发到具备这些角色的节点 (复用 #63 node.role)。
+            "pipeline_shard_roles": ["heavy"],
         },
         # P1-H 多租户调度 — 每租户最大并发运行任务数 (超额入优先级队列, 非拒绝)。
         # 0 = 不限。高优先级任务 (priority 数值大) 排队时优先获得空闲节点。
@@ -397,15 +411,21 @@ class ClusterConfig:
             fusion_mlx_api_key=self.get("mlx.fusion_mlx_api_key", ""),
             heartbeat_interval=float(self.get("cluster.heartbeat_interval", 3.0)),
             report_interval=float(self.get("cluster.report_interval", 15.0)),
+            node_role=self.get("node.role", "general"),
         )
 
     def get_ha_config(self) -> dict[str, Any]:
-        """P4 HA 选举配置 — 供 ClusterMaster.start(ha_config=...) 消费。"""
+        """P4 HA 选举配置 — 供 ClusterMaster.start(ha_config=...) 消费。
+
+        #63: ha.mode — "standby"(选举单 leader) | "active-active"(双主均派发, 无选举)。
+        """
         return {
             "enabled": bool(self.get("ha.enabled", False)),
             "node_id": self.get("ha.node_id", ""),
             "priority": int(self.get("ha.priority", 0)),
             "peers": self.get("ha.peers", []) or [],
+            "mode": self.get("ha.mode", "standby"),
+            "state_sync_interval": float(self.get("ha.state_sync_interval", 2.0)),
         }
 
     def get_mtls_config(self) -> dict[str, Any]:

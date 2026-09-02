@@ -144,6 +144,8 @@ class TaskSubmitRequest(BaseModel):
     messages: list[dict[str, Any]] = []
     max_tokens: int = 2048
     temperature: float = 0.7
+    # #63: 任务分级 — heavy/general。heavy 亲和 heavy 角色节点; pipeline shard 须 heavy。
+    tier: str = "general"
 
 
 class TaskCancelRequest(BaseModel):
@@ -200,6 +202,9 @@ class LoadUpdateRequest(BaseModel):
     metal_util: float = 0.0
     task_queue_len: int = 0
     net_rtt_ms: float = 0.0
+    # #64: GPU/Metal 显存 (统一内存下 MLX 活动字节), 供 GET /api/nodes/{id}/load 展示。
+    gpu_memory_used_gb: float = 0.0
+    gpu_memory_total_gb: float = 0.0
 
 
 # P1-10 (审计 §6.7): 9 raw dict 路由 → pydantic 校验 (类型+默认), 删手动 req.get 校验。
@@ -860,8 +865,58 @@ class MasterServer:
                 net_rtt_ms=req.net_rtt_ms,
                 node_id=req.node_id,
             )
-            await self.master.update_node_load(req.node_id, metrics)
+            await self.master.update_node_load(
+                req.node_id,
+                metrics,
+                gpu_memory_used_gb=req.gpu_memory_used_gb,
+                gpu_memory_total_gb=req.gpu_memory_total_gb,
+            )
             return {"status": "ok"}
+
+        # #63: 节点 drain — 停止派发新任务到该节点 (in-flight 继续), 用于维护/下线。
+        @app.post("/api/nodes/{node_id}/drain")
+        async def drain_node(node_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/drain", "POST")
+            if not await _check_permission("master", "/api/nodes/drain", "POST"):
+                self._audit.log(
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/nodes/drain",
+                    method="POST",
+                    result="denied",
+                    detail="权限不足: node drain",
+                )
+                raise HTTPException(status_code=403, detail="权限不足: node drain")
+            ok = await self.master.set_node_draining(node_id, True)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            self._audit.log(
+                actor="master",
+                action="node_drain",
+                path=f"/api/nodes/{node_id}/drain",
+                method="POST",
+                node_id=node_id,
+                result="ok",
+                detail="节点进入 drain",
+            )
+            return {"status": "ok", "node_id": node_id, "draining": True}
+
+        @app.post("/api/nodes/{node_id}/undrain")
+        async def undrain_node(node_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/drain", "POST")
+            ok = await self.master.set_node_draining(node_id, False)
+            if not ok:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            self._audit.log(
+                actor="master",
+                action="node_undrain",
+                path=f"/api/nodes/{node_id}/undrain",
+                method="POST",
+                node_id=node_id,
+                result="ok",
+                detail="节点退出 drain",
+            )
+            return {"status": "ok", "node_id": node_id, "draining": False}
 
         @app.post("/api/routing/strategy")
         async def set_routing_strategy(strategy: str):
@@ -928,11 +983,28 @@ class MasterServer:
             ):
                 raise HTTPException(status_code=503, detail="选举过渡中, leader 未定, 拒绝任务提交")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
+            # #65: pipeline 未启用 → 早拒 400 (上游 /distributed/* 未实现 fusion-mlx#621)。
+            # 不走下游 404 → 任务直接 FAILED; 这里 fail visibly (Rule 12)。
+            if mode == ParallelMode.PIPELINE:
+                _pipeline_enabled = (
+                    bool(self._cluster_config.get("parallel.pipeline_enabled", False))
+                    if self._cluster_config
+                    else False
+                )
+                if not _pipeline_enabled:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="pipeline 模式未启用: 上游 /distributed/* 未实现 (fusion-mlx#621); "
+                        "设 parallel.pipeline_enabled=true 且上游落地后启用",
+                    )
             # F2: 用户令牌 → task.user 取已认证身份 (忽略客户端 req.user, 防伪造审计 actor)。
             # 集群令牌 → req.user (内部可信自声明, HA/CLI/agent 路径)。
             effective_user = user_actor if user_actor else req.user
+            _aa_prefix = self.master.aa_task_prefix()
+            _aa_owner = self.master.aa_owner()
+            _tid = f"{_aa_prefix}-task_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"task_{uuid.uuid4().hex[:12]}"
             task = ClusterTask(
-                task_id=f"task_{uuid.uuid4().hex[:12]}",
+                task_id=_tid,
                 name=req.name,
                 mode=mode,
                 model_name=req.model_name,
@@ -945,7 +1017,9 @@ class MasterServer:
                 # #31 重试节点规避: 透传硬黑名单
                 exclude_nodes=list(req.exclude_nodes),
                 priority=req.priority,
+                tier=req.tier,
                 task_type=req.task_type,
+                owner_master=_aa_owner,
                 params={
                     "prompt": req.prompt,
                     "messages": req.messages,
@@ -1341,7 +1415,7 @@ class MasterServer:
             node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
-            load = self.master.load_router._node_loads.get(node_id)
+            load = self.master.load_router._metrics.get(node_id)
             result = {
                 "node_id": node_id,
                 "status": node.status.value,
@@ -1352,6 +1426,10 @@ class MasterServer:
                 "active_tasks": node.active_tasks,
                 "max_tasks": node.max_tasks,
                 "network_rtt_ms": node.network_rtt_ms,
+                # #64: 真实 MLX Metal 显存 (统一内存派生)
+                "gpu_memory_used_gb": node.gpu_memory_used_gb,
+                "gpu_memory_total_gb": node.gpu_memory_total_gb,
+                "draining": node.draining,
             }
             if load:
                 result["load_metrics"] = {
@@ -1654,9 +1732,25 @@ class MasterServer:
             if self.master._election is not None and not self.master._is_leader:
                 raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝任务提交")
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
+            # #65: pipeline 未启用 → 早拒 400 (上游 /distributed/* 未实现 fusion-mlx#621)。
+            if mode == ParallelMode.PIPELINE:
+                _pipeline_enabled = (
+                    bool(self._cluster_config.get("parallel.pipeline_enabled", False))
+                    if self._cluster_config
+                    else False
+                )
+                if not _pipeline_enabled:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="pipeline 模式未启用: 上游 /distributed/* 未实现 (fusion-mlx#621); "
+                        "设 parallel.pipeline_enabled=true 且上游落地后启用",
+                    )
             effective_user = user_actor if user_actor else req.user
+            _aa_prefix = self.master.aa_task_prefix()
+            _aa_owner = self.master.aa_owner()
+            _tid = f"{_aa_prefix}-task_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"task_{uuid.uuid4().hex[:12]}"
             task = ClusterTask(
-                task_id=f"task_{uuid.uuid4().hex[:12]}",
+                task_id=_tid,
                 name=req.name,
                 mode=mode,
                 model_name=req.model_name,
@@ -1668,7 +1762,9 @@ class MasterServer:
                 preferred_node_id=req.preferred_node_id,
                 exclude_nodes=list(req.exclude_nodes),
                 priority=req.priority,
+                tier=req.tier,
                 task_type=req.task_type,
+                owner_master=_aa_owner,
                 params={
                     "prompt": req.prompt,
                     "messages": req.messages,

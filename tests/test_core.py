@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -163,7 +164,7 @@ class TestNodeAgent:
         if sys.platform != "darwin":
             pytest.skip("硬件采集断言仅适用 Apple Silicon (darwin)")
         agent = NodeAgent()
-        info = agent.collect_hardware_info()
+        info = asyncio.run(agent.collect_hardware_info())
         assert info["arch"] == "arm64"
         assert info["total_memory_gb"] > 0
         assert info["cpu_cores"] > 0

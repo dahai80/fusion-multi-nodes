@@ -356,6 +356,15 @@ class TestMasterServerTaskManagement:
 
     @pytest.mark.asyncio
     async def test_submit_task_pipeline(self, client, master_server):
+        # #65: pipeline 模式需 parallel.pipeline_enabled=true 才过门控 (上游 /distributed/* 404 默认关)。
+        from fusion_multi_node.config import ClusterConfig
+
+        cfg = ClusterConfig()
+        cfg.set("parallel.pipeline_enabled", True)
+        # #65: 测试节点注册默认 role=worker → 放宽 shard 角色含 worker 让其可派发。
+        cfg.set("parallel.pipeline_shard_roles", ["worker", "general", "heavy"])
+        master_server._cluster_config = cfg
+        master_server.master._cluster_config = cfg
         await _register_node(client)
         resp = await client.post(
             "/api/tasks/submit",

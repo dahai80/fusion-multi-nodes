@@ -5,14 +5,33 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.14.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.15.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1347%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1356%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.14.2。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.15.0。
+
+---
+
+> **🚀 v0.15.0（2026-09-02）— Active-Active 双主 + 真实 GPU 负载 + pipeline 门控（#63 #64 #65）**
+>
+> 三个 issue 修复：
+> - **#63 Active-Active 双主** — `ha.mode = "active-active"` 让两 master 同时活跃接受提交（无 standby 503）。
+>   双向 peer-sync + owner-wins 收敛，无需 Redis。任务归属（`owner_master`）— 仅归属 master 派发，对端持镜像。
+>   跨 master 任务 ID 唯一（`master-1-<uuid>`）。节点角色亲和 + drain（`POST /api/nodes/{id}/drain`，CLI
+>   `cluster drain|undrain`）。
+> - **#64 真实 GPU/Metal 负载** — `fetch_mlx_memory()` 抓取 fusion-mlx `GET /v1/health` 真实 Metal 显存（此前是
+>   `pass` 空操作 → `gpu_memory_*_gb` 恒 0，`metal_util` VRAM_FIRST 权重失效）。agent 心跳现带 `metal_util` + gpu
+>   字段；`GET /api/v1/nodes/{id}/metrics` 不再 `AttributeError`。
+> - **#65 pipeline 404 门控** — `parallel.pipeline_enabled`（默认 `False`）早拒 `mode=pipeline` 并返回明确的
+>   上游缺失 400，而非下游 404；`pipeline_shard_roles` 按角色硬过滤；`404 → upstream_missing → FAILED`（不可重试，
+>   不触发熔断器）。
+>
+> 1356 测试，ruff 通过。见 [CHANGELOG](docs/CHANGELOG.md)。Redis/配额/LB 部署依赖跟踪于
+> [fusion-gateway #159](https://github.com/dahai80/fusion-gateway/issues/159)。
 
 ---
 
@@ -106,8 +125,8 @@
 
 | 模块 | 职责 |
 |--------|---------------|
-| **Cluster Master** | 节点发现、资源调度、任务生命周期、KV 缓存池、容错、任务自动降级、负载感知路由、任务分片、AST diff、FMP KV 同步、真张量 PIPELINE 分层链（接 fusion-mlx `/distributed/*`，✅上游端点已交付 issue #621/#630 关闭；多节点客户端存根 `load_shard`/`pipeline_step` 已接，⚠️真模型端到端验证长期待定），master→agent 派发循环、**H3 任务持久化 + 崩溃恢复**（RUNNING/PENDING 原子落盘，崩溃重启自动重派）。HA 选举接到 `start(ha_config=)`（默认关单 Master；StandbyMaster 类为死代码原型）。cloud_fallback 调度路径 v0.8.2 已切断（100% 本地） |
-| **Node Agent** | 每机守护进程、硬件上报、任务执行、mDNS 自动发现、pipeline_step（上游 `/distributed/load_shard`+`pipeline_step` 已交付 issue #621 关闭，b64.npy 跨节点激活，⚠️真模型端到端长期待定） |
+| **Cluster Master** | 节点发现、资源调度、任务生命周期、KV 缓存池、容错、任务自动降级、负载感知路由（#64 真实 GPU/Metal `metal_util`）、任务分片、FMP KV 同步、真张量 PIPELINE 分层链（接 fusion-mlx `/distributed/*`，✅上游端点已交付 issue #621/#630 关闭；**#65 pipeline 门控** `parallel.pipeline_enabled` 默认关，`pipeline_shard_roles` 角色过滤，404→upstream_missing→FAILED 不可重试），master→agent 派发循环、**H3 任务持久化 + 崩溃恢复**（RUNNING/PENDING 原子落盘，崩溃重启自动重派）。HA：**#63 Active-Active** `ha.mode="active-active"`（双主活跃，双向 peer-sync，owner-wins，无 Redis）+ standby 选举接到 `start(ha_config=)`（默认关单 Master）。**Drain**（`POST /api/nodes/{id}/drain`，CLI `cluster drain|undrain`）。cloud_fallback 调度路径 v0.8.2 已切断（100% 本地） |
+| **Node Agent** | 每机守护进程、硬件上报、任务执行、mDNS 自动发现、pipeline_step（上游 `/distributed/load_shard`+`pipeline_step` 已交付 issue #621 关闭，b64.npy 跨节点激活，⚠️真模型端到端长期待定），**#64 真实 GPU/Metal 负载抓取**（`fetch_mlx_memory` → 心跳带 `metal_util` + gpu 字段） |
 | **mDNS Discovery** | Bonjour/mDNS 零配置节点发现，手动 IP 加入兜底 |
 | **FMP Protocol** | 三层二进制协议，AES-GCM 加密，TCP 长连接，熔断器，hop_count，FMP 入站服务端。⚠️启动但从未作为派发传输（仅 HTTP 派发） |
 | **Distributed MLX Bridge** | 流水线/数据并行、模型分片、Caveman 压缩、KV 缓存共享。✅跨节点 KV 传输生产就绪（GAP-7/#33，v0.11.0）：`SyntheticKVTransport` 默认后端路由合成 KVCacheEntry 跨节点；真张量 `MLXKVTransport` env-gated 实验附加（`FUSION_KV_TENSOR_BACKEND=mlx`，待上游 #650） |
