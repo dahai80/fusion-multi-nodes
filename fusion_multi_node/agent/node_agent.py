@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from fusion_multi_node import __version__ as _node_protocol_version
+from fusion_multi_node.agent.mlx_memory import fetch_mlx_memory
 from fusion_multi_node.agent.rate_pacer import PacerConfig, RateLimitExhausted, dispatch_with_pacing
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
@@ -281,8 +282,11 @@ class AgentConfig:
     # 0 不限: 保既有行为, 主推理路径不 setrlimit (维持现状)。
     task_mem_limit_mb: int = 0
     task_cpu_quota: int = 0
+    # #63/#65: 节点角色 — worker(默认)/general/heavy。heavy 节点亲和 heavy 任务 + pipeline shard 派发。
+    node_role: str = "worker"
 
     def __post_init__(self) -> None:
+        env_mt = os.environ.get("FUSION_AGENT_MAX_TASKS")
         env_mt = os.environ.get("FUSION_AGENT_MAX_TASKS")
         if env_mt:
             try:
@@ -302,6 +306,9 @@ class AgentConfig:
                 self.task_cpu_quota = max(0, int(env_cpu))
             except ValueError:
                 pass
+        env_role = os.environ.get("FUSION_NODE_ROLE", "").strip().lower()
+        if env_role in ("worker", "general", "heavy"):
+            self.node_role = env_role
 
 
 class NodeAgent:
@@ -404,12 +411,16 @@ class NodeAgent:
         )
         return self._static_hardware
 
-    def _collect_dynamic_load(self) -> dict[str, Any]:
-        """采集动态负载字段 (纯 psutil, 无子进程, 微秒级)。
+    async def _collect_dynamic_load(self) -> dict[str, Any]:
+        """采集动态负载字段 (psutil + MLX Metal 显存, 无 system_profiler 子进程)。
 
         R1 修复: 供心跳/硬件循环高频调用, 替代 collect_hardware_info 的全量重采集。
         R5 修复: active_tasks 取 len(_running_task_handles) 反映并发任务数,
                  task_queue_len 同源, 供 LoadRouter 队列维度真实感知。
+        #64 修复: 抓 fusion-mlx /v1/health memory 块 → metal_util (VRAM_FIRST weight 0.2)
+                 + gpu_memory_*_gb。原 metal_util 恒 0.0 = VRAM_FIRST 该维度死权重。
+                 psutil 统一内存 = 系统级, MLX active bytes = 推理实际 Metal 占用, 二者互补。
+                 底座未运行 → None → 全 0.0, 不拖垮心跳 (离线安全)。
         """
         import psutil
 
@@ -417,6 +428,15 @@ class NodeAgent:
         active = len(self._running_task_handles) or (1 if self._current_task else 0)
         total_gb = mem.total / (1024**3)
         avail_gb = mem.available / (1024**3)
+        # #64: 抓 MLX Metal 显存 — base_url/api_key 含 env 覆盖 (#60 property)。
+        mlx_mem = await fetch_mlx_memory(self._backend.base_url, self._backend.api_key)
+        metal_util = 0.0
+        gpu_used_gb = 0.0
+        gpu_total_gb = 0.0
+        if mlx_mem and mlx_mem["total_gb"] > 0:
+            metal_util = round(min(1.0, mlx_mem["active_gb"] / mlx_mem["total_gb"]), 3)
+            gpu_used_gb = mlx_mem["active_gb"]
+            gpu_total_gb = mlx_mem["total_gb"]
         return {
             "total_memory_gb": round(total_gb, 1),
             "available_memory_gb": round(avail_gb, 1),
@@ -425,15 +445,23 @@ class NodeAgent:
             "active_tasks": active,
             "task_queue_len": active,
             "uma_used_ratio": round(max(0.0, 1.0 - avail_gb / total_gb) if total_gb > 0 else 0.0, 3),
+            "metal_util": metal_util,
+            "gpu_memory_used_gb": gpu_used_gb,
+            "gpu_memory_total_gb": gpu_total_gb,
             "fusion_desk_running": self._check_service(self.config.fusion_desk_port),
             "fusion_mlx_running": self._check_service(self.config.fusion_mlx_port),
             "timestamp": time.time(),
         }
 
-    def collect_hardware_info(self) -> dict[str, Any]:
-        """收集本机硬件信息 (静态缓存 + 动态 psutil 合并)。"""
-        static = self._ensure_static_hardware()
-        dynamic = self._collect_dynamic_load()
+    async def collect_hardware_info(self) -> dict[str, Any]:
+        """收集本机硬件信息 (静态缓存 + 动态 psutil+MLX 合并)。
+
+        P1-10: _ensure_static_hardware 首次调 system_profiler/ipconfig (至 5s) —
+        经 to_thread 移出 event loop; 后续命中缓存为纯内存微秒级。
+        #64: 动态负载 _collect_dynamic_load 已 async (抓 MLX /v1/health)。
+        """
+        static = await asyncio.to_thread(self._ensure_static_hardware)
+        dynamic = await self._collect_dynamic_load()
         return {**static, **dynamic}
 
     def _get_local_ip(self) -> str:
@@ -533,7 +561,7 @@ class NodeAgent:
                  LoadRouter 队列维度据此真实感知并发负载, 不再恒为 0。
         静态硬件信息由 report_hardware 启动时一次性上报。
         """
-        load = self._collect_dynamic_load()
+        load = await self._collect_dynamic_load()
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
@@ -548,6 +576,7 @@ class NodeAgent:
             ok = resp.status_code == 200
 
             # R5: 同步五维负载到 LoadRouter (心跳路径, 无需单独定时器)
+            # #64: 补 metal_util (VRAM_FIRST weight 0.2) + gpu_memory_*_gb (端点展示)。
             try:
                 await client.post(
                     f"{mtls_scheme()}://{self.config.master_host}:{self.config.master_port}/api/nodes/load",
@@ -556,6 +585,9 @@ class NodeAgent:
                         "uma_used_ratio": load["uma_used_ratio"],
                         "cpu_percent": load["cpu_percent"],
                         "task_queue_len": load["task_queue_len"],
+                        "metal_util": load["metal_util"],
+                        "gpu_memory_used_gb": load["gpu_memory_used_gb"],
+                        "gpu_memory_total_gb": load["gpu_memory_total_gb"],
                     },
                 )
             except Exception as le:
@@ -567,9 +599,9 @@ class NodeAgent:
 
     async def report_hardware(self) -> bool:
         """向 Master 上报完整硬件信息。"""
-        # P1-10: collect_hardware_info 经 _ensure_static_hardware 调 system_profiler/ipconfig
-        # 同步子进程 (至 5s) — async 路径须 to_thread 移出 event loop (审计 §4.5)。
-        info = await asyncio.to_thread(self.collect_hardware_info)
+        # P1-10: collect_hardware_info 内部已把 system_profiler/ipconfig (至 5s)
+        # 经 to_thread 移出 event loop (审计 §4.5); collect_hardware_info 自身 async。
+        info = await self.collect_hardware_info()
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
@@ -589,7 +621,7 @@ class NodeAgent:
                     "mlx_version": info.get("mlx_version", ""),
                     # P1-17 (审计 §6.7): 上报多节点协议版本, master 比对兼容性。
                     "protocol_version": _node_protocol_version,
-                    "role": "worker",
+                    "role": self.config.node_role,
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
                     "active_tasks": 0,
                     "max_tasks": self.config.max_tasks,
@@ -901,6 +933,18 @@ class NodeAgent:
                 "dtype": out["dtype"],
                 "node_id": self.config.node_id,
             }
+        except httpx.HTTPStatusError as he:
+            # #65: 上游 /distributed/* 404 = 端点未实现 (fusion-mlx#621), 区分于 shard 不存在。
+            # master 据此映射 FAILED + 明确报错 (不可重试, 非瞬时节点故障)。
+            if he.response.status_code == 404:
+                logger.error(f"P3 pipeline_step 上游未实现: task={task_id} model={model_id} 404")
+                return {
+                    "task_id": task_id,
+                    "error": "上游 /distributed/* 未实现 (fusion-mlx#621)",
+                    "upstream_missing": True,
+                }
+            logger.error(f"P3 pipeline_step 失败: task={task_id} model={model_id}: {he}")
+            return {"task_id": task_id, "error": f"pipeline_step: {he}"}
         except Exception as e:
             logger.error(f"P3 pipeline_step 失败: task={task_id} model={model_id}: {e}")
             return {"task_id": task_id, "error": f"pipeline_step: {e}"}
@@ -988,11 +1032,11 @@ class NodeAgent:
         """硬件上报循环 (仅日志, R1: 用动态采集避免 system_profiler 风暴)。"""
         while self._running:
             await asyncio.sleep(self.config.report_interval)
-            load = self._collect_dynamic_load()
+            load = await self._collect_dynamic_load()
             logger.debug(
                 f"硬件状态: {load['available_memory_gb']:.1f}GB 可用, "
                 f"CPU {load['cpu_percent']}%, "
-                f"MLX: {load['fusion_mlx_running']}"
+                f"MLX: {load['fusion_mlx_running']} metal={load['metal_util']:.2f}"
             )
 
     async def _discover_master(self) -> bool:

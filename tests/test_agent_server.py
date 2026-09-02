@@ -45,11 +45,13 @@ def _make_kv_entry(
 def mock_agent():
     agent = MagicMock()
     agent.config = AgentConfig(node_id="test_node")
-    agent.collect_hardware_info.return_value = {
-        "node_id": "test_node",
-        "hostname": "mac-test",
-        "cpu_cores": 12,
-    }
+    agent.collect_hardware_info = AsyncMock(
+        return_value={
+            "node_id": "test_node",
+            "hostname": "mac-test",
+            "cpu_cores": 12,
+        }
+    )
     agent.execute_task = AsyncMock(return_value={"result": "done"})
     return agent
 

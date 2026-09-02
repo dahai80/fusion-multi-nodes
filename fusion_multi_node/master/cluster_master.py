@@ -105,6 +105,11 @@ class NodeInfo:
     active_tasks: int = 0
     max_tasks: int = 4
     network_rtt_ms: float = 0.0
+    # #64: 真实 MLX Metal 显存 (统一内存派生), agent 心跳上报, update_node_load 存储
+    gpu_memory_used_gb: float = 0.0
+    gpu_memory_total_gb: float = 0.0
+    # #63: 节点角色亲和 + drain
+    draining: bool = False
 
     @property
     def score(self) -> float:
@@ -137,6 +142,10 @@ class ClusterTask:
     preferred_node_id: str = ""
     # #31 重试节点规避: 硬黑名单, 调度绝不派发到列表内节点 (重试时带入失败节点打破死循环)
     exclude_nodes: list[str] = field(default_factory=list)
+    # #63 active-active: 归属 master (owner 派发, peer 仅镜像); 单 master 模式留空
+    owner_master: str = ""
+    # #63/#65 任务分级: heavy/general, heavy 任务亲和 heavy 角色节点, pipeline shard 须 heavy 节点
+    tier: str = "general"
     priority: int = 0
     # M4-04 任务自动降级
     degraded_from_model: str = ""
@@ -244,6 +253,11 @@ class ClusterMaster:
         # M3-03 选举
         self._election: MasterElection | None = None
         self._is_leader = True
+        # #63 Active-Active: 双主模式标识 + 本 master node_id + peer 列表 (无选举, 双向同步)。
+        self._ha_mode: str = "standby"
+        self._ha_node_id: str = ""
+        self._active_peers: list[dict[str, Any]] = []
+        self._aa_sync_interval: float = 2.0
         # P1 派发: Master→Agent /api/execute 投递。惰性复用 httpx + 集群 token
         # (与 master_server cancel 通知同 token, agent BearerAuthMiddleware 校验)。
         self._dispatch_token: str | None = None
@@ -498,6 +512,8 @@ class ClusterMaster:
             task_type=d.get("task_type", "inference"),
             params=d.get("params", {}),
             result=d.get("result", {}),
+            owner_master=d.get("owner_master", ""),
+            tier=d.get("tier", "general"),
         )
         # P2-26 (审计 §5.7): 恢复 _retry_count, 避崩溃后重试预算被重置 (允许超限重试)。
         t._retry_count = int(d.get("_retry_count", 0) or 0)
@@ -756,20 +772,38 @@ class ClusterMaster:
             return True
 
     def _sync_node_metrics(self, info: NodeInfo) -> None:
-        """从 NodeInfo 同步基础指标到 LoadRouter。"""
+        """从 NodeInfo 同步基础指标到 LoadRouter。
+
+        #64: metal_util 从 NodeInfo.gpu_memory_*_gb 派生 (agent 心跳已存真实 MLX 显存),
+        不再恒 0.0 (VRAM_FIRST 权重 0.2 原死字段)。
+        """
         uma_ratio = 1.0 - (info.available_memory_gb / max(info.total_memory_gb, 1))
+        metal_util = (
+            round(min(1.0, info.gpu_memory_used_gb / max(info.gpu_memory_total_gb, 0.001)), 3)
+            if info.gpu_memory_total_gb > 0
+            else 0.0
+        )
         metrics = LoadMetrics(
             uma_used_ratio=uma_ratio,
             cpu_percent=0.0,
-            metal_util=0.0,
+            metal_util=metal_util,
             task_queue_len=info.active_tasks,
             net_rtt_ms=info.network_rtt_ms,
             node_id=info.node_id,
         )
         self.load_router.update_metrics(info.node_id, metrics)
 
-    async def update_node_load(self, node_id: str, metrics: LoadMetrics) -> None:
-        """更新节点负载指标（由 Worker 上报调用）。"""
+    async def update_node_load(
+        self,
+        node_id: str,
+        metrics: LoadMetrics,
+        gpu_memory_used_gb: float | None = None,
+        gpu_memory_total_gb: float | None = None,
+    ) -> None:
+        """更新节点负载指标（由 Worker 上报调用）。
+
+        #64: gpu_memory_*_gb 由 agent 心跳上报真实 MLX Metal 显存, 存 NodeInfo 供检视端点读取。
+        """
         async with self._nodes_lock:
             node = self.nodes.get(node_id)
             if not node:
@@ -780,7 +814,25 @@ class ClusterMaster:
             node.available_memory_gb = node.total_memory_gb * (1.0 - metrics.uma_used_ratio)
             node.active_tasks = metrics.task_queue_len
             node.network_rtt_ms = metrics.net_rtt_ms
-            logger.debug(f"节点负载更新: {node_id} uma={metrics.uma_used_ratio:.2f}")
+            if gpu_memory_used_gb is not None:
+                node.gpu_memory_used_gb = gpu_memory_used_gb
+            if gpu_memory_total_gb is not None:
+                node.gpu_memory_total_gb = gpu_memory_total_gb
+            logger.debug(
+                f"节点负载更新: {node_id} uma={metrics.uma_used_ratio:.2f} "
+                f"metal={metrics.metal_util:.2f} gpu={node.gpu_memory_used_gb:.1f}/{node.gpu_memory_total_gb:.1f}GB"
+            )
+
+    async def set_node_draining(self, node_id: str, draining: bool) -> bool:
+        """#63: 设置节点 drain 状态 — drain 中不接新任务 (in-flight 继续)。"""
+        async with self._nodes_lock:
+            node = self.nodes.get(node_id)
+            if not node:
+                logger.warning(f"set_node_draining: 节点不存在 {node_id}")
+                return False
+            node.draining = draining
+            logger.info(f"节点 drain 状态: {node_id} draining={draining}")
+            return True
 
     # ── 资源调度 ──
 
@@ -792,12 +844,26 @@ class ClusterMaster:
         required_capability: str = "",
         preferred_node_id: str = "",
         exclude_nodes: list[str] | None = None,
+        task_tier: str = "general",
+        shard_roles: list[str] | None = None,
     ) -> list[NodeInfo]:
-        """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。"""
+        """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。
+
+        #63: task_tier — heavy/general, 传 LoadRouter 做 heavy 角色亲和 (软加分)。
+        #63: drain 中节点不接新任务 (in-flight 继续)。
+        #65: shard_roles — pipeline 模式只选具备这些角色的节点 (硬过滤)。
+        """
         candidates = await self.get_online_nodes()
 
         # S1 熔断: 跳过 ban 期内节点 (派发失败累积达阈值自动 ban, 不再被选中)
         candidates = [n for n in candidates if not self.is_node_banned(n.node_id)]
+
+        # #63: drain 中节点不接新任务
+        candidates = [n for n in candidates if not n.draining]
+
+        # #65: pipeline shard 角色硬过滤 — 只派发到 pipeline_shard_roles 内角色节点
+        if mode == ParallelMode.PIPELINE and shard_roles:
+            candidates = [n for n in candidates if n.role in shard_roles]
 
         # #31 重试节点规避: 硬黑名单过滤 (重试带入失败节点, 打破"重试回同一坏节点"死循环)
         if exclude_nodes:
@@ -818,11 +884,15 @@ class ClusterMaster:
         required_uma = required_memory_gb / max(sum(n.total_memory_gb for n in candidates) or 1, 1)
 
         # M4-01 优先使用 LoadRouter 结构化评分
+        # #63: 传 task_tier + 节点角色映射, heavy 任务亲和 heavy 角色节点 (软加分)。
+        node_roles = {n.node_id: n.role for n in candidates}
         results = self.load_router.select_n(
             candidate_ids=candidate_ids,
             count=count,
             preferred_node_id=preferred_node_id,
             required_uma_ratio=required_uma,
+            task_tier=task_tier,
+            node_roles=node_roles,
         )
 
         if results:
@@ -865,6 +935,7 @@ class ClusterMaster:
             and n.node_id not in exclude_ids
             and n.active_tasks < n.max_tasks
             and not self._is_node_banned_locked(n.node_id)
+            and not n.draining  # #63: drain 中节点不接新任务
         ]
         if required_capability:
             candidates = [n for n in candidates if required_capability in n.tags]
@@ -996,6 +1067,15 @@ class ClusterMaster:
         # P1-H: 任务完成释放配额/节点 → 排空待派发队列 (高优先级先得)。
         await self._drain_pending_locked()
 
+    def aa_task_prefix(self) -> str:
+        """#63: active-active 模式下任务 ID 前缀 (含 owner_master node_id), 保证跨 master 唯一。
+        standby/单 Master 返空串 (不前缀)。"""
+        return self._ha_node_id if self._ha_mode == "active-active" else ""
+
+    def aa_owner(self) -> str:
+        """#63: active-active 模式下本机 owner_master; 否则空串。"""
+        return self._ha_node_id if self._ha_mode == "active-active" else ""
+
     async def assign_task(self, task: ClusterTask) -> bool:
         """分配任务到节点 — 幂等: 已 RUNNING 的任务直接返回 True。
 
@@ -1006,6 +1086,11 @@ class ClusterMaster:
         # HA standby 守卫: 选举已配置且本节点非 leader → 拒绝派发
         if self._election is not None and not self._is_leader:
             logger.warning(f"standby 模式拒绝派发任务: {task.task_id} (非 leader)")
+            return False
+        # #63 active-active owner-skip: 非 owner_master 的镜像任务不派发 (仅 owner 调度)。
+        # owner_master=="" (standby/单 Master) 不受影响; active-active 下仅自有任务派发。
+        if self._ha_mode == "active-active" and task.owner_master and task.owner_master != self._ha_node_id:
+            logger.debug(f"#63 跳过镜像任务派发: {task.task_id} (owner={task.owner_master})")
             return False
         # P1-17: 选举空窗期 (本节点非 leader 且 leader 未定) → 拒绝派发, 避免双主脑裂窗口误派。
         # 注: _is_leader=True 时本节点自认 leader, 不经此守卫 (leader 自派不拦)。
@@ -1072,6 +1157,10 @@ class ClusterMaster:
             self.load_router.set_strategy(RoutingStrategy.VRAM_FIRST)
             logger.debug(f"M4-03 VRAM优先策略: {task.name} (model={task.model_name})")
 
+        # #65: pipeline shard 角色过滤 (config parallel.pipeline_shard_roles, 默认 ["heavy"])
+        _shard_roles = None
+        if task.mode == ParallelMode.PIPELINE and self._cluster_config is not None:
+            _shard_roles = self._cluster_config.get("parallel.pipeline_shard_roles", ["heavy"]) or ["heavy"]
         try:
             nodes = await self.select_nodes(
                 task.mode,
@@ -1080,6 +1169,8 @@ class ClusterMaster:
                 required_capability=task.required_capability,
                 preferred_node_id=task.preferred_node_id,
                 exclude_nodes=task.exclude_nodes,
+                task_tier=task.tier,
+                shard_roles=_shard_roles,
             )
         finally:
             if self._is_vram_first(task) and self.load_router.strategy != original_strategy:
@@ -1448,6 +1539,14 @@ class ClusterMaster:
                 # P0-2: 流水线段去重/沙箱阻塞 = 非节点故障, 不 report_fault, 不重试 (重试回同段同任务大概率复现去重)。
                 reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
                 await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} {reason}: {r.get('error', '')}")
+                return
+            if isinstance(r, dict) and r.get("upstream_missing"):
+                # #65: 上游 /distributed/* 未实现 (fusion-mlx#621) → 不可重试 FAILED, 明确报错。
+                await self._finalize_task(
+                    task,
+                    success=False,
+                    error=f"流水线步骤 {nid}: 上游 /distributed/* 未实现 (fusion-mlx#621)",
+                )
                 return
             if isinstance(r, dict) and "error" in r:
                 await self._finalize_task(task, success=False, error=f"流水线步骤 {nid}: {r['error']}")
@@ -2257,6 +2356,10 @@ class ClusterMaster:
                         TaskStatus.TIMEOUT,
                     ):
                         continue
+                    # #63 owner-wins: 本机自有任务 (owner_master == self) 不被对端覆盖。
+                    # 对端只持有镜像副本, 本机才是该任务权威; 非自有任务接受对端镜像。
+                    if existing and existing.owner_master == self._ha_node_id and self._ha_node_id:
+                        continue
                     self.tasks[task.task_id] = task
                     merged += 1
                 except Exception as e:
@@ -2346,6 +2449,9 @@ class ClusterMaster:
             "active_tasks": n.active_tasks,
             "max_tasks": n.max_tasks,
             "network_rtt_ms": n.network_rtt_ms,
+            "gpu_memory_used_gb": n.gpu_memory_used_gb,
+            "gpu_memory_total_gb": n.gpu_memory_total_gb,
+            "draining": n.draining,
         }
 
     def _node_from_dict(self, d: dict[str, Any]) -> NodeInfo:
@@ -2374,6 +2480,9 @@ class ClusterMaster:
             active_tasks=int(d.get("active_tasks", 0)),
             max_tasks=int(d.get("max_tasks", 4)),
             network_rtt_ms=float(d.get("network_rtt_ms", 0.0)),
+            gpu_memory_used_gb=float(d.get("gpu_memory_used_gb", 0.0)),
+            gpu_memory_total_gb=float(d.get("gpu_memory_total_gb", 0.0)),
+            draining=bool(d.get("draining", False)),
         )
 
     def _kv_to_dict(self, e: KVCacheEntry) -> dict[str, Any]:
@@ -2575,6 +2684,73 @@ class ClusterMaster:
                             await self._broadcast_rule_epoch(cur_epoch)
                         except Exception as e:
                             logger.debug(f"规则纪元周期补广播异常: {e}")
+        except asyncio.CancelledError:
+            pass
+
+    # ── #63 Active-Active 双主: 双向 peer 同步 (无选举, 无 _is_leader 门控) ──
+
+    def _aa_targets(self, payload: dict[str, Any]) -> list[tuple[str, str, int, dict[str, Any]]]:
+        """从 _active_peers 构建对端推送列表 (active-active, 双主均推)。"""
+        targets: list[tuple[str, str, int, dict[str, Any]]] = []
+        for peer in self._active_peers:
+            ip = peer.get("ip_address", "")
+            port = int(peer.get("port", 0))
+            if not ip or port <= 0 or not is_safe_peer_host(ip):
+                continue
+            targets.append((peer.get("node_id", ""), ip, port, payload))
+        return targets
+
+    async def _peer_sync_loop(self) -> None:
+        """#63: 周期双向同步 — 推 nodes+kv+banned+tasks 到所有 _active_peers, best-effort。
+
+        双主均运行此循环 (无 _is_leader 门控) → 双向收敛。owner-wins 在
+        receive_synced_tasks/receive_synced_state 内保证本机自有任务不被对端覆盖。
+        """
+        try:
+            while self._running:
+                await asyncio.sleep(self._aa_sync_interval)
+                try:
+                    # 状态 (nodes/kv/banned/epoch)
+                    now = time.time()
+                    nodes_list: list[dict[str, Any]] = []
+                    banned_snapshot: dict[str, float] = {}
+                    async with self._nodes_lock:
+                        nodes_list = [self._node_to_dict(n) for n in self.nodes.values()]
+                        banned_snapshot = {nid: t for nid, t in self._banned_nodes.items() if t > now}
+                    kv_list: list[dict[str, Any]] = []
+                    async with self._kv_lock:
+                        kv_list = [self._kv_to_dict(e) for e in self.kv_cache.values()]
+                    epoch_snapshot: dict[str, Any] = {}
+                    async with self._rule_epoch_lock:
+                        async with self._confirms_lock:
+                            epoch_snapshot = self._build_rule_epoch_snapshot()
+                    state_payload = {
+                        "nodes": nodes_list,
+                        "kv_cache": kv_list,
+                        "banned_nodes": banned_snapshot,
+                        "rule_epoch_state": epoch_snapshot,
+                        "saved_at": now,
+                        "owner_master": self._ha_node_id,
+                    }
+                    await self._push_sync_state_to_standbys(self._aa_targets(state_payload))
+
+                    # 任务 (非终态)
+                    _TERMINAL = {
+                        TaskStatus.COMPLETED,
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
+                        TaskStatus.TIMEOUT,
+                        TaskStatus.PARTIAL,
+                    }
+                    pending_tasks: list[dict[str, Any]] = []
+                    async with self._tasks_lock:
+                        pending_tasks = [
+                            self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL
+                        ]
+                    task_payload = {"tasks": pending_tasks, "saved_at": time.time(), "owner_master": self._ha_node_id}
+                    await self._push_sync_to_standbys(self._aa_targets(task_payload))
+                except Exception as e:
+                    logger.warning(f"#63 active-active 同步循环异常: {e}")
         except asyncio.CancelledError:
             pass
 
@@ -2924,6 +3100,31 @@ class ClusterMaster:
                 # GAP-1 (Phase C): 启动全状态同步循环 — standby 持有完整拓扑, failover 即调度。
                 self._state_sync_task = asyncio.create_task(self._state_sync_loop())
                 logger.info("P4 HA 选举已启动 (HTTP 拉票 + 任务同步 + 全状态同步已接线)")
+        elif ha_config and ha_config.get("mode") == "active-active" and ha_config.get("node_id"):
+            # #63 Active-Active 双主模式 — 不启动选举 (_election 留 None, _is_leader 默认 True,
+            # standby 守卫全放行 → 双主均派发)。双向 peer 同步 + owner-wins 收敛 (无共识, 离线安全)。
+            self._ha_node_id = ha_config["node_id"]
+            self._ha_mode = "active-active"
+            self._active_peers: list[dict[str, Any]] = []
+            for peer in ha_config.get("peers", []) or []:
+                if isinstance(peer, dict):
+                    if peer.get("node_id") == self._ha_node_id:
+                        continue
+                    self._active_peers.append(
+                        {
+                            "node_id": peer.get("node_id", ""),
+                            "ip_address": peer.get("ip_address", ""),
+                            "port": int(peer.get("port", 0)),
+                        }
+                    )
+                elif str(peer) != self._ha_node_id:
+                    self._active_peers.append({"node_id": str(peer), "ip_address": "", "port": 0})
+            self._aa_sync_interval = float(ha_config.get("state_sync_interval", 2.0))
+            self._state_sync_task = asyncio.create_task(self._peer_sync_loop())
+            logger.info(
+                f"#63 Active-Active 双主模式: node_id={self._ha_node_id} peers={len(self._active_peers)} "
+                f"sync_interval={self._aa_sync_interval}s (无选举, 双向同步 + owner-wins)"
+            )
         else:
             logger.info("P4 HA 未启用 — 单 Master 模式 (默认)")
 

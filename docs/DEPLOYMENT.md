@@ -22,9 +22,10 @@ fusion-multi-node 是 Fusion 生态的 **底层算力基座**: 将多台 Apple S
 | A. 单机 nohup | `./start.sh start` | 无 (手动拉起) | 否 | 开发/试用 |
 | B. 单机 launchd | `./start.sh install-launchd` | KeepAlive 自动重启 | 否 | 单机生产 (Mac) |
 | C. docker-compose | `docker compose up` | `restart:unless-stopped` | 是 (1 Master + N Agent) | 可信 LAN 小集群 |
-| D. 多 Master HA | `start(ha_config=...)` | 选举故障转移 | 是 | **技术预览**, 非生产 SLA |
+| D. 多 Master HA (standby) | `start(ha_config={mode:standby})` | 选举故障转移 | 是 | **技术预览**, 非生产 SLA |
+| E. Active-Active 双主 | `start(ha_config={mode:active-active})` | 双 master 均活跃 | 是 | v0.15.0, 无 Redis, 小集群 |
 
-默认 = 单 Master。模式 B/C 是推荐生产路径。模式 D 可选叠加, 但未经生产验证。
+默认 = 单 Master。模式 B/C 是推荐生产路径。模式 D/E 可选叠加, D 经选举故障转移, E 双活无选举 (owner-wins 收敛)。
 
 ## 模式 A — 单机 nohup
 
@@ -94,6 +95,42 @@ docker compose up -d --scale agent=2
 各 Master 节点设不同 `node_id`/`priority`, `peers` 列全集群 Master (含地址, 裸字符串仅 node_id 不可达)。leader 崩溃 → 选举转移 → standby 接管调度。配合 launchd/docker 双 Master 部署, 每节点各跑一份。
 
 **警告**: 技术预览, 非生产 SLA 验证。生产关键负载仍建议单 Master + launchd + 定期备份。
+
+## Active-Active 双主 (v0.15.0, #63)
+
+`ha.mode = "active-active"` — 两 master 同时活跃, 均接受任务提交 (无 standby 503), 无需 Redis。与上方 standby 选举模式**互斥** (`mode` 二选一):
+
+- **不启动选举**: active-active 下 `_election` 留 `None`, `_is_leader` 留 `True` → standby 守卫放行, 双 master 均派发。
+- **双向 peer-sync**: `_peer_sync_loop` (默认 `state_sync_interval=2.0s`) 推 nodes+kv+banned+epoch + 非终态任务到所有 `peers`, 两 master 各跑 = 双向收敛。
+- **owner-wins**: `ClusterTask.owner_master` 标归属 master, 仅归属 master 派发, 对端持镜像 (`assign_task` 对非自有任务返 False)。最终一致, 无强线性一致 (小集群部署足够)。
+- **任务 ID 唯一**: `master-1-<uuid>` 前缀 → 跨 master 不撞, agent P1-14 去重安全。
+- **节点角色亲和 + drain**: `NodeInfo.role` (`worker`/`general`/`heavy`) + `ClusterTask.tier`; heavy tier 软亲和 heavy 节点 (+0.15)。`POST /api/nodes/{id}/drain` (CLI `cluster drain|undrain <id>`) 排除节点承接新任务 (in-flight 继续), 对端 master 节点不受影响。
+
+**Active-Active 配置示例** (master-1, `~/.fusion/multi-node/config.json`):
+```json
+{
+  "ha": {
+    "mode": "active-active",
+    "node_id": "master-1",
+    "peers": [
+      {"node_id": "master-2", "ip_address": "10.0.0.2", "port": 11452}
+    ],
+    "state_sync_interval": 2.0
+  },
+  "node": {
+    "role": "general"
+  },
+  "parallel": {
+    "pipeline_enabled": false,
+    "pipeline_shard_roles": ["heavy"]
+  }
+}
+```
+master-2 镜像配置 (`node_id`/`peers` 互换)。两 master 各跑一份 (launchd/docker), 端口可同 11452 (不同主机) 或 11452/11453 (同机需隔离 HOME/端口)。
+
+**流量分发**: multi-node 不做 active-active 流量分发 (100% 本地, 不引 Redis/LB)。Redis 配额 + tier 优先队列 + Traefik active-active LB 为 fusion-gateway 部署依赖 (fusion-gateway #159), 在 multi-node 之上做流量切分。
+
+**drain 与维护**: `cluster drain <node_id>` → 节点不再接新任务, 等存量任务结束 → 停 agent → 维护 → `cluster undrain <node_id>` 恢复。drain 仅影响该 master 视图的新任务选择, 对端 master 节点照常服务。
 
 ## mTLS 节点互信 (生产必配)
 

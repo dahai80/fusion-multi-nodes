@@ -388,7 +388,13 @@ class ClusterSyncManager:
                 logger.error(f"同步循环处理失败: {model_name}, {e}")
 
     def collect_load_report(self) -> NodeLoadReport:
-        """采集本节点硬件负载。"""
+        """采集本节点硬件负载。
+
+        #64 修复: 原 system_profiler SPDisplaysDataType VRAM parse 是 `pass` no-op
+        → gpu_memory_*_gb 恒 0.0 (Apple Silicon 统一内存无独立 VRAM, 且 parse 没填字段)。
+        改抓本地 fusion-mlx /v1/health memory 块 (mx.metal.get_active_memory 派生),
+        底座未运行 → 0.0 (离线安全)。psutil RAM/disk/cpu 不变。
+        """
         try:
             import psutil
 
@@ -398,22 +404,17 @@ class ClusterSyncManager:
         except ImportError:
             logger.warning("psutil 未安装，负载报告不可用")
             return NodeLoadReport(node_id=self.node_id, reported_at=time.time())
+        # #64: 抓 MLX Metal 显存 (sync, 2s 超时, 底座未运行返 None → 0.0)。
+        from fusion_multi_node.agent.mlx_memory import fetch_mlx_memory_sync
+
+        _mlx_url = os.environ.get("FUSION_MLX_URL") or "http://localhost:11432"
+        _api_key = os.environ.get("FUSION_MLX_API_KEY", "")
         gpu_total = 0.0
         gpu_used = 0.0
-        try:
-            import subprocess
-
-            result = subprocess.run(
-                ["system_profiler", "SPDisplaysDataType"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            for line in result.stdout.splitlines():
-                if "VRAM" in line or "Total Number of Cores" in line:
-                    pass
-        except Exception:
-            pass
+        mlx_mem = fetch_mlx_memory_sync(_mlx_url, _api_key, timeout=2.0)
+        if mlx_mem:
+            gpu_total = mlx_mem["total_gb"]
+            gpu_used = mlx_mem["active_gb"]
         return NodeLoadReport(
             node_id=self.node_id,
             gpu_memory_used_gb=gpu_used,

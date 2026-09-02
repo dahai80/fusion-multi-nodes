@@ -55,7 +55,7 @@ class TestNodeAgentInit:
 class TestNodeAgentHardware:
     def test_collect_hardware_info(self):
         agent = NodeAgent()
-        info = agent.collect_hardware_info()
+        info = asyncio.run(agent.collect_hardware_info())
         assert info["cpu_cores"] > 0
         assert info["total_memory_gb"] > 0
         assert info["available_memory_gb"] > 0
@@ -139,24 +139,36 @@ class TestNodeAgentReportHardware:
 
     @pytest.mark.asyncio
     async def test_report_hardware_collects_off_event_loop(self):
-        # P1-10 (审计 §4.5): collect_hardware_info 同步阻塞须在 to_thread 里跑,
+        # P1-10 (审计 §4.5): collect_hardware_info 现 async, 其内同步阻塞段
+        # _ensure_static_hardware (system_profiler/ipconfig, 至 5s) 须在 to_thread 里跑,
         # 不在事件循环线程 — 验证调用线程 ≠ 当前事件循环线程。
         import threading
 
         loop_thread = threading.get_ident()
         seen = {}
 
-        def fake_collect():
+        def fake_static():
             seen["tid"] = threading.get_ident()
-            return MagicMock(node_id="n1")
+            return {
+                "node_id": "n1",
+                "hostname": "h",
+                "ip_address": "127.0.0.1",
+                "port": 11458,
+                "arch": "arm64",
+                "total_memory_gb": 16.0,
+                "available_memory_gb": 8.0,
+                "cpu_cores": 10,
+                "gpu_cores": 10,
+            }
 
         agent = NodeAgent()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_ac_class = _make_mock_client(mock_resp)
         with (
-            patch.object(agent, "collect_hardware_info", side_effect=fake_collect),
+            patch.object(agent, "_ensure_static_hardware", side_effect=fake_static),
             patch("httpx.AsyncClient", mock_ac_class),
+            patch.object(agent, "_collect_dynamic_load", new=AsyncMock(return_value={"metal_util": 0.0})),
         ):
             ok = await agent.report_hardware()
         assert ok is True
@@ -565,16 +577,16 @@ class TestNodeAgentLifecycle:
         agent.config.report_interval = 0.05
         call_count = 0
 
-        # R1: _hardware_report_loop 调 _collect_dynamic_load (纯 psutil),
+        # R1: _hardware_report_loop 调 _collect_dynamic_load (psutil + MLX 抓取),
         # 非 collect_hardware_info。mock 后者 loop 不触发 → 永不置 _running=False → hang。
         original_collect = agent._collect_dynamic_load
 
-        def mock_collect():
+        async def mock_collect():
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
                 agent._running = False
-            return original_collect()
+            return await original_collect()
 
         agent._collect_dynamic_load = mock_collect
 

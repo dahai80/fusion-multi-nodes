@@ -5,12 +5,31 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.14.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.15.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1347%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1356%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **🚀 v0.15.0 (2026-09-02) — Active-Active dual-master + real GPU load + pipeline gate (#63 #64 #65)**
+>
+> Three issues resolved:
+> - **#63 Active-Active dual-master** — `ha.mode = "active-active"` lets both masters run active and accept submits
+>   concurrently (no standby 503). Bi-directional peer-sync + owner-wins convergence, no Redis. Task ownership
+>   (`owner_master`) — only the owner master dispatches, peers hold mirrors. Cross-master task-ID uniqueness
+>   (`master-1-<uuid>`). Node-role affinity + drain (`POST /api/nodes/{id}/drain`, CLI `cluster drain|undrain`).
+> - **#64 Real GPU/Metal load** — `fetch_mlx_memory()` scrapes fusion-mlx `GET /v1/health` for real Metal memory
+>   (was a `pass` no-op → `gpu_memory_*_gb` always 0, `metal_util` VRAM_FIRST weight dead). Agent heartbeat now carries
+>   `metal_util` + gpu fields; `GET /api/v1/nodes/{id}/metrics` no longer `AttributeError`.
+> - **#65 Pipeline 404 gate** — `parallel.pipeline_enabled` (default `False`) early-rejects `mode=pipeline` with a clear
+>   upstream-missing 400 instead of a downstream 404; `pipeline_shard_roles` hard-filters by role; `404 → upstream_missing →
+>   FAILED` (non-retryable, does not trip the circuit breaker).
+>
+> 1356 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md). Redis/quota/LB deploy dependency tracked in
+> [fusion-gateway #159](https://github.com/dahai80/fusion-gateway/issues/159).
 
 ---
 
@@ -104,8 +123,8 @@
 
 | Module | Responsibility |
 |--------|---------------|
-| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, task auto-degradation, load-aware routing, task sharding, AST diff, FMP KV sync, real-tensor PIPELINE layer-split chain (to fusion-mlx `/distributed/*`, ✅upstream endpoints delivered issue #621/#630 closed; multi-node client stubs `load_shard`/`pipeline_step` wired, ⚠️real-model end-to-end verification pending long-term), master→agent dispatch loop, **H3 task persistence + crash recovery** (RUNNING/PENDING atomic disk write, auto-re-dispatch on crash restart). HA election wired to `start(ha_config=)` (off by default single Master; StandbyMaster class is a dead-code prototype). cloud_fallback scheduling path cut in v0.8.2 (100% local) |
-| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (upstream `/distributed/load_shard`+`pipeline_step` delivered issue #621 closed, b64.npy activates cross-node, ⚠️real-model end-to-end pending long-term) |
+| **Cluster Master** | Node discovery, resource scheduler, task lifecycle, KV cache pool, fault tolerance, task auto-degradation, load-aware routing (real GPU/Metal `metal_util` from #64), task sharding, FMP KV sync, real-tensor PIPELINE layer-split chain (to fusion-mlx `/distributed/*`, ✅upstream endpoints delivered issue #621/#630 closed; **#65 pipeline gate** `parallel.pipeline_enabled` default off, `pipeline_shard_roles` role-filter, 404→upstream_missing→FAILED non-retryable), master→agent dispatch loop, **H3 task persistence + crash recovery** (RUNNING/PENDING atomic disk write, auto-re-dispatch on crash restart). HA: **#63 Active-Active** `ha.mode="active-active"` (both masters active, bi-directional peer-sync, owner-wins, no Redis) + standby election wired to `start(ha_config=)` (off by default single Master). **Drain** (`POST /api/nodes/{id}/drain`, CLI `cluster drain|undrain`). cloud_fallback scheduling path cut in v0.8.2 (100% local) |
+| **Node Agent** | Per-machine daemon, hardware reporting, task execution, mDNS auto-discovery, pipeline_step (upstream `/distributed/load_shard`+`pipeline_step` delivered issue #621 closed, b64.npy activates cross-node, ⚠️real-model end-to-end pending long-term), **#64 real GPU/Metal load scrape** (`fetch_mlx_memory` → `metal_util` + gpu fields in heartbeat) |
 | **mDNS Discovery** | Bonjour/mDNS zero-config node discovery, manual IP join fallback |
 | **FMP Protocol** | Three-layer binary protocol, AES-GCM encryption, TCP long connection, circuit breaker, hop_count, FMP inbound server. ⚠️Starts but never used as dispatch transport (HTTP dispatch only) |
 | **Distributed MLX Bridge** | Pipeline/data parallelism, model sharding, Caveman compression, KV cache sharing. ✅Cross-node KV transport production-ready (GAP-7/#33, v0.11.0): `SyntheticKVTransport` default backend routes synthetic KVCacheEntry cross-node; real-tensor `MLXKVTransport` env-gated experimental bonus (`FUSION_KV_TENSOR_BACKEND=mlx`, awaits upstream #650) |

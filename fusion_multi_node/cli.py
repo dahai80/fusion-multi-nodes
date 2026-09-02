@@ -464,6 +464,22 @@ def cluster_pending():
         click.echo(f"  {p['node_id']:<20} {p.get('hostname', ''):<16} {p.get('ip_address', '')}")
 
 
+@cluster.command("drain")
+@click.argument("node_id")
+def cluster_drain(node_id: str):
+    """#63: 标记节点排水 (停止接新任务, 在途任务继续)。"""
+    asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/drain"))
+    click.echo(f"✅ 节点 {node_id} 已排水 (停止接新任务)")
+
+
+@cluster.command("undrain")
+@click.argument("node_id")
+def cluster_undrain(node_id: str):
+    """#63: 取消节点排水 (恢复接新任务)。"""
+    asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/undrain"))
+    click.echo(f"✅ 节点 {node_id} 已恢复接新任务")
+
+
 # ── 任务管理 ──
 
 

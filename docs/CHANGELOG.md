@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-09-02 — Active-Active dual-master + real GPU load + pipeline gate
+
+### Added — Active-Active dual-master (issue #63)
+- **`ha.mode = "active-active"`**: both masters run active and accept task submissions concurrently (no standby 503). No
+  election is started — `_election` stays `None`, `_is_leader` stays `True`, so the existing standby guards pass on both
+  masters. Bi-directional `_peer_sync_loop` (default 2.0s interval) pushes nodes + KV + banned + task state to all configured
+  peers via the existing `/api/ha/sync-tasks` + `/api/ha/sync-state` routes; both masters run the loop, so state converges in
+  both directions. Offline-safe, no Redis (the Redis/quota/LB deploy dependency is tracked in fusion-gateway #159).
+- **Task ownership (`ClusterTask.owner_master`)**: a task is owned by the master that accepted it. Only the owner master
+  dispatches; peers hold mirrors. `assign_task` returns `False` (owner-skip) for tasks whose `owner_master` is a peer.
+  `receive_synced_tasks` applies owner-wins — a master never lets a peer's sync overwrite a task it owns. Convergence is
+  eventually-consistent (owner-wins + single-owner-dispatch), acceptable for a small-fleet deploy without strong-linearizability.
+- **Task ID uniqueness**: active-active prefixes task IDs with the master's `node_id` (`master-1-<uuid>`) so cross-master IDs
+  never collide — keeps the agent P1-14 dedup safe even if both masters ever dispatch the same logical id.
+- **Node-role affinity + drain**: `NodeInfo.role` (`worker`/`general`/`heavy`) and `ClusterTask.tier` (`heavy`/`general`).
+  `LoadRouter` adds a soft affinity bonus (+0.15) to heavy-role nodes for heavy-tier tasks. `NodeInfo.draining` + new
+  `POST /api/nodes/{node_id}/drain` / `undrain` routes + CLI `cluster drain|undrain <node_id>` exclude a node from new-task
+  selection while in-flight tasks continue — a draining master's local node stops new dispatch; the peer keeps serving.
+- **Config**: `ha.mode` (`"standby"` default = current single-leader behavior, `"active-active"` opt-in), `node.role`. Peers
+  accept `{node_id, ip, port, priority}` dicts (existing shape).
+
+### Fixed — real GPU/Metal load (issue #64)
+- **VRAM parse was a no-op**: `cluster_sync.collect_load_report` had a `system_profiler SPDisplaysDataType` parse stubbed as
+  `pass`, so `NodeLoadReport.gpu_memory_*_gb` was always `0.0` and `LoadMetrics.metal_util` (VRAM_FIRST weight 0.2) was never
+  populated — VRAM_FIRST routing weight was dead. Fix: new `fusion_multi_node/agent/mlx_memory.py` `fetch_mlx_memory()` scrapes
+  fusion-mlx `GET /v1/health` (local loopback, offline-safe) for the real Metal memory block
+  (`mlx_active_bytes` / `mlx_cache_bytes` / `mlx_peak_bytes` / `total_bytes` / `oom_risk`), with a graceful `None` fallback on
+  connect error/timeout/non-200 so an offline MLX never blocks scheduling. `oom_risk` is read from the memory block first,
+  falling back to top-level (fusion-mlx exposes it at the top level of `/v1/health`).
+- **Agent heartbeat** now carries `metal_util` (active/total) + `gpu_memory_used_gb` / `gpu_memory_total_gb`; the master stores
+  them on `NodeInfo` and feeds `metal_util` into `LoadMetrics`. `GET /api/v1/nodes/{id}/metrics` no longer hits a
+  non-existent `_node_loads` attr (was `AttributeError`) — reads the real `_metrics`.
+
+### Fixed — pipeline 404 gate (issue #65, upstream-blocked)
+- **Pipeline-parallel `/distributed/*` returns 404** (fusion-mlx#621). The real dispatch path already hard-errored (task
+  FAILED), but with no 404-vs-other distinction, no config gate, and any node eligible. In-repo part: `parallel.pipeline_enabled`
+  (default `False`) — submitting `mode=pipeline` while disabled returns `400` with a clear upstream-missing message instead of
+  a downstream 404. `parallel.pipeline_shard_roles` (`["heavy"]` default) hard-filters candidate nodes by role when enabled.
+  `_execute_pipeline_step` maps a `404` to `{"upstream_missing": True, ...}`; master `_dispatch_pipeline` maps
+  `upstream_missing` to `FAILED` (non-retryable, not a transient node fault — does not trip the S1 circuit breaker or ban the
+  node). Upstream fusion-mlx#621 has since landed; the gate stays as a defensive default until operators explicitly enable it.
+
+### Tests
+- `test_active_active.py` (8): both-masters-accept-submit, task-id prefix uniqueness, mirror-not-redispatched (owner-skip),
+  owner-wins-not-overwritten, peer-sync propagates nodes+tasks, drain-excludes, heavy-tier affinity, standby regression
+  (mode=standby still 503s).
+- `test_pipeline_gate.py` (5): pipeline-disabled-rejects-submit (400), pipeline-enabled-passes-gate, shard-role-filter,
+  execute-pipeline-step-404 → upstream_missing, dispatch-pipeline upstream_missing → FAILED.
+- `test_mlx_memory.py` (6): parses memory block, no-key omits auth header, non-200 → None, missing-memory-block → None,
+  connect-error → None, sync-version parses.
+- `test_master_server.py::test_submit_task_pipeline`: fixed for the new gate (injects `pipeline_enabled=True` + broadened
+  `pipeline_shard_roles`).
+- Suite: 1356 passed, 0 failed, 14 skipped (E2E skip-gated on fusion-mlx/model availability). Ruff check + format clean.
+
+### Upstream
+- fusion-mlx #621 (pipeline `/distributed/*` API) — landed.
+- fusion-gateway #159 — multi-tenant Redis quota + tier priority queues + Traefik active-active LB (deploy plan §3), the
+  traffic-splitting authority above multi-node.
+
 ## [0.14.2] - 2026-09-02 — Containerized agent deep-health readiness fix
 
 ### Fixed
