@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2026-09-02 — Containerized agent deep-health readiness fix
+
+### Fixed
+- **Agent `/api/health/deep` readiness never reports ok in containers** (issue #60): the readiness probe — used by the
+  Docker healthcheck — never went healthy for containerized agents, leaving containers perpetually `(unhealthy)` despite the
+  agent registering online with the master. Three root causes, all in the deep-health MLX probe path:
+  1. **Wrong probe URL**: the handler resolved the MLX URL via `getattr(_backend, "base_url")`, but `FusionMLXBackend` stored
+     the resolved URL on `self._base_url` (underscore) — the attribute was `None`, so the probe fell back to
+     `localhost:{fusion_mlx_port}` (default `11432`, a gateway port, not the MLX inference port `11434`). In containers where
+     MLX runs on the host (`FUSION_MLX_URL=http://host.docker.internal:11434`), the probe hit the wrong address and failed.
+     Fix: expose a real `base_url` property returning the env-overridden `_base_url`; the probe now honors `FUSION_MLX_URL`.
+  2. **Missing api_key Bearer header**: the `/v1/models` probe omitted `Authorization: Bearer <api_key>`. With fusion-mlx auth
+     enabled, every probe returned `401`, so `fusion_mlx_ready` was always `False`. Fix: the deep-health probe,
+     `FusionMLXBackend.health()`, and `_get_mlx_version` all send the api_key Bearer header (resolved from the backend or
+     `FUSION_MLX_API_KEY`); header is omitted when no key is configured (anonymous probe, backward compatible).
+  3. **Local socket probe misclassified remote MLX as down**: `fusion_mlx_port` used a local `connect_ex` socket probe, which
+     is always `False` when MLX is on a remote/host address. Fix: when `backend_url` is non-local, use the HTTP probe result
+     for `fusion_mlx_port` instead of the local socket check.
+- Verified live: containerized agents now report `status: ok` / `fusion_mlx_ready: True`, containers go `(healthy)`, and the
+  master sees both agents online. Container E2E cross-register test passes.
+
+### Tests
+- `test_agent_server.py::test_health_deep_ok_remote_mlx_via_url` — asserts the probe targets `FUSION_MLX_URL` and carries the
+  `Bearer` api_key header in the container (remote-MLX) scenario.
+- `test_rate_pacer.py::test_health_probe_carries_api_key_bearer` /
+  `test_health_probe_no_key_omits_auth_header` — `FusionMLXBackend.health()` sends the Bearer header when a key is configured
+  and omits it (not an empty `Bearer`) when none is.
+- Suite: 1347 passed, 7 skipped (was 1344 + 3 new).
+
+### Changed
+- `pyproject.toml` / `__init__.py`: `0.14.2rc1` → `0.14.2` (RC → GA; this release adds the real issue #60 fix).
+
 ## [0.14.2-rc.1] - 2026-08-28 — Release Candidate
 
 > ⚠️ **RC release**: the v0.14.1 final baseline packaged as a release candidate. Content = HEAD (v0.14.0 enterprise 7 blockers + v0.14.1 TarSlip

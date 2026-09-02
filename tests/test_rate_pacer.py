@@ -174,3 +174,32 @@ class TestFusionMLXBackendPacing:
 
         with pytest.raises(RateLimitExhausted):
             await backend.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    @pytest.mark.asyncio
+    async def test_health_probe_carries_api_key_bearer(self, monkeypatch):
+        # issue #60: FusionMLXBackend.health() 探 /v1/models 须带 Bearer api_key —
+        # fusion-mlx 启用鉴权时无头恒 401, health() 恒 False 误判底座不健康。
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        backend = FusionMLXBackend(base_url="http://mlx-host:11434", api_key="fg-admin-key")
+        monkeypatch.setattr(backend, "_get_client", AsyncMock(return_value=mock_client))
+        assert await backend.health() is True
+        _, kwargs = mock_client.get.call_args
+        assert kwargs["headers"]["Authorization"] == "Bearer fg-admin-key"
+
+    @pytest.mark.asyncio
+    async def test_health_probe_no_key_omits_auth_header(self, monkeypatch):
+        # 无 api_key → 不发 Authorization 头 (回退匿名探测, 兼容未启鉴权的 fusion-mlx)。
+        monkeypatch.delenv("FUSION_MLX_API_KEY", raising=False)
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        backend = FusionMLXBackend(base_url="http://mlx-host:11434")
+        monkeypatch.setattr(backend, "_get_client", AsyncMock(return_value=mock_client))
+        assert await backend.health() is True
+        _, kwargs = mock_client.get.call_args
+        # _dist_headers 在无 key 时不含 Authorization (仅 Content-Type)。
+        assert "Authorization" not in kwargs["headers"]

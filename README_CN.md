@@ -5,16 +5,24 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.14.2rc1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.14.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1343%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1347%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.14.2rc1。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.14.2。
 
 ---
+
+> **🐛 v0.14.2（2026-09-02）— 容器化 agent 深度健康就绪修复（issue #60）**
+>
+> agent `/api/health/deep` 就绪探测（Docker healthcheck 使用）在容器化 agent 上永不上报 ok，导致容器永远
+> `(unhealthy)`，尽管 agent 已在 master 注册在线。三处修复：(1) 探测现遵从 `FUSION_MLX_URL`（此前回退
+> `localhost:11432` 网关端口）；(2) `/v1/models` 探测现带 `Authorization: Bearer` api_key 头（启用鉴权时此前
+> 恒 `401`）；(3) 远程/宿主 MLX 不再被本地 socket 检查误判为下线。容器化 agent 现上报 `status: ok` 并转
+> `(healthy)`。1347 测试，ruff 通过。见 [CHANGELOG](docs/CHANGELOG.md)。
 
 > **📦 v0.14.2-rc.1（Release Candidate）— 2026-08-28**
 >

@@ -355,20 +355,33 @@ class AgentServer:
             except Exception:
                 checks["disk_ok"] = True
                 checks["mem_ok"] = True
-            checks["fusion_mlx_port"] = bool(self.agent._check_service(self.agent.config.fusion_mlx_port))
+            # issue #60: 解析 backend.base_url (含 FUSION_MLX_URL env 覆盖)。
+            # 容器化部署 MLX 在宿主机 (host.docker.internal:11434), 非本机 localhost:
+            # 旧实现 getattr(_backend,"base_url") 恒 None → 回退 localhost:{fusion_mlx_port} →
+            # /v1/models 探错地址恒 false → readiness 永 degraded → healthcheck 永 unhealthy。
+            import httpx
+
+            backend_url = getattr(self.agent._backend, "base_url", None) or (
+                f"http://localhost:{self.agent.config.fusion_mlx_port}"
+            )
+            # /v1/models 须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (issue #60)。
+            _api_key = getattr(self.agent._backend, "api_key", "") or os.environ.get("FUSION_MLX_API_KEY", "")
+            _probe_headers = {"Authorization": f"Bearer {_api_key}"} if _api_key else {}
             fusion_mlx_ok = False
             try:
-                import httpx
-
-                url = (
-                    getattr(self.agent._backend, "base_url", None)
-                    or f"http://localhost:{self.agent.config.fusion_mlx_port}"
-                )
                 async with httpx.AsyncClient(timeout=2.0) as c:
-                    resp = await c.get(f"{url}/v1/models")
+                    resp = await c.get(f"{backend_url}/v1/models", headers=_probe_headers)
                     fusion_mlx_ok = resp.status_code == 200
             except Exception as e:
                 logger.debug(f"agent readiness fusion-mlx 探测失败: {e}")
+            # fusion_mlx_port: MLX 可达性信号 (非纯本地 socket 探测)。
+            # backend_url 指非本机 (容器/远程 host) 时, 本地 socket 探测恒 false —
+            # 用 HTTP 探测结果代之, 否则容器场景 readiness 恒 degraded (issue #60)。
+            is_local_mlx = "localhost" in backend_url or "127.0.0.1" in backend_url
+            if is_local_mlx:
+                checks["fusion_mlx_port"] = bool(self.agent._check_service(self.agent.config.fusion_mlx_port))
+            else:
+                checks["fusion_mlx_port"] = fusion_mlx_ok
             checks["fusion_mlx_ready"] = fusion_mlx_ok
             ok = all(checks.values())
             status = "ok" if ok else "degraded"
