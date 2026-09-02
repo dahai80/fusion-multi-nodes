@@ -5,14 +5,22 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.14.2rc1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.14.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1343%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1347%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
+
+> **🐛 v0.14.2 (2026-09-02) — Containerized agent deep-health readiness fix (issue #60)**
+>
+> The agent `/api/health/deep` readiness probe — used by the Docker healthcheck — never went healthy for containerized agents,
+> leaving containers perpetually `(unhealthy)` despite registering online. Three fixes: (1) probe now honors `FUSION_MLX_URL`
+> (was falling back to `localhost:11432`, a gateway port); (2) the `/v1/models` probe now sends the `Authorization: Bearer`
+> api_key header (was getting `401` with auth enabled); (3) remote/host MLX no longer misclassified as down by the local socket
+> check. Containerized agents now report `status: ok` and go `(healthy)`. 1347 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md).
 
 > **📦 v0.14.2-rc.1 (Release Candidate) — 2026-08-28**
 >

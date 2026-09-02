@@ -150,6 +150,37 @@ class TestHealthEndpoint:
         assert data["checks"]["fusion_mlx_ready"] is True
         assert data["status"] == "ok"
 
+    @pytest.mark.asyncio
+    async def test_health_deep_ok_remote_mlx_via_url(self, mock_agent, mock_kv_manager):
+        # issue #60: 容器化部署 — MLX 在宿主机 (host.docker.internal:11434), 非本机 localhost。
+        # backend.base_url 经 FUSION_MLX_URL env 指向非本机 → readiness 须以 HTTP 探测为准,
+        # 不因本地 socket 探测 localhost:11434 失败而恒 degraded (旧 bug)。
+        # 且 /v1/models 探测须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (同 issue)。
+        mock_agent._check_service.return_value = False  # 容器内本地 socket 探测必失败
+        mock_agent._backend.base_url = "http://host.docker.internal:11434"
+        mock_agent._backend.api_key = "fg-admin-key"
+        server = AgentServer(agent=mock_agent, kv_manager=mock_kv_manager, shared_token=TEST_TOKEN)
+        transport = ASGITransport(app=server.app)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        with patch("httpx.AsyncClient", MagicMock(return_value=mock_client)):
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.get("/api/health/deep")
+        data = resp.json()
+        # 探测 URL 取 backend.base_url (非本机), 非 localhost:{fusion_mlx_port}。
+        call_args, call_kwargs = mock_client.get.call_args
+        assert call_args[0] == "http://host.docker.internal:11434/v1/models"
+        # 探测须带 Bearer api_key — 漏头则 fusion-mlx 鉴权 401 (issue #60 第二半)。
+        assert call_kwargs["headers"]["Authorization"] == "Bearer fg-admin-key"
+        # 非本机 MLX → fusion_mlx_port 取 HTTP 探测结果 (True), 不取本地 socket (False)。
+        assert data["checks"]["fusion_mlx_port"] is True
+        assert data["checks"]["fusion_mlx_ready"] is True
+        assert data["status"] == "ok"
+
 
 class TestExecuteEndpoint:
     @pytest.mark.asyncio

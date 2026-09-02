@@ -95,6 +95,18 @@ class FusionMLXBackend(InferenceBackend):
             self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
 
+    @property
+    def base_url(self) -> str:
+        # 暴露解析后的 base_url (含 FUSION_MLX_URL env 覆盖) — deep-health / readiness
+        # 探测据此拼 /v1/models URL, 不再回退 localhost:{fusion_mlx_port} (issue #60)。
+        return self._base_url
+
+    @property
+    def api_key(self) -> str:
+        # 暴露解析后的 api_key (含 FUSION_MLX_API_KEY env) — deep-health / readiness
+        # /v1/models 探测须带 Bearer, fusion-mlx 启用 api_key 时无头恒 401 (issue #60)。
+        return self._api_key
+
     def _dist_headers(self) -> dict[str, str]:
         """fusion-mlx /distributed/* 鉴权头 — api_key Bearer。"""
         headers = {"Content-Type": "application/json"}
@@ -230,7 +242,8 @@ class FusionMLXBackend(InferenceBackend):
     async def health(self) -> bool:
         try:
             client = await self._get_client()
-            resp = await client.get(f"{self._base_url}/v1/models", timeout=3.0)
+            # /v1/models 须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (issue #60)。
+            resp = await client.get(f"{self._base_url}/v1/models", timeout=3.0, headers=self._dist_headers())
             return resp.status_code == 200
         except Exception:
             return False
@@ -458,7 +471,10 @@ class NodeAgent:
         """获取 fusion-mlx 底座版本。"""
         try:
             _mlx_url = os.environ.get("FUSION_MLX_URL") or f"http://localhost:{self.config.fusion_mlx_port}"
-            resp = httpx.get(f"{_mlx_url}/v1/models", timeout=3.0)
+            # /v1/models 须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (issue #60)。
+            _api_key = self.config.fusion_mlx_api_key or os.environ.get("FUSION_MLX_API_KEY", "")
+            _headers = {"Authorization": f"Bearer {_api_key}"} if _api_key else {}
+            resp = httpx.get(f"{_mlx_url}/v1/models", timeout=3.0, headers=_headers)
             if resp.status_code == 200:
                 return "fusion-mlx running"
         except Exception:
