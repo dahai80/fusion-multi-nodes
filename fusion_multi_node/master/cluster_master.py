@@ -110,6 +110,9 @@ class NodeInfo:
     gpu_memory_total_gb: float = 0.0
     # #63: 节点角色亲和 + drain
     draining: bool = False
+    # #73: 本机 fusion-sv supervisor 可用 (agent 心跳上报, SupervisorBridge.call ping)。
+    # master 聚合供 /api/nodes 展示 + 网关/操作员据以决定 supervisor 协调可达性。
+    supervisor_available: bool = False
 
     @property
     def score(self) -> float:
@@ -250,6 +253,19 @@ class ClusterMaster:
         # tenant_max_concurrent=0 不限; 默认 4 (DEFAULT_CONFIG scheduling)。
         self._pending_queue: list[ClusterTask] = []
         self._tenant_max_concurrent = 4
+        # #74: per-tenant 并发配额覆盖 (fusion-identity opt-in 时按 tid 设)。
+        # 空 dict → 全用 _tenant_max_concurrent 全局 (离线默认)。持 _tasks_lock 守护。
+        self._tenant_quotas: dict[str, int] = {}
+        # #71 幂等键: X-Idempotency-Key → (task_id, expires_at)。TTL 到期访问时惰性清除。
+        # 持 _tasks_lock 守护。上限 10000 防内存泄漏 (满则丢最旧)。
+        self._idempotency_keys: dict[str, tuple[str, float]] = {}
+        self._idempotency_ttl: float = 86400.0
+        self._MAX_IDEMPOTENCY_KEYS = 10000
+        # #69: drain 长任务阈值 — timeout 超此值的在途任务标记 long_task_active, --wait 超时。
+        self._drain_long_task_threshold: float = 300.0
+        # #72: fencing token — leader 当前期, 派发头注入 X-Fencing-Token, agent 据此拒过期 master。
+        # 单 Master/active-active = 0 (永不拒, 向后兼容)。
+        self._fencing_token: int = 0
         # M3-03 选举
         self._election: MasterElection | None = None
         self._is_leader = True
@@ -258,6 +274,9 @@ class ClusterMaster:
         self._ha_node_id: str = ""
         self._active_peers: list[dict[str, Any]] = []
         self._aa_sync_interval: float = 2.0
+        # #72: 最近一次从 leader 收到状态同步的时刻 (receive_synced_state 更新)。
+        # /api/nodes cluster_view 据此判定 standby 视图是否在同步窗口内 (权威)。
+        self._last_leader_sync: float = 0.0
         # P1 派发: Master→Agent /api/execute 投递。惰性复用 httpx + 集群 token
         # (与 master_server cancel 通知同 token, agent BearerAuthMiddleware 校验)。
         self._dispatch_token: str | None = None
@@ -649,6 +668,7 @@ class ClusterMaster:
         total_memory_gb: float | None = None,
         available_memory_gb: float | None = None,
         active_tasks: int | None = None,
+        supervisor_available: bool | None = None,
     ) -> bool:
         """加锁更新节点心跳 — 禁止路由层裸改 node 字段 (与 _health_check_loop 竞态)。"""
         async with self._nodes_lock:
@@ -662,6 +682,8 @@ class ClusterMaster:
                 node.available_memory_gb = available_memory_gb
             if active_tasks is not None:
                 node.active_tasks = active_tasks
+            if supervisor_available is not None:
+                node.supervisor_available = supervisor_available
             if node.status == NodeStatus.OFFLINE:
                 node.status = NodeStatus.ONLINE
                 logger.info(f"节点恢复上线: {node_id}")
@@ -799,10 +821,12 @@ class ClusterMaster:
         metrics: LoadMetrics,
         gpu_memory_used_gb: float | None = None,
         gpu_memory_total_gb: float | None = None,
+        supervisor_available: bool | None = None,
     ) -> None:
         """更新节点负载指标（由 Worker 上报调用）。
 
         #64: gpu_memory_*_gb 由 agent 心跳上报真实 MLX Metal 显存, 存 NodeInfo 供检视端点读取。
+        #73: supervisor_available 由 agent 心跳上报 (SupervisorBridge.call ping fusion-sv status)。
         """
         async with self._nodes_lock:
             node = self.nodes.get(node_id)
@@ -818,6 +842,8 @@ class ClusterMaster:
                 node.gpu_memory_used_gb = gpu_memory_used_gb
             if gpu_memory_total_gb is not None:
                 node.gpu_memory_total_gb = gpu_memory_total_gb
+            if supervisor_available is not None:
+                node.supervisor_available = supervisor_available
             logger.debug(
                 f"节点负载更新: {node_id} uma={metrics.uma_used_ratio:.2f} "
                 f"metal={metrics.metal_util:.2f} gpu={node.gpu_memory_used_gb:.1f}/{node.gpu_memory_total_gb:.1f}GB"
@@ -833,6 +859,47 @@ class ClusterMaster:
             node.draining = draining
             logger.info(f"节点 drain 状态: {node_id} draining={draining}")
             return True
+
+    async def _inflight_count_for_node(self, node_id: str) -> int:
+        """#69: 统计节点上在途任务数 (RUNNING 且 assigned_nodes 含该节点)。持 _tasks_lock。"""
+        async with self._tasks_lock:
+            return sum(
+                1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING and node_id in (t.assigned_nodes or [])
+            )
+
+    async def drain_status(self, node_id: str) -> dict[str, Any] | None:
+        """#69: drain 状态契约 — {draining, in_flight, ready, long_task_active}。
+
+        ready = draining AND in_flight==0 (supervisor 等待此信号再停服务)。
+        long_task_active = 有在途任务 timeout_seconds > LONG_TASK_THRESHOLD (MVP refuse-long 信号)。
+        节点不存在 → None。
+        """
+        threshold = self._drain_long_task_threshold
+        async with self._nodes_lock:
+            node = self.nodes.get(node_id)
+            if not node:
+                logger.warning(f"drain_status: 节点不存在 {node_id}")
+                return None
+            draining = node.draining
+        in_flight = await self._inflight_count_for_node(node_id)
+        long_task_active = False
+        async with self._tasks_lock:
+            for t in self.tasks.values():
+                if (
+                    t.status == TaskStatus.RUNNING
+                    and node_id in (t.assigned_nodes or [])
+                    and t.timeout_seconds > threshold
+                ):
+                    long_task_active = True
+                    break
+        ready = draining and in_flight == 0
+        return {
+            "node_id": node_id,
+            "draining": draining,
+            "in_flight": in_flight,
+            "ready": ready,
+            "long_task_active": long_task_active,
+        }
 
     # ── 资源调度 ──
 
@@ -955,21 +1022,96 @@ class ClusterMaster:
             user = ""
         return sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING and (t.user or "") == user)
 
+    async def set_tenant_quota(self, tid: str, concurrent: int) -> None:
+        """#74: 设 per-tenant 并发配额 (fusion-identity opt-in 时调)。0=不限。
+
+        持 _tasks_lock 守护 _tenant_quotas。master_server submit 路由解析 user 后注入。
+        """
+        async with self._tasks_lock:
+            if concurrent <= 0:
+                self._tenant_quotas.pop(tid, None)
+            else:
+                self._tenant_quotas[tid] = concurrent
+            logger.info(f"#74 per-tenant 配额设置: tid={tid} concurrent={concurrent}")
+
+    def _tenant_limit_for(self, user: str) -> int:
+        """#74: 取该租户并发上限 — per-tenant 覆盖优先, 否则全局 _tenant_max_concurrent。锁内调用。"""
+        if user and user in self._tenant_quotas:
+            return self._tenant_quotas[user]
+        return self._tenant_max_concurrent
+
     def configure_scheduling(
         self,
         tenant_max_concurrent: int,
         max_pending_queue: int | None = None,
+        idempotency_ttl_seconds: float | None = None,
+        drain_long_task_threshold: float | None = None,
     ) -> None:
         """P1-H: 设置租户并发配额 (0=不限)。供 CLI 从 ClusterConfig 注入。
 
         P1-19: max_pending_queue = 优先级队列长度上限 (0=不限), 满则 submit 拒入队。
         None = 保持当前值 (向后兼容旧调用只传 tenant_max_concurrent)。
+        #71: idempotency_ttl_seconds = 幂等键存活秒, 过期键复用即新任务。None = 保持默认 86400。
         """
         self._tenant_max_concurrent = max(0, int(tenant_max_concurrent))
         logger.info(f"P1-H 租户并发配额: {self._tenant_max_concurrent} (0=不限)")
         if max_pending_queue is not None:
             self._MAX_PENDING_QUEUE = max(0, int(max_pending_queue))
             logger.info(f"P1-19 优先级队列上限: {self._MAX_PENDING_QUEUE} (0=不限)")
+        if idempotency_ttl_seconds is not None:
+            self._idempotency_ttl = max(0.0, float(idempotency_ttl_seconds))
+            logger.info(f"#71 幂等键 TTL: {self._idempotency_ttl}s")
+        if drain_long_task_threshold is not None:
+            self._drain_long_task_threshold = max(0.0, float(drain_long_task_threshold))
+            logger.info(f"#69 drain 长任务阈值: {self._drain_long_task_threshold}s")
+
+    # ── #71 幂等键 ──
+
+    async def try_idempotency(self, key: str) -> str | None:
+        """命中幂等键 → 返回已存在 task_id (不新建任务); 未命中/已过期/任务已终态 → None。
+
+        持 _tasks_lock。访问时惰性清除过期键。终态任务不命中 (允许同键复用重试)。
+        """
+        if not key:
+            return None
+        now = time.time()
+        async with self._tasks_lock:
+            entry = self._idempotency_keys.get(key)
+            if entry is not None:
+                task_id, expires_at = entry
+                if now >= expires_at:
+                    del self._idempotency_keys[key]
+                    logger.debug(f"#71 幂等键过期清除: key={key!r}")
+                    return None
+                task = self.tasks.get(task_id)
+                if task is not None and task.status in (
+                    TaskStatus.COMPLETED,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                    TaskStatus.TIMEOUT,
+                ):
+                    del self._idempotency_keys[key]
+                    logger.info(
+                        f"#71 幂等键关联任务已终态, 允许复用: key={key!r} task={task_id} status={task.status.value}"
+                    )
+                    return None
+                st = task.status.value if task else "gone"
+                logger.info(f"#71 幂等命中: key={key!r} → task_id={task_id} status={st}")
+                return task_id
+            return None
+
+    async def register_idempotency(self, key: str, task_id: str) -> None:
+        """登记幂等键 → task_id 映射。持 _tasks_lock。满上限丢最旧。"""
+        if not key:
+            return
+        now = time.time()
+        async with self._tasks_lock:
+            if len(self._idempotency_keys) >= self._MAX_IDEMPOTENCY_KEYS and key not in self._idempotency_keys:
+                oldest = next(iter(self._idempotency_keys))
+                del self._idempotency_keys[oldest]
+                logger.warning(f"#71 幂等键达上限 {self._MAX_IDEMPOTENCY_KEYS}, 丢弃最旧: key={oldest!r}")
+            self._idempotency_keys[key] = (task_id, now + self._idempotency_ttl)
+            logger.debug(f"#71 幂等键登记: key={key!r} → task_id={task_id} ttl={self._idempotency_ttl}s")
 
     # ── F3 (#27): /v1/chat/completions 轻量代理租户配额 ──
 
@@ -977,22 +1119,23 @@ class ClusterMaster:
         """尝试占用一租户在途推理槽。超配额返 False (调用方 429)。
 
         与 _running_count_for_user 不同: chat 代理不建任务 (同步直返), 不进 self.tasks,
-        故用独立计数器。配额复用 _tenant_max_concurrent (0=不限)。锁内纯计数无 await, 安全。
+        故用独立计数器。配额复用 per-tenant (_tenant_limit_for, 0=不限)。锁内纯计数无 await, 安全。
         """
-        if self._tenant_max_concurrent == 0:
+        limit = self._tenant_limit_for(user)
+        if limit == 0:
             return True
         uid = user or ""
         async with self._chat_lock:
             current = self._inflight_chat.get(uid, 0)
-            if current >= self._tenant_max_concurrent:
-                logger.info(f"chat 代理租户配额满: user={uid!r} {current}/{self._tenant_max_concurrent}")
+            if current >= limit:
+                logger.info(f"chat 代理租户配额满: user={uid!r} {current}/{limit}")
                 return False
             self._inflight_chat[uid] = current + 1
             return True
 
     async def release_chat_slot(self, user: str) -> None:
         """释放一租户在途推理槽 (finally 调用, 防泄漏)。配额 0=不限时空操作。"""
-        if self._tenant_max_concurrent == 0:
+        if self._tenant_limit_for(user) == 0:
             return
         uid = user or ""
         async with self._chat_lock:
@@ -1105,10 +1248,11 @@ class ClusterMaster:
                 logger.debug(f"任务已分配，跳过: {task.task_id}")
                 return True
             # P1-H 租户配额: 该租户 RUNNING 任务达上限 → 入优先级队列 (非 503)。
-            # 0 = 不限。队列内任务重派时 _drain_pending_locked 已持有判断, 此处仅首入口拦截。
-            if self._tenant_max_concurrent > 0:
+            # 0 = 不限。#74: per-tenant 覆盖优先 (_tenant_limit_for), 否则全局。
+            limit = self._tenant_limit_for(task.user)
+            if limit > 0:
                 running = self._running_count_for_user(task.user)
-                if running >= self._tenant_max_concurrent:
+                if running >= limit:
                     if task.task_id in {t.task_id for t in self._pending_queue}:
                         logger.debug(f"P1-H 任务已在队列, 跳过重复入队: {task.task_id}")
                         return True
@@ -1412,6 +1556,15 @@ class ClusterMaster:
                 reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
                 errors.append(f"{nid}: {reason}: {r.get('error', '')}")
                 logger.info(f"节点 {nid} {reason} ({task.task_id}), 不计熔断不重试: {r.get('error', '')[:120]}")
+            elif isinstance(r, dict) and r.get("fencing_rejected"):
+                # #72: agent 拒过期 master 派发 (incoming fencing_token < agent last)。
+                # 旧 master 复活 (partition-heal) 派发被 agent 拒 = 逻辑失败, 不可重试
+                # (重试同过期 token 仍被拒); 不 report_fault (节点健康, 仅 master 过期)。
+                errors.append(f"{nid}: 过期 master 派发被拒 (fencing_rejected): {r.get('error', '')}")
+                logic_fail = True
+                logger.warning(
+                    f"#72 过期 master 派发被节点 {nid} 拒 (fencing_rejected, 不重试): {r.get('error', '')[:120]}"
+                )
             elif isinstance(r, dict) and "error" in r:
                 # C9: agent 内部错误 (OOM/坏模型) 返 200+ok+error — 对熔断器可见
                 errors.append(f"{nid}: {r['error']}")
@@ -1540,6 +1693,16 @@ class ClusterMaster:
                 reason = "去重阻塞" if r.get("dedup_blocked") else "沙箱阻塞"
                 await self._finalize_task(task, success=False, error=f"流水线步骤 {nid} {reason}: {r.get('error', '')}")
                 return
+            if isinstance(r, dict) and r.get("fencing_rejected"):
+                # #72: 流水线段被 agent 拒过期 master 派发 = 不可重试 FAILED (重试同过期 token 仍被拒)。
+                await self._finalize_task(
+                    task,
+                    success=False,
+                    error=f"流水线步骤 {nid}: 过期 master 派发被拒 (fencing_rejected): {r.get('error', '')}",
+                )
+                _err = r.get("error", "")[:120]
+                logger.warning(f"#72 流水线步骤 {nid} fencing_rejected (过期 master, 不重试): {_err}")
+                return
             if isinstance(r, dict) and r.get("upstream_missing"):
                 # #65: 上游 /distributed/* 未实现 (fusion-mlx#621) → 不可重试 FAILED, 明确报错。
                 await self._finalize_task(
@@ -1641,8 +1804,17 @@ class ClusterMaster:
                 }
                 # P1-3 (审计 §3.7): HTTP 派发路径可选 PII 脱敏 (config security.http_pii_scrub, 默认关)。
                 payload = self._scrub_payload_text_fields(payload)
+            # #72: 注入 fencing token + leader id, agent 据此拒过期 master 派发 (stale-after-partition)。
+            payload["fencing_token"] = self._fencing_token
+            payload["leader_id"] = self._ha_node_id or "master"
             url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/execute")
-            headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master", "X-Node-Role": "master"}
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "X-Node-Id": "master",
+                "X-Node-Role": "master",
+                "X-Fencing-Token": str(self._fencing_token),
+                "X-Leader-Id": self._ha_node_id or "master",
+            }
             # P1-13 (审计 §5.4): 单请求 HTTP 超时随 task.timeout_seconds, 不再用客户端默认固定 300s。
             # 设为 task 超时 + 缓冲, 让任务级超时 (_check_task_timeouts → TIMEOUT+重试) 先于 HTTP 死代理兜底触发;
             # >300s 任务不再被 HTTP 提前掐断误判 FAILED 无重试。下限 30s 防极小超时。
@@ -1693,6 +1865,8 @@ class ClusterMaster:
         """
         # P1-11: 锁内仅快照, 落盘 (fsync) 移出锁外 (审计 §4.2)。
         _snapshot: list[dict[str, Any]] | None = None
+        # #74: 收集终态信息供锁外上报用量 (fusion-identity opt-in 时 best-effort, 不阻塞调度)。
+        _usage_report: tuple[str, str, bool] | None = None
         async with self._nodes_lock:
             async with self._tasks_lock:
                 t = self.tasks.get(task.task_id)
@@ -1714,6 +1888,7 @@ class ClusterMaster:
                     _snapshot = self._persist_tasks_locked()  # H3 终态快照 (落盘移出锁外)
                     logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
                     self._emit_task_event(t, "completed")
+                    _usage_report = (t.user or "", t.model_name or "", True)
                 # P3-29: 部分成功 → PARTIAL 终态 (不重试, 保留部分结果)
                 elif partial:
                     t.status = TaskStatus.PARTIAL
@@ -1738,8 +1913,29 @@ class ClusterMaster:
                     _snapshot = self._persist_tasks_locked()  # H3 终态快照 (落盘移出锁外)
                     logger.info(f"派发回填: {t.name} ({t.task_id}) → {t.status.value}")
                     self._emit_task_event(t, "failed", error=error)
+                    _usage_report = (t.user or "", t.model_name or "", False)
         if _snapshot is not None:
             await asyncio.to_thread(self._write_task_store, _snapshot)
+        # #74: fusion-identity opt-in 时 best-effort 上报用量 (锁外, 不阻塞调度, 失败仅日志)。
+        if _usage_report is not None:
+            self._report_usage_best_effort(*_usage_report)
+
+    def _report_usage_best_effort(self, user: str, model_name: str, success: bool) -> None:
+        """#74: 上报用量到 fusion-identity (opt-in)。锁外 best-effort, 失败仅日志不抛。"""
+        from fusion_multi_node.security.identity_provider import get_identity_provider
+
+        identity = get_identity_provider()
+        if identity is None or not identity.enabled or not user:
+            return
+        metric = "tasks_completed" if success else "tasks_failed"
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            asyncio.create_task(asyncio.to_thread(identity.report_usage, user, metric, 1, model_name, user))
+        except Exception as e:
+            logger.warning(f"#74 用量上报调度失败 (best-effort, 忽略): {e}")
 
     async def _snapshot_nodes(self, node_ids: list[str]) -> dict[str, NodeInfo]:
         """快照节点 (深拷贝引用, 派发期间不被 heartbeat 改字段影响)。"""
@@ -2452,6 +2648,7 @@ class ClusterMaster:
             "gpu_memory_used_gb": n.gpu_memory_used_gb,
             "gpu_memory_total_gb": n.gpu_memory_total_gb,
             "draining": n.draining,
+            "supervisor_available": n.supervisor_available,
         }
 
     def _node_from_dict(self, d: dict[str, Any]) -> NodeInfo:
@@ -2483,6 +2680,7 @@ class ClusterMaster:
             gpu_memory_used_gb=float(d.get("gpu_memory_used_gb", 0.0)),
             gpu_memory_total_gb=float(d.get("gpu_memory_total_gb", 0.0)),
             draining=bool(d.get("draining", False)),
+            supervisor_available=bool(d.get("supervisor_available", False)),
         )
 
     def _kv_to_dict(self, e: KVCacheEntry) -> dict[str, Any]:
@@ -2517,6 +2715,8 @@ class ClusterMaster:
         nodes_data = state.get("nodes", [])
         kv_data = state.get("kv_cache", [])
         banned_data = state.get("banned_nodes", {})
+        # #72: 记录最近一次 leader 状态同步时刻 (供 /api/nodes cluster_view 判定)。
+        self._last_leader_sync = time.time()
 
         # nodes 域: 合并节点表 + banned + fault_counts (同受 _nodes_lock)。
         async with self._nodes_lock:
@@ -2756,7 +2956,12 @@ class ClusterMaster:
 
     def _on_elected_leader(self) -> None:
         self._is_leader = True
-        logger.info("本节点被选举为 Leader")
+        # #72: 记录当前 fencing token, 派发头注入, agent 据此拒过期 master 派发。
+        if self._election is not None:
+            self._fencing_token = self._election.current_fencing_token
+            logger.info(f"本节点被选举为 Leader (fencing_token={self._fencing_token})")
+        else:
+            logger.info("本节点被选举为 Leader")
 
     def _on_demoted_from_leader(self) -> None:
         self._is_leader = False
@@ -3396,6 +3601,31 @@ class ClusterMaster:
         """节点表快照 (nodes 域只读) — 供外部 (master_server) 迭代用, 避免裸读 self.nodes。"""
         async with self._nodes_lock:
             return list(self.nodes.values())
+
+    def membership_view(self) -> dict[str, Any]:
+        """#72: 本 master 成员视图权威性判定 — 供 /api/nodes 附加 cluster_view/partitioned。
+
+        - 单 Master (_election is None, _is_leader True): cluster_view=True, partitioned=False (权威)。
+        - Active-Active (_ha_mode active-active, 无选举): cluster_view=True (双主均接受派发, owner-wins),
+          partitioned=False (非仲裁模式, 无脑裂概念)。
+        - Standby HA leader (_election 配置 + _is_leader): cluster_view=True (leader 权威), partitioned=False。
+        - Standby HA follower 且 leader_known (收到过 leader 心跳/同步): cluster_view=True
+          (视图从 leader 同步, 在 _aa_sync_interval*3 窗口内视为权威), partitioned=False。
+        - Standby HA follower 且非 leader_known (选举空窗 / 脑裂少数派): cluster_view=False,
+          partitioned=True (无法达仲裁, /api/nodes 仅本地视图, 客户端应全局写禁用)。
+        """
+        # 单 Master / active-active: 始终权威, 非脑裂。
+        if self._election is None:
+            return {"cluster_view": True, "partitioned": False}
+        # HA standby 模式
+        if self._is_leader:
+            return {"cluster_view": True, "partitioned": False}
+        # follower: leader 已确定 + 最近在同步窗口内 → 视图权威
+        if self._election.leader_known:
+            sync_fresh = (time.time() - self._last_leader_sync) <= max(self._aa_sync_interval * 3, 10.0)
+            return {"cluster_view": sync_fresh, "partitioned": not sync_fresh}
+        # follower 且 leader 未知 (选举空窗 / 少数派脑裂) → 非权威, 标 partitioned
+        return {"cluster_view": False, "partitioned": True}
 
     async def snapshot_tasks(self) -> list[ClusterTask]:
         """任务表快照 (tasks 域只读) — 供外部迭代用, 避免裸读 self.tasks。"""

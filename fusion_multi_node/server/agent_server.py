@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -144,6 +145,10 @@ class ExecuteRequest(BaseModel):
     max_tokens: int = 2048
     temperature: float = 0.7
     extra: dict[str, Any] = {}
+    # #72: fencing token + leader id — agent 据此拒过期 master 派发 (partition-heal stale master)。
+    # 单 master/active-active = 0 (永不拒, 向后兼容)。
+    fencing_token: int = 0
+    leader_id: str = ""
 
 
 class ChatCompletionsRequest(BaseModel):
@@ -417,6 +422,9 @@ class AgentServer:
                 "model": req.model_name,
                 "model_name": req.model_name,
                 "params": params,
+                # #72: 透传 fencing token 供 execute_task 拒过期 master。
+                "fencing_token": req.fencing_token,
+                "leader_id": req.leader_id,
             }
             try:
                 result = await self.agent.execute_task(task)
@@ -621,6 +629,29 @@ class AgentServer:
             # 已由 collect_hardware_info 自身经 to_thread 移出 (async); 此处直接 await。
             info = await self.agent.collect_hardware_info()
             return info
+
+        # ── #73 supervisor 协调 — 本机 shell-out fusion-sv CLI ──
+        # 跨节点路径: master /api/nodes/{id}/supervisor/{op} → 对端 agent 本路由 → 本机 fusion-sv。
+        _SUPERVISOR_OPS = {"status", "drain", "rollout", "shutdown", "backup"}
+
+        @app.get("/api/supervisor/status")
+        async def supervisor_status(request: Request):
+            await _check_permission(request, "/api/supervisor/status", "GET")
+            sv = self.agent._get_supervisor()
+            result = await asyncio.to_thread(sv.call, "status", "", 3.0)
+            logger.info(f"#73 GET /api/supervisor/status available={result.get('available')}")
+            return result
+
+        @app.post("/api/supervisor/{op}")
+        async def supervisor_op(op: str, request: Request, svc: str = ""):
+            await _check_permission(request, "/api/supervisor/op", "POST")
+            if op not in _SUPERVISOR_OPS:
+                logger.warning(f"#73 supervisor 拒未知 op: {op!r}")
+                raise HTTPException(status_code=400, detail=f"未知 supervisor op: {op}")
+            sv = self.agent._get_supervisor()
+            result = await asyncio.to_thread(sv.call, op, svc)
+            logger.info(f"#73 POST /api/supervisor/{op} ok={result.get('ok')}")
+            return result
 
         # ── issue #52 跨节点 guard 契约原语 ──
 

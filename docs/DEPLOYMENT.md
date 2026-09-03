@@ -132,6 +132,54 @@ master-2 镜像配置 (`node_id`/`peers` 互换)。两 master 各跑一份 (laun
 
 **drain 与维护**: `cluster drain <node_id>` → 节点不再接新任务, 等存量任务结束 → 停 agent → 维护 → `cluster undrain <node_id>` 恢复。drain 仅影响该 master 视图的新任务选择, 对端 master 节点照常服务。
 
+## 集群 drain 健康门控 + supervisor 协调 (v0.16.0)
+
+### drain --wait 健康门控契约 (issue #69)
+
+`cluster drain <node_id> --wait [--timeout N]` 触发 drain 后轮询 `GET /api/nodes/{node_id}/drain-status`, 每 2s 一次, 至 `ready==true` 或超时。响应:
+
+```json
+{"draining": true, "in_flight": 3, "ready": false, "long_task_active": false}
+```
+
+- `ready` = `draining AND in_flight==0` — **supervisor 停服前等待的信号**。fusion-sv / 运维脚本应轮询此端点, ready 后再停止 agent 服务。
+- `long_task_active` = 该节点存在 `timeout_seconds > drain.long_task_threshold_seconds` (默认 300s) 的 RUNNING 任务 — MVP refuse-long 信号: 长任务活跃时 ready 保持 false, --wait 会超时。**检查点迁移不在本 PR** (跨节点 KV 传输 #33 是未来路径); 当前长任务需手动 cancel 或等待自然结束。
+- 超时退出码 1 (打印 `in_flight` + `long_task_active`), ready 退出码 0。
+
+### supervisor 协调 (issue #73)
+
+`SupervisorBridge` 经 agent 本地 shell-out 调 `fusion-sv <op> [svc]` (`subprocess.run`)。跨节点经 master HTTP 转发到对端 agent。
+
+- **agent 路由** (本机): `GET /api/supervisor/status`, `POST /api/supervisor/{op}` (op ∈ status/drain/rollout/shutdown/backup, 可选 `svc` query)。
+- **master 转发** (跨节点): `POST /api/nodes/{node_id}/supervisor/{op}`, `GET /api/nodes/{node_id}/supervisor/status` — SSRF 守卫 (`is_safe_peer_host` + `build_safe_url`)。
+- **CLI**: `cluster supervisor <op> <node_id> [--svc S]`; `cluster rollout-node <node_id>` 驱动 drain → rollout 序列 (MVP 顺序, 非跨节点并行编排)。
+- **离线安全**: `fusion-sv` 未安装 → `FileNotFoundError` → `{"available": false}`, 不崩溃, 推理路径不受影响。env `FUSION_SV_BIN` 覆盖二进制路径。
+- **心跳**: agent 心跳带 `supervisor_available` (缓存 ping, 30s 节流), master 聚合进 `NodeInfo`, `/api/nodes` 含此字段。failover 触发由运维/gateway 读此字段 (Traefik circuit-breaker 为 gateway #159)。
+
+### fencing token + 权威成员视图 (issue #72)
+
+仅适用于 **standby/HA 选举模式** (有 quorum)。active-active (#63) 无选举, fencing token = 0, 永不拒绝。
+
+- master 选举胜出 → `MasterElection.fencing_token` 单调递增, 随派发 header `X-Fencing-Token` + `X-Leader-Id` 传播。
+- agent `execute_task` 跟踪 `self._last_fencing_token`; 收到更低 token → 拒绝 `{"error": "stale master (fencing token expired)", "fencing_rejected": true}` (分区愈合后过期 master 不再写入)。
+- master 将 `fencing_rejected` 归为不可重试逻辑失败 (过期 master 不应重试)。
+- `/api/nodes` 响应带 `cluster_view` (本 master 为 leader 或近期从 leader 同步) + `partitioned` (本 master 为无法达 quorum 的非 leader 少数派)。**客户端 (fusion-studio / gateway) 读 `partitioned` 对分区 master 全局禁写**。
+
+## 可选 fusion-identity 集成 (v0.16.0, issue #74)
+
+**OPTIONAL — 默认离线不变**。fusion-identity 是 Fusion 生态的租户/鉴权服务 (签发 JWT + per-tenant 配额 + 用量)。multi-node 是它的可选客户端:
+
+- **未设 `FUSION_IDENTITY_URL`** (默认): `get_identity_provider()` 返 `None`, 全部行为退回本地 `config.json` + `fmu_` UserStore。100% 本地/离线规则不破。
+- **运维显式 opt-in** (设 `FUSION_IDENTITY_URL`): JWT 令牌经 `POST /api/v1/auth/verify` 校验, per-tenant 并发配额从 `/api/v1/admin/tenants/{tid}/quota` 拉取, 任务完成上报用量至 `/api/v1/tenants/{tid}/usage` (best-effort, 不阻塞调度)。identity 为权威 — **fail-closed**: opt-in 后 identity 不可达 → `verify_jwt` raise → 401 (不静默放行)。
+
+**配置** (env, 不进 config.json):
+```bash
+export FUSION_IDENTITY_URL="http://10.0.0.5:11470"
+export FUSION_IDENTITY_SERVICE_TOKEN="<service-token>"
+```
+
+**令牌共存**: JWT 令牌 (三段点分, 非 `fmu_` 前缀) 走 identity 校验路径; `fmu_` 令牌仍走 UserStore (不退役); 集群令牌走 cluster_token。三者并存。`BearerAuthMiddleware` 注入 `scope["user_id"]`/`["user_role"]`/`["tenant_quota"]`。
+
 ## mTLS 节点互信 (生产必配)
 
 v0.14.0: mTLS **默认关** (测试兼容); 企业生产**必须显式开启** — 否则集群内 HTTP 无节点身份校验, 任何同网段主机可注册节点。

@@ -243,6 +243,11 @@ def is_safe_outbound_host(host: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9._\-]+$", host))
 
 
+def _looks_like_jwt(token: str) -> bool:
+    """粗判 JWT — 三段点分 (header.payload.signature), 非 fmu_ 前缀。签名校验交 jwt_verifier。"""
+    return token.count(".") == 2 and not token.startswith("fmu_")
+
+
 class BearerAuthMiddleware:
     """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。
 
@@ -266,11 +271,15 @@ class BearerAuthMiddleware:
 
     USER_TOKEN_PREFIX = "fmu_"
 
-    def __init__(self, app, shared_token: str, audit_logger=None, user_store=None):
+    def __init__(self, app, shared_token: str, audit_logger=None, user_store=None, jwt_verifier=None):
         self.app = app
         self._expected = shared_token
         self._audit = audit_logger
         self._user_store = user_store
+        # #74: OPTIONAL JWT 校验回调 — fusion-identity opt-in 时注入 verify_jwt。
+        # 令牌形似 JWT (三段点分, 非 fmu_) → 走本路径, claims 注入 scope (fail-closed 401)。
+        # jwt_verifier=None (默认) → JWT 路径不开, 纯 cluster_token/fmu_ (离线默认不变)。
+        self._jwt_verifier = jwt_verifier
         # F5 (GAP-8): cluster-token 滚动重启重叠窗 — 接受 current + previous。
         # FUSION_CLUSTER_TOKEN_PREVIOUS 环境变量注入旧令牌, 零停机灰度切换:
         # 全节点先设 _PREVIOUS=旧值 再轮换 FUSION_CLUSTER_TOKEN=新值 → 两令牌并存期;
@@ -323,6 +332,36 @@ class BearerAuthMiddleware:
             return
 
         token = auth_header[7:].decode("utf-8", errors="replace")
+
+        # #74: JWT 路径 — fusion-identity opt-in (jwt_verifier 注入) + 令牌形似 JWT 时启用。
+        # verify_jwt 返 claims → 注入 scope (user_id=tid, user_role=role, tenant_quota)。
+        # 返 None (无效/吊销) → 401 fail-closed。抛异常 (identity 不可达) → 401 fail-closed。
+        # jwt_verifier=None 或令牌非 JWT → 跳过, 落 fmu_/cluster_token 路径 (离线默认不变)。
+        if self._jwt_verifier is not None and _looks_like_jwt(token):
+            try:
+                claims = self._jwt_verifier(token)
+            except Exception as e:
+                logger.warning(f"#74 JWT 校验异常 (fail-closed): {e} ({path})")
+                self._audit_fail(scope, f"JWT 校验异常: {e}")
+                from starlette.responses import JSONResponse
+
+                response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                await response(scope, receive, send)
+                return
+            if claims is None:
+                logger.warning(f"#74 JWT 校验失败/吊销 ({path})")
+                self._audit_fail(scope, "JWT 校验失败/吊销")
+                from starlette.responses import JSONResponse
+
+                response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                await response(scope, receive, send)
+                return
+            scope["user_id"] = claims.get("tid", "")
+            scope["user_role"] = claims.get("role", "user")
+            scope["tenant_quota"] = claims.get("quota", {})
+            logger.debug(f"#74 JWT 认证通过: tid={claims.get('tid')} role={claims.get('role')} ({path})")
+            await self.app(scope, receive, send)
+            return
 
         # 用户令牌路径 (fmu_ 前缀) — 仅 user_store 注入时启用
         if self._user_store is not None and token.startswith(self.USER_TOKEN_PREFIX):

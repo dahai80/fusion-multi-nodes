@@ -1086,3 +1086,48 @@ class TestConfigReload:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post("/api/v1/config/reload")  # 无 Authorization
             assert r.status_code == 401
+
+
+class TestSupervisorForward:
+    """#73 master /api/nodes/{id}/supervisor/{op} 转发到对端 agent。"""
+
+    @pytest.mark.asyncio
+    async def test_supervisor_forward_ok(self, client, master_server):
+        await _register_node(client, node_id="n1")
+        fake_resp = MagicMock()
+        fake_resp.json.return_value = {"ok": True, "available": True, "op": "status", "output": {"running": 1}}
+        fake_resp.status_code = 200
+        fake_client = MagicMock()
+        fake_client.post = AsyncMock(return_value=fake_resp)
+        master_server.master._get_dispatch_http = AsyncMock(return_value=fake_client)
+        master_server.master._get_dispatch_token = MagicMock(return_value=TEST_TOKEN)
+        r = await client.post("/api/nodes/n1/supervisor/status", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["node_id"] == "n1"
+        fake_client.post.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_supervisor_forward_unknown_op(self, client, master_server):
+        await _register_node(client, node_id="n1")
+        r = await client.post("/api/nodes/n1/supervisor/evil", headers=AUTH_HEADERS)
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_supervisor_forward_node_missing(self, client):
+        r = await client.post("/api/nodes/ghost/supervisor/status", headers=AUTH_HEADERS)
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_supervisor_forward_network_error(self, client, master_server):
+        await _register_node(client, node_id="n1")
+        fake_client = MagicMock()
+        fake_client.post = AsyncMock(side_effect=RuntimeError("connection refused"))
+        master_server.master._get_dispatch_http = AsyncMock(return_value=fake_client)
+        master_server.master._get_dispatch_token = MagicMock(return_value=TEST_TOKEN)
+        r = await client.post("/api/nodes/n1/supervisor/drain", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert body["available"] is False

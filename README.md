@@ -5,31 +5,37 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.15.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.16.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1356%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1433%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **🚀 v0.15.0 (2026-09-02) — Active-Active dual-master + real GPU load + pipeline gate (#63 #64 #65)**
+> **🚀 v0.16.0 (2026-09-03) — Cluster drain, idempotency, fencing, supervisor coordination, optional identity (#69-#74)**
 >
-> Three issues resolved:
-> - **#63 Active-Active dual-master** — `ha.mode = "active-active"` lets both masters run active and accept submits
->   concurrently (no standby 503). Bi-directional peer-sync + owner-wins convergence, no Redis. Task ownership
->   (`owner_master`) — only the owner master dispatches, peers hold mirrors. Cross-master task-ID uniqueness
->   (`master-1-<uuid>`). Node-role affinity + drain (`POST /api/nodes/{id}/drain`, CLI `cluster drain|undrain`).
-> - **#64 Real GPU/Metal load** — `fetch_mlx_memory()` scrapes fusion-mlx `GET /v1/health` for real Metal memory
->   (was a `pass` no-op → `gpu_memory_*_gb` always 0, `metal_util` VRAM_FIRST weight dead). Agent heartbeat now carries
->   `metal_util` + gpu fields; `GET /api/v1/nodes/{id}/metrics` no longer `AttributeError`.
-> - **#65 Pipeline 404 gate** — `parallel.pipeline_enabled` (default `False`) early-rejects `mode=pipeline` with a clear
->   upstream-missing 400 instead of a downstream 404; `pipeline_shard_roles` hard-filters by role; `404 → upstream_missing →
->   FAILED` (non-retryable, does not trip the circuit breaker).
+> Six issues resolved:
+> - **#69 Cluster drain + health-gate** — `GET /api/nodes/{id}/drain-status` returns `{draining, in_flight, ready,
+>   long_task_active}`; `ready` is the signal a supervisor waits for before stopping services. CLI
+>   `cluster drain --wait [--timeout N]` polls until ready. MVP refuse-long (config `drain.long_task_threshold_seconds`).
+> - **#70 exclude_nodes on submit** — `TaskSubmitRequest.exclude_nodes` excludes specific nodes from dispatch (regression
+>   test + OpenAPI description).
+> - **#71 X-Idempotency-Key** — duplicate submit with the same header returns the existing task_id without creating a new
+>   task (TTL `scheduling.idempotency_ttl_seconds`, default 86400). Both submit routes honor it.
+> - **#72 Fencing token + authoritative membership** — monotonic `MasterElection.fencing_token` propagated in dispatch
+>   headers; a NodeAgent rejects a lower token as `fencing_rejected` (stale master). Token 0 (single-master /
+>   active-active) never rejects. `/api/nodes` carries `cluster_view` + `partitioned` so clients disable writes to a
+>   partitioned minority master.
+> - **#73 Supervisor coordination** — `SupervisorBridge` shells out to `fusion-sv` (offline-safe if absent);
+>   `supervisor_rpc` task type; `GET/POST /api/supervisor/{op}` agent routes; master forwards to
+>   `/api/nodes/{id}/supervisor/{op}`; CLI `cluster supervisor` + `cluster rollout-node`.
+> - **#74 OPTIONAL fusion-identity** — `IdentityProvider` (opt-in via `FUSION_IDENTITY_URL`): verify JWT, source
+>   per-tenant quota, report usage. **Offline default unchanged** (no env → `None`, local config + `fmu_` UserStore).
+>   `fmu_` store is NOT retired; JWT and `fmu_` coexist. Fail-closed only when the operator explicitly opts in.
 >
-> 1356 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md). Redis/quota/LB deploy dependency tracked in
-> [fusion-gateway #159](https://github.com/dahai80/fusion-gateway/issues/159).
+> 1433 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md).
 
 ---
 

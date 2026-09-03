@@ -338,6 +338,8 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         _master.configure_scheduling(
             cfg.get("scheduling.tenant_max_concurrent", 4),
             max_pending_queue=cfg.get("scheduling.max_pending_queue", 1000),
+            idempotency_ttl_seconds=cfg.get("scheduling.idempotency_ttl_seconds", 86400.0),
+            drain_long_task_threshold=cfg.get("drain.long_task_threshold_seconds", 300.0),
         )
         # P0-8: 注入带配置 retention 的 Observability (master.start 接生命周期 + 路由)。
         # v0.14.0 item 2: persist 默认 True (企业生产跨重启保留)。
@@ -466,10 +468,47 @@ def cluster_pending():
 
 @cluster.command("drain")
 @click.argument("node_id")
-def cluster_drain(node_id: str):
-    """#63: 标记节点排水 (停止接新任务, 在途任务继续)。"""
+@click.option("--wait", is_flag=True, help="#69: 等待在途任务排空 (ready=true) 再返回")
+@click.option("--timeout", "wait_timeout", default=600, help="#69: --wait 超时秒 (默认 600)")
+def cluster_drain(node_id: str, wait: bool, wait_timeout: int):
+    """#63/#69: 标记节点排水 (停止接新任务, 在途任务继续)。
+
+    --wait: 轮询 drain-status 直到 ready=true 或超时。长任务 (timeout > 阈值) 活跃时
+    不会变 ready, --wait 超时 (MVP refuse-long, 不做 checkpoint 迁移)。
+    """
     asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/drain"))
     click.echo(f"✅ 节点 {node_id} 已排水 (停止接新任务)")
+    if not wait:
+        return
+    asyncio.run(_drain_wait(node_id, wait_timeout))
+
+
+async def _drain_wait(node_id: str, wait_timeout: int):
+    """#69: 轮询 /api/nodes/{id}/drain-status 直到 ready 或超时。"""
+    import time as _time
+
+    deadline = _time.monotonic() + max(0, int(wait_timeout))
+    interval = 2.0
+    while _time.monotonic() < deadline:
+        try:
+            st = await _master_http("GET", f"/api/nodes/{node_id}/drain-status")
+        except click.ClickException as e:
+            click.echo(f"⚠️  查询 drain-status 失败: {e}")
+            raise
+        if st.get("ready"):
+            click.echo(f"✅ 节点 {node_id} 在途任务已排空 (ready), 可安全停服务")
+            return
+        in_flight = st.get("in_flight", 0)
+        long_task = st.get("long_task_active", False)
+        click.echo(f"⏳ 等待排空: in_flight={in_flight} long_task_active={long_task}")
+        await asyncio.sleep(interval)
+    st = await _master_http("GET", f"/api/nodes/{node_id}/drain-status")
+    click.echo(
+        f"❌ --wait 超时 ({wait_timeout}s): in_flight={st.get('in_flight', 0)} "
+        f"long_task_active={st.get('long_task_active', False)} — 节点未排空, "
+        f"长任务阻塞或超时过短"
+    )
+    raise SystemExit(1)
 
 
 @cluster.command("undrain")
@@ -478,6 +517,56 @@ def cluster_undrain(node_id: str):
     """#63: 取消节点排水 (恢复接新任务)。"""
     asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/undrain"))
     click.echo(f"✅ 节点 {node_id} 已恢复接新任务")
+
+
+@cluster.command("supervisor")
+@click.argument("op", type=click.Choice(["status", "drain", "rollout", "shutdown", "backup"]))
+@click.argument("node_id")
+@click.option("--svc", "-s", default="", help="supervisor 服务名 (可选)")
+def cluster_supervisor(op: str, node_id: str, svc: str):
+    """#73: 转发 supervisor 操作到指定节点 (经 master → 对端 agent → 本机 fusion-sv)。"""
+    query = f"?svc={svc}" if svc else ""
+    r = asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/supervisor/{op}{query}"))
+    ok = r.get("ok")
+    available = r.get("available")
+    if not available:
+        click.echo(f"⚠️  节点 {node_id} supervisor 不可用 (fusion-sv 未安装/不可达): {r.get('error', '')}")
+        raise SystemExit(1)
+    if not ok:
+        click.echo(f"❌ supervisor {op} 失败: {r.get('error', '')}")
+        raise SystemExit(1)
+    click.echo(f"✅ 节点 {node_id} supervisor {op} 完成")
+    out = r.get("output")
+    if out is not None:
+        click.echo(out)
+
+
+@cluster.command("rollout-node")
+@click.argument("node_id")
+@click.option("--svc", "-s", default="", help="supervisor 服务名 (可选)")
+@click.option("--wait/--no-wait", default=True, help="#73: drain 前先等在途排空 (默认等)")
+@click.option("--timeout", "wait_timeout", default=600, help="#73: drain --wait 超时秒 (默认 600)")
+def cluster_rollout_node(node_id: str, svc: str, wait: bool, wait_timeout: int):
+    """#73: 节点滚动发布 — drain (排空) → supervisor rollout (重启服务) → undrain (恢复)。
+
+    MVP 顺序执行, 不做跨节点并行编排。长任务阻塞 drain --wait 时中止 (不 rollout)。
+    """
+    asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/drain"))
+    click.echo(f"✅ 节点 {node_id} 已排水")
+    if wait:
+        try:
+            asyncio.run(_drain_wait(node_id, wait_timeout))
+        except SystemExit:
+            click.echo("❌ drain --wait 未排空, 中止 rollout (节点仍 drain, 不会接新任务)")
+            raise
+    query = f"?svc={svc}" if svc else ""
+    r = asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/supervisor/rollout{query}"))
+    if not r.get("ok"):
+        click.echo(f"❌ supervisor rollout 失败: {r.get('error', '')} (节点仍 drain)")
+        raise SystemExit(1)
+    click.echo(f"✅ 节点 {node_id} supervisor rollout 完成")
+    asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/undrain"))
+    click.echo(f"✅ 节点 {node_id} 已恢复接新任务 — rollout 完成")
 
 
 # ── 任务管理 ──

@@ -169,6 +169,57 @@ class TestTenantQuota:
         assert len(master._pending_queue) == 6, "超节点容量的 6 个入队"
 
 
+class TestPerTenantQuota:
+    """#74 per-tenant 配额覆盖全局 — set_tenant_quota 后该租户用独立上限, 其余租户用全局。"""
+
+    @pytest.mark.asyncio
+    async def test_per_tenant_overrides_global(self):
+        master = ClusterMaster()
+        master._dispatch_token = TEST_TOKEN
+        master.configure_scheduling(2)  # 全局 2
+        await master.register_node(_node("n1", 21510))
+        # tenant-VIP 独立配额 1 (低于全局)
+        await master.set_tenant_quota("tenant-VIP", 1)
+        assert master._tenant_limit_for("tenant-VIP") == 1
+        assert master._tenant_limit_for("tenant-A") == 2  # 其余用全局
+
+        t1 = _make_task("vip-1", user="tenant-VIP")
+        t2 = _make_task("vip-2", user="tenant-VIP")
+        ok1 = await master.assign_task(t1)
+        ok2 = await master.assign_task(t2)
+        assert ok1, "首个 VIP 任务入派发"
+        assert master._running_count_for_user("tenant-VIP") == 1
+        assert ok2, "超额入队非拒绝"
+        queued = [t for t in master._pending_queue if t.user == "tenant-VIP"]
+        assert len(queued) == 1, "VIP 独立配额 1 → 第 2 个入队"
+
+    @pytest.mark.asyncio
+    async def test_other_tenants_use_global(self):
+        master = ClusterMaster()
+        master._dispatch_token = TEST_TOKEN
+        master.configure_scheduling(1)
+        await master.register_node(_node("n1", 21511))
+        await master.set_tenant_quota("tenant-VIP", 3)  # VIP 独立 3
+
+        # tenant-A 用全局 1
+        a1 = _make_task("a-1", user="tenant-A")
+        a2 = _make_task("a-2", user="tenant-A")
+        await master.assign_task(a1)
+        await master.assign_task(a2)
+        assert master._running_count_for_user("tenant-A") == 1
+        assert len([t for t in master._pending_queue if t.user == "tenant-A"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_quota_clears_override(self):
+        master = ClusterMaster()
+        master._dispatch_token = TEST_TOKEN
+        master.configure_scheduling(2)
+        await master.set_tenant_quota("tenant-VIP", 1)
+        assert master._tenant_limit_for("tenant-VIP") == 1
+        await master.set_tenant_quota("tenant-VIP", 0)  # 0=不限, 清覆盖
+        assert master._tenant_limit_for("tenant-VIP") == 2  # 退回全局
+
+
 class TestPriorityQueue:
     """优先级队列 — 高优先级先得空闲节点。"""
 

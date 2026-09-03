@@ -5,14 +5,37 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.15.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.16.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1356%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1433%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.15.0。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.16.0。
+
+---
+
+> **🚀 v0.16.0（2026-09-03）— 集群 drain + 幂等 + fencing + supervisor 协调 + 可选 identity（#69-#74）**
+>
+> 六个 issue 修复：
+> - **#69 集群 drain + 健康门控** — `GET /api/nodes/{id}/drain-status` 返回 `{draining, in_flight, ready,
+>   long_task_active}`；`ready` 是 supervisor 停服前等待的信号。CLI `cluster drain --wait [--timeout N]` 轮询至
+>   ready。MVP refuse-long（配置 `drain.long_task_threshold_seconds`）。
+> - **#70 提交时 exclude_nodes** — `TaskSubmitRequest.exclude_nodes` 排除指定节点不派发（回归测试 + OpenAPI 描述）。
+> - **#71 X-Idempotency-Key** — 相同 header 的重复提交返回已存在 task_id，不新建任务（TTL
+>   `scheduling.idempotency_ttl_seconds`，默认 86400）。两个提交路由均支持。
+> - **#72 fencing token + 权威成员视图** — 单调递增 `MasterElection.fencing_token` 随派发 header 传播；NodeAgent 拒
+>   绝更低的 token（`fencing_rejected` = 过期 master）。token 0（单 master / active-active）永不拒绝。
+>   `/api/nodes` 带 `cluster_view` + `partitioned`，客户端据此对分区少数派 master 禁写。
+> - **#73 supervisor 协调** — `SupervisorBridge` shell-out 调 `fusion-sv`（缺失则离线安全）；`supervisor_rpc` 任务
+>   类型；`GET/POST /api/supervisor/{op}` agent 路由；master 转发至 `/api/nodes/{id}/supervisor/{op}`；CLI
+>   `cluster supervisor` + `cluster rollout-node`。
+> - **#74 可选 fusion-identity** — `IdentityProvider`（经 `FUSION_IDENTITY_URL` 显式 opt-in）：校验 JWT、取 per-tenant
+>   配额、上报用量。**离线默认不变**（未设 env → `None`，用本地配置 + `fmu_` UserStore）。`fmu_` store 不退役；JWT
+>   与 `fmu_` 共存。仅运维显式 opt-in 时 fail-closed。
+>
+> 1433 测试，ruff 通过。见 [CHANGELOG](docs/CHANGELOG.md)。
 
 ---
 

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, StreamingResponse
 
 from fusion_multi_node.master import (
@@ -111,6 +111,8 @@ class NodeRegisterRequest(BaseModel):
     active_tasks: int = 0
     max_tasks: int = 4
     network_rtt_ms: float = 0.0
+    # #73: 本机 fusion-sv supervisor 可用 (注册时上报)。
+    supervisor_available: bool = False
 
 
 class HeartbeatRequest(BaseModel):
@@ -118,6 +120,8 @@ class HeartbeatRequest(BaseModel):
     total_memory_gb: float | None = None
     available_memory_gb: float | None = None
     active_tasks: int | None = None
+    # #73: 本机 fusion-sv supervisor 可用 (心跳上报)。
+    supervisor_available: bool | None = None
 
 
 class FaultReportRequest(BaseModel):
@@ -136,7 +140,12 @@ class TaskSubmitRequest(BaseModel):
     required_capability: str = ""
     preferred_node_id: str = ""
     # #31 重试节点规避: 硬黑名单 (绝不派发到列表内节点); 优先 preferred 健康节点
-    exclude_nodes: list[str] = []
+    # #70: OpenAPI 文档化 — 硬排除节点 ID 列表, select_nodes 过滤候选节点。
+    exclude_nodes: list[str] = Field(
+        default_factory=list,
+        description="Hard-blacklist node IDs — scheduler never dispatches this task to any listed node "
+        "(takes precedence over preferred_node_id and load routing). Use for retry fault-node avoidance.",
+    )
     priority: int = 0
     # P1 派发载荷 — 透传到 agent /api/execute (task_type + params)
     task_type: str = "inference"
@@ -205,6 +214,8 @@ class LoadUpdateRequest(BaseModel):
     # #64: GPU/Metal 显存 (统一内存下 MLX 活动字节), 供 GET /api/nodes/{id}/load 展示。
     gpu_memory_used_gb: float = 0.0
     gpu_memory_total_gb: float = 0.0
+    # #73: 本机 fusion-sv supervisor 可用 (agent 心跳上报)。
+    supervisor_available: bool = False
 
 
 # P1-10 (审计 §6.7): 9 raw dict 路由 → pydantic 校验 (类型+默认), 删手动 req.get 校验。
@@ -423,11 +434,20 @@ class MasterServer:
         from fusion_multi_node.security.audit_log import get_audit_logger
 
         self._audit = get_audit_logger()
+        # #74: OPTIONAL fusion-identity — env FUSION_IDENTITY_URL 未设 → None (离线默认不变)。
+        # 启用时注入 jwt_verifier → BearerAuthMiddleware JWT 路径 + per-tenant 配额 + 用量上报。
+        from fusion_multi_node.security.identity_provider import get_identity_provider
+
+        self._identity = get_identity_provider()
+        jwt_verifier = self._identity.verify_jwt if (self._identity and self._identity.enabled) else None
+        if jwt_verifier is not None:
+            logger.info("#74 fusion-identity 已启用 (opt-in) — JWT 校验 + per-tenant 配额 + 用量上报")
         self.app.add_middleware(
             BearerAuthMiddleware,
             shared_token=self._shared_token,
             audit_logger=self._audit,
             user_store=self._user_store,
+            jwt_verifier=jwt_verifier,
         )
         # P2-22 (审计 §3.8): Master 无限流 → /api/nodes/register /api/join /api/ha/vote
         # /api/tasks/submit 无节流 → DoS + 审批队列 (max_pending=100) 耗尽。加全局限流。
@@ -458,6 +478,23 @@ class MasterServer:
         # 不再在路由内懒初始化 (避免 GET 读请求产生写副作用 + 并发首请求竞争 + 挂上去不 start 变死实例)。
         self._sync_manager = ClusterSyncManager(node_id="master")
         self._setup_routes()
+
+    async def _resolve_tenant_quota(self, user: str) -> None:
+        """#74: fusion-identity opt-in 时拉 per-tenant 配额注入 master._tenant_quotas。
+
+        未启用 identity / 无 user → no-op (退回全局 _tenant_max_concurrent, 离线默认)。
+        best-effort: 取配额失败仅日志, 不阻塞 submit (退回全局配额)。
+        """
+        identity = getattr(self, "_identity", None)
+        if identity is None or not identity.enabled or not user:
+            return
+        try:
+            q = identity.get_tenant_quota(user)
+        except Exception as e:
+            logger.warning(f"#74 取 per-tenant 配额失败 (退回全局): user={user} {e}")
+            return
+        if q is not None:
+            await self.master.set_tenant_quota(user, q)
 
     def _setup_routes(self):
         app = self.app
@@ -714,6 +751,7 @@ class MasterServer:
                 active_tasks=req.active_tasks,
                 max_tasks=req.max_tasks,
                 network_rtt_ms=req.network_rtt_ms,
+                supervisor_available=req.supervisor_available,
                 last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
@@ -843,6 +881,7 @@ class MasterServer:
                 total_memory_gb=req.total_memory_gb,
                 available_memory_gb=req.available_memory_gb,
                 active_tasks=req.active_tasks,
+                supervisor_available=req.supervisor_available,
             )
             if not ok:
                 raise HTTPException(status_code=404, detail=f"节点 {req.node_id} 未注册")
@@ -870,6 +909,7 @@ class MasterServer:
                 metrics,
                 gpu_memory_used_gb=req.gpu_memory_used_gb,
                 gpu_memory_total_gb=req.gpu_memory_total_gb,
+                supervisor_available=req.supervisor_available,
             )
             return {"status": "ok"}
 
@@ -918,7 +958,80 @@ class MasterServer:
             )
             return {"status": "ok", "node_id": node_id, "draining": False}
 
-        @app.post("/api/routing/strategy")
+        @app.get("/api/nodes/{node_id}/drain-status")
+        async def drain_status(node_id: str):
+            # #69: drain 状态契约 — 编排器/supervisor/CLI --wait 据此判断可否停服务。
+            # ready=true = drain 中且在途任务为 0。long_task_active=true = 有长任务阻塞。
+            st = await self.master.drain_status(node_id)
+            if st is None:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            return st
+
+        # #73: supervisor 协调转发 — master → 对端 agent → 本机 fusion-sv CLI。
+        # 跨节点路径: CLI/编排器调 master 本路由, master HTTP 转发到 node agent /api/supervisor/{op}。
+        _SUPERVISOR_OPS = {"status", "drain", "rollout", "shutdown", "backup"}
+
+        @app.post("/api/nodes/{node_id}/supervisor/{op}")
+        async def node_supervisor_op(node_id: str, op: str, request: Request, svc: str = ""):
+            _enforce_user_rbac(request, "/api/nodes/supervisor", "POST")
+            if op not in _SUPERVISOR_OPS:
+                raise HTTPException(status_code=400, detail=f"未知 supervisor op: {op}")
+            node = self.master.nodes.get(node_id)
+            if node is None:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            if not is_safe_peer_host(node.ip_address):
+                logger.warning(f"#73 supervisor 转发跳过非安全对端: {node_id} ({node.ip_address!r})")
+                raise HTTPException(status_code=503, detail=f"节点 {node_id} 非安全对端")
+            url = build_safe_url(mtls_scheme(), node.ip_address, node.port, f"/api/supervisor/{op}")
+            client = await self.master._get_dispatch_http()
+            token = self.master._get_dispatch_token()
+            headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master"}
+            params = {"svc": svc} if svc else {}
+            self._audit.log(
+                actor="master",
+                action="supervisor_op",
+                path=f"/api/nodes/{node_id}/supervisor/{op}",
+                method="POST",
+                node_id=node_id,
+                result="ok",
+                detail=f"转发 supervisor op={op} svc={svc}",
+            )
+            try:
+                resp = await client.post(url, headers=headers, params=params, timeout=15.0)
+            except Exception as e:
+                logger.warning(f"#73 supervisor 转发失败 node={node_id} op={op}: {e}")
+                return {"ok": False, "available": False, "error": f"转发失败: {e}", "op": op, "node_id": node_id}
+            try:
+                body = resp.json()
+            except Exception:
+                body = {"ok": False, "available": resp.status_code == 200, "raw": resp.text}
+            body["node_id"] = node_id
+            return body
+
+        @app.get("/api/nodes/{node_id}/supervisor/status")
+        async def node_supervisor_status(node_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/nodes/supervisor", "GET")
+            node = self.master.nodes.get(node_id)
+            if node is None:
+                raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
+            if not is_safe_peer_host(node.ip_address):
+                raise HTTPException(status_code=503, detail=f"节点 {node_id} 非安全对端")
+            url = build_safe_url(mtls_scheme(), node.ip_address, node.port, "/api/supervisor/status")
+            client = await self.master._get_dispatch_http()
+            token = self.master._get_dispatch_token()
+            headers = {"Authorization": f"Bearer {token}", "X-Node-Id": "master"}
+            try:
+                resp = await client.get(url, headers=headers, timeout=10.0)
+            except Exception as e:
+                logger.warning(f"#73 supervisor status 转发失败 node={node_id}: {e}")
+                return {"ok": False, "available": False, "error": f"转发失败: {e}", "node_id": node_id}
+            try:
+                body = resp.json()
+            except Exception:
+                body = {"ok": False, "available": resp.status_code == 200, "raw": resp.text}
+            body["node_id"] = node_id
+            return body
+
         async def set_routing_strategy(strategy: str):
             try:
                 rs = RoutingStrategy(strategy)
@@ -935,10 +1048,15 @@ class MasterServer:
         async def list_nodes():
             online = await self.master.get_online_nodes()
             all_nodes = await self.master.snapshot_nodes()
+            view = self.master.membership_view()
             return {
                 "total": len(all_nodes),
                 "online": len(online),
                 "nodes": [_node_to_resp(n) for n in all_nodes],
+                # #72: 成员视图权威性 — cluster_view=本 master 视图权威 (leader 或近窗口同步自 leader);
+                # partitioned=少数派脑裂 (非 leader 且 leader 未知, 无法达仲裁, 客户端应全局写禁用)。
+                "cluster_view": view["cluster_view"],
+                "partitioned": view["partitioned"],
             }
 
         @app.get("/api/nodes/{node_id}")
@@ -1000,6 +1118,7 @@ class MasterServer:
             # F2: 用户令牌 → task.user 取已认证身份 (忽略客户端 req.user, 防伪造审计 actor)。
             # 集群令牌 → req.user (内部可信自声明, HA/CLI/agent 路径)。
             effective_user = user_actor if user_actor else req.user
+            await self._resolve_tenant_quota(effective_user)
             _aa_prefix = self.master.aa_task_prefix()
             _aa_owner = self.master.aa_owner()
             _tid = f"{_aa_prefix}-task_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"task_{uuid.uuid4().hex[:12]}"
@@ -1036,9 +1155,21 @@ class MasterServer:
                 result="ok",
                 detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
             )
+            # #71 幂等: X-Idempotency-Key 命中 → 复用已存在任务, 不新建 (客户端重试不产生重复任务)。
+            _idem_key = request.headers.get("x-idempotency-key", "").strip()
+            if _idem_key:
+                existing_id = await self.master.try_idempotency(_idem_key)
+                if existing_id is not None:
+                    existing = self.master.tasks.get(existing_id)
+                    if existing is not None:
+                        logger.info(f"#71 幂等命中, 复用任务: key={_idem_key!r} task_id={existing_id}")
+                        return _task_to_resp(existing)
             ok = await self.master.assign_task(task)
             if not ok:
                 raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
+            # #71 幂等: 派发成功后登记键 → task_id (后续同键重试复用)。
+            if _idem_key:
+                await self.master.register_idempotency(_idem_key, task.task_id)
             # P1-H: 任务可能入优先级队列 (节点不足/配额满) → PENDING 状态返回 202。
             if task.status == TaskStatus.PENDING and task.task_id in {t.task_id for t in self.master._pending_queue}:
                 resp = _task_to_resp(task)
@@ -1682,6 +1813,7 @@ class MasterServer:
                 active_tasks=req.active_tasks,
                 max_tasks=req.max_tasks,
                 network_rtt_ms=req.network_rtt_ms,
+                supervisor_available=req.supervisor_available,
                 last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
@@ -1746,6 +1878,7 @@ class MasterServer:
                         "设 parallel.pipeline_enabled=true 且上游落地后启用",
                     )
             effective_user = user_actor if user_actor else req.user
+            await self._resolve_tenant_quota(effective_user)
             _aa_prefix = self.master.aa_task_prefix()
             _aa_owner = self.master.aa_owner()
             _tid = f"{_aa_prefix}-task_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"task_{uuid.uuid4().hex[:12]}"
@@ -1781,9 +1914,20 @@ class MasterServer:
                 result="ok",
                 detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
             )
+            # #71 幂等: X-Idempotency-Key 命中 → 复用已存在任务, 不新建。
+            _idem_key = request.headers.get("x-idempotency-key", "").strip()
+            if _idem_key:
+                existing_id = await self.master.try_idempotency(_idem_key)
+                if existing_id is not None:
+                    existing = self.master.tasks.get(existing_id)
+                    if existing is not None:
+                        logger.info(f"#71 幂等命中 (v1), 复用任务: key={_idem_key!r} task_id={existing_id}")
+                        return _task_to_resp(existing)
             ok = await self.master.assign_task(task)
             if not ok:
                 raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
+            if _idem_key:
+                await self.master.register_idempotency(_idem_key, task.task_id)
             resp = _task_to_resp(task)
             if task.status == TaskStatus.PENDING and task.task_id in {t.task_id for t in self.master._pending_queue}:
                 resp["queued"] = True
@@ -2022,11 +2166,27 @@ class MasterServer:
             # 运行时可调字段重应用: 租户并发配额 + 优先级队列上限 (configure_scheduling)。
             tenant_max = cfg.get("scheduling.tenant_max_concurrent", 4)
             max_pending = cfg.get("scheduling.max_pending_queue", 1000)
-            self.master.configure_scheduling(tenant_max, max_pending_queue=max_pending)
-            logger.info(f"配置热加载完成: tenant_max_concurrent={tenant_max} max_pending_queue={max_pending}")
+            idem_ttl = cfg.get("scheduling.idempotency_ttl_seconds", 86400.0)
+            drain_thr = cfg.get("drain.long_task_threshold_seconds", 300.0)
+            self.master.configure_scheduling(
+                tenant_max,
+                max_pending_queue=max_pending,
+                idempotency_ttl_seconds=idem_ttl,
+                drain_long_task_threshold=drain_thr,
+            )
+            logger.info(
+                f"配置热加载完成: tenant_max_concurrent={tenant_max} "
+                f"max_pending_queue={max_pending} idempotency_ttl={idem_ttl} "
+                f"drain_threshold={drain_thr}"
+            )
             return {
                 "status": "ok",
-                "reloaded": ["scheduling.tenant_max_concurrent", "scheduling.max_pending_queue"],
+                "reloaded": [
+                    "scheduling.tenant_max_concurrent",
+                    "scheduling.max_pending_queue",
+                    "scheduling.idempotency_ttl_seconds",
+                    "drain.long_task_threshold_seconds",
+                ],
                 "restart_required": ["cluster.master_host", "cluster.master_port", "ha_config", "mdns"],
                 "config_path": cfg.config_path,
             }
@@ -2259,6 +2419,8 @@ def _node_to_resp(n: NodeInfo) -> dict[str, Any]:
         "max_tasks": n.max_tasks,
         "score": n.score,
         "last_heartbeat": n.last_heartbeat,
+        "draining": n.draining,
+        "supervisor_available": n.supervisor_available,
     }
 
 
