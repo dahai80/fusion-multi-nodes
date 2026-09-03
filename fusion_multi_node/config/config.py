@@ -79,6 +79,8 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "parallel.communication": _validate_str,
     "scheduling.tenant_max_concurrent": _validate_nonneg_int,
     "scheduling.max_pending_queue": _validate_nonneg_int,
+    "scheduling.idempotency_ttl_seconds": _validate_nonneg_float,
+    "drain.long_task_threshold_seconds": _validate_nonneg_float,
     "security.http_pii_scrub": _validate_bool,
     "security.mtls.enabled": _validate_bool,
     "security.mtls.ca_cert": _validate_str,
@@ -161,6 +163,13 @@ class ClusterConfig:
             # P1-19: 优先级队列长度上限 — 满则 submit 拒入队 (503 集群队列已满)。
             # 0 = 不限 (向后兼容旧行为); 默认 1000 防过载堆积。
             "max_pending_queue": 1000,
+            # #71: X-Idempotency-Key 幂等键存活秒 — 过期键复用即新建任务。默认 86400 (1 天)。
+            "idempotency_ttl_seconds": 86400,
+        },
+        # #69: cluster drain — 长任务阈值 (秒), timeout 超此的在途任务标记 long_task_active,
+        # --wait 据此超时 (MVP refuse-long, 不做 checkpoint 迁移)。
+        "drain": {
+            "long_task_threshold_seconds": 300,
         },
         # P1-13: httpx 连接池限制 — Master 派发/同步 HTTP client 显式 max_connections/max_keepalive。
         # 0 = 不限 (httpx 默认)。默认按集群规模: max_connections=100, max_keepalive=20。

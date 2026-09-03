@@ -685,3 +685,50 @@ class TestP3_2KVSaveAlert:
         server = AgentServer(agent=agent, kv_manager=mgr, shared_token=TEST_TOKEN)
         await server.stop()
         mgr.close.assert_awaited_once()
+
+
+class TestSupervisorRoutes:
+    """#73 agent /api/supervisor/{op} 路由 — 本机 shell-out fusion-sv CLI。"""
+
+    @pytest.mark.asyncio
+    async def test_supervisor_status_route(self, mock_agent, mock_kv_manager):
+        from fusion_multi_node.agent.supervisor_bridge import SupervisorBridge
+
+        sv = SupervisorBridge()
+        mock_agent._get_supervisor = MagicMock(return_value=sv)
+        server = AgentServer(agent=mock_agent, kv_manager=mock_kv_manager, shared_token=TEST_TOKEN)
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            with patch("fusion_multi_node.agent.supervisor_bridge.subprocess.run") as m:
+                m.return_value = type("P", (), {"stdout": '{"ok": true}', "stderr": "", "returncode": 0})()
+                r = await c.get("/api/supervisor/status", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["available"] is True
+
+    @pytest.mark.asyncio
+    async def test_supervisor_op_route_unknown_rejected(self, mock_agent, mock_kv_manager):
+        mock_agent._get_supervisor = MagicMock(return_value=MagicMock())
+        server = AgentServer(agent=mock_agent, kv_manager=mock_kv_manager, shared_token=TEST_TOKEN)
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post("/api/supervisor/evil", headers=AUTH_HEADERS)
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_supervisor_drain_route(self, mock_agent, mock_kv_manager):
+        from fusion_multi_node.agent.supervisor_bridge import SupervisorBridge
+
+        sv = SupervisorBridge()
+        mock_agent._get_supervisor = MagicMock(return_value=sv)
+        server = AgentServer(agent=mock_agent, kv_manager=mock_kv_manager, shared_token=TEST_TOKEN)
+        transport = ASGITransport(app=server.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            with patch("fusion_multi_node.agent.supervisor_bridge.subprocess.run") as m:
+                m.return_value = type("P", (), {"stdout": "drained", "stderr": "", "returncode": 0})()
+                r = await c.post("/api/supervisor/drain?svc=mlx", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["svc"] == "mlx"

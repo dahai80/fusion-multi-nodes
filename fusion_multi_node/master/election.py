@@ -96,6 +96,9 @@ class MasterElection:
         self.state = ElectionState.FOLLOWER
         self.current_term = 0
         self.voted_for: str | None = None
+        # #72: fencing token — 单调递增, 每次 _become_leader +1。agent 据此拒绝过期 master 派发。
+        # 持久化随 term/voted_for 落盘 (崩溃重启不回退, 防 partition-heal 旧 master 复活写)。
+        self.fencing_token: int = 0
         self._load_state()
         self._votes_received: set[str] = set()
         self._last_heartbeat = time.time()
@@ -314,7 +317,12 @@ class MasterElection:
     async def _become_leader(self) -> None:
         self.state = ElectionState.LEADER
         self._leader_id = self.node_id
-        logger.warning(f"选举胜出成为 Leader: {self.node_id} (term={self.current_term})")
+        # #72: fencing token 单调递增 — 新 leader 拿到比旧 leader 更大的 token, agent 拒旧 token 派发。
+        self.fencing_token += 1
+        await self._persist_state_async()
+        logger.warning(
+            f"选举胜出成为 Leader: {self.node_id} (term={self.current_term} fencing_token={self.fencing_token})"
+        )
         if self._on_elected:
             if asyncio.iscoroutinefunction(self._on_elected):
                 await self._on_elected()
@@ -342,7 +350,12 @@ class MasterElection:
             self.current_term = int(data.get("current_term", 0))
             vf = data.get("voted_for")
             self.voted_for = vf if (vf is None or isinstance(vf, str)) else None
-            logger.info(f"C2 选举状态恢复: term={self.current_term} voted_for={self.voted_for}")
+            # #72: 恢复 fencing_token (崩溃重启不回退, 防旧 master 复活)。
+            self.fencing_token = int(data.get("fencing_token", 0))
+            logger.info(
+                f"C2 选举状态恢复: term={self.current_term} voted_for={self.voted_for} "
+                f"fencing_token={self.fencing_token}"
+            )
         except Exception as e:
             logger.warning(f"C2 选举状态恢复失败 ({self._state_path}): {e}")
 
@@ -354,7 +367,14 @@ class MasterElection:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
             with open(tmp, "w") as f:
-                json.dump({"current_term": self.current_term, "voted_for": self.voted_for}, f)
+                json.dump(
+                    {
+                        "current_term": self.current_term,
+                        "voted_for": self.voted_for,
+                        "fencing_token": self.fencing_token,
+                    },
+                    f,
+                )
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._state_path)
@@ -362,30 +382,39 @@ class MasterElection:
             logger.warning(f"C2 选举状态落盘失败: {e}")
 
     async def _persist_state_async(self) -> None:
-        """P2-6 (审计 §5.10): term/voted_for 异步落盘 (锁外调) — 快照字段后 to_thread 调
+        """P2-6 (审计 §5.10): term/voted_for/fencing_token 异步落盘 (锁外调) — 快照字段后 to_thread 调
         _save_state, fsync 不持 _lock 亦不阻塞事件循环。无 state_path (纯内存) 则 no-op。
-        供 handle_vote_request/receive_heartbeat/_start_election/_handle_vote_response 锁外落盘。
+        供 handle_vote_request/receive_heartbeat/_start_election/_handle_vote_response/_become_leader 锁外落盘。
         """
         if not self._state_path:
             return
         term = self.current_term
         voted = self.voted_for
-        await asyncio.to_thread(self._save_state_snapshot, term, voted)
+        fencing = self.fencing_token
+        await asyncio.to_thread(self._save_state_snapshot, term, voted, fencing)
 
-    def _save_state_snapshot(self, term: int, voted: str | None) -> None:
-        """P2-6: 按快照值落盘 (锁外 to_thread 调, 避读 self 竞态)。"""
+    def _save_state_snapshot(self, term: int, voted: str | None, fencing: int = 0) -> None:
+        """P2-6: 按快照值落盘 (锁外 to_thread 调, 避读 self 竞态)。#72: 含 fencing_token。"""
         if not self._state_path:
             return
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
             with open(tmp, "w") as f:
-                json.dump({"current_term": term, "voted_for": voted}, f)
+                json.dump(
+                    {"current_term": term, "voted_for": voted, "fencing_token": fencing},
+                    f,
+                )
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._state_path)
         except Exception as e:
             logger.warning(f"C2 选举状态落盘失败: {e}")
+
+    @property
+    def current_fencing_token(self) -> int:
+        """#72: 当前 fencing token (供 ClusterMaster 派发头注入, agent 据此拒过期 master)。"""
+        return self.fencing_token
 
     def get_state(self) -> dict[str, Any]:
         return {
@@ -397,4 +426,5 @@ class MasterElection:
             "priority": self.priority,
             "known_nodes": list(self._known_nodes),
             "votes_received": list(self._votes_received),
+            "fencing_token": self.fencing_token,
         }

@@ -322,6 +322,7 @@ class NodeAgent:
         config: AgentConfig | None = None,
         backend: InferenceBackend | None = None,
         sandbox: Any = None,
+        supervisor: Any = None,
     ):
         self.config = config or AgentConfig()
         self.config.node_id = self.config.node_id or f"node_{uuid.uuid4().hex[:8]}"
@@ -339,6 +340,9 @@ class NodeAgent:
         self._running_task_handles: dict[str, asyncio.Task] = {}
         # P1-14: 无 task_id 的直接调用分配匿名 id 的自增序号 (避免多匿名任务 _running_task_handles 撞键)。
         self._anon_task_seq = 0
+        # #72: 最近接受的 fencing token — 拒比它小的过期 master 派发 (partition-heal stale master)。
+        # 0 = 从未选举 (单 master/active-active), 永不拒 (向后兼容)。
+        self._last_fencing_token: int = 0
         self._heartbeat_task: asyncio.Task | None = None
         self._hardware_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
@@ -355,6 +359,12 @@ class NodeAgent:
         # 进程级 RLIMIT_AS/CPU 会整 agent 一起限制, 误杀在途任务。OS 级强隔离走
         # SandboxExecutor (subprocess 插件), 推理为 HTTP 调用无子进程, 不适用。
         self._sandbox = sandbox
+        # #73: fusion-sv supervisor 桥接 — 本机 shell-out 调用 fusion-sv CLI。
+        # 默认 None → 首次使用惰性建 SupervisorBridge (避免未装 fusion-sv 的部署 import 失败)。
+        # 心跳周期 ping fusion-sv status 上报 supervisor_available; supervisor_rpc 任务类型经此调用。
+        self._supervisor = supervisor
+        self._supervisor_available: bool = False
+        self._supervisor_last_ping: float = 0.0
 
     def build_subprocess_sandbox_config(self):
         # P2-9 (审计 §6.2): AgentConfig.task_mem_limit_mb/task_cpu_quota → SandboxConfig
@@ -372,6 +382,30 @@ class NodeAgent:
             max_processes=0,
             enforce_rlimits=enforce,
         )
+
+    def _get_supervisor(self):
+        """#73: 惰性建 SupervisorBridge (首次 supervisor_rpc 任务 / ping 时)。"""
+        if self._supervisor is None:
+            from fusion_multi_node.agent.supervisor_bridge import SupervisorBridge
+
+            self._supervisor = SupervisorBridge()
+        return self._supervisor
+
+    async def _refresh_supervisor_available(self) -> bool:
+        """#73: 心跳周期探测 fusion-sv 可用 (ping status, 3s, 经 to_thread 不阻塞 loop)。
+        节流 30s 一次 (心跳 3s 一次, 无需每心跳都 fork)。返回缓存的 supervisor_available。
+        """
+        now = time.time()
+        if now - self._supervisor_last_ping < 30.0:
+            return self._supervisor_available
+        self._supervisor_last_ping = now
+        try:
+            sv = self._get_supervisor()
+            self._supervisor_available = await asyncio.to_thread(sv.ping)
+        except Exception as e:
+            logger.debug(f"#73 supervisor ping 失败: {e}")
+            self._supervisor_available = False
+        return self._supervisor_available
 
     # ── 硬件信息收集 ──
 
@@ -565,6 +599,8 @@ class NodeAgent:
         静态硬件信息由 report_hardware 启动时一次性上报。
         """
         load = await self._collect_dynamic_load()
+        # #73: 周期探测 fusion-sv 可用, 心跳上报 supervisor_available。
+        await self._refresh_supervisor_available()
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
@@ -574,6 +610,7 @@ class NodeAgent:
                     "total_memory_gb": load["total_memory_gb"],
                     "available_memory_gb": load["available_memory_gb"],
                     "active_tasks": load["active_tasks"],
+                    "supervisor_available": self._supervisor_available,
                 },
             )
             ok = resp.status_code == 200
@@ -591,6 +628,7 @@ class NodeAgent:
                         "metal_util": load["metal_util"],
                         "gpu_memory_used_gb": load["gpu_memory_used_gb"],
                         "gpu_memory_total_gb": load["gpu_memory_total_gb"],
+                        "supervisor_available": self._supervisor_available,
                     },
                 )
             except Exception as le:
@@ -661,6 +699,22 @@ class NodeAgent:
             self._anon_task_seq += 1
             task_id = f"anon-{self._anon_task_seq}"
             task["task_id"] = task_id
+        # #72: fencing token 校验 — 拒过期 master 派发。token 0 (单 master/active-active) 永不拒。
+        # incoming < last = stale master (partition-heal 旧 leader 复活), 拒, master 归类逻辑错误不重试。
+        incoming_token = int(task.get("fencing_token") or 0)
+        if incoming_token != 0 and incoming_token < self._last_fencing_token:
+            logger.warning(
+                f"#72 拒过期 master 派发: incoming fencing_token={incoming_token} "
+                f"< last={self._last_fencing_token} task_id={task_id}"
+            )
+            return {
+                "task_id": task_id,
+                "error": "stale master (fencing token expired)",
+                "fencing_rejected": True,
+            }
+        if incoming_token > self._last_fencing_token:
+            self._last_fencing_token = incoming_token
+            logger.debug(f"#72 接受更高 fencing_token={incoming_token} task_id={task_id}")
         self._current_task = task
         task_type = task.get("type", "inference")
         temp_dir = os.path.join(tempfile.gettempdir(), f"fusion_task_{task_id}")
@@ -696,6 +750,8 @@ class NodeAgent:
                     return await self._execute_model_sync(task)
                 if task_type == "pipeline_step":
                     return await self._execute_pipeline_step(task)
+                if task_type == "supervisor_rpc":
+                    return await self._execute_supervisor(task)
                 return {"error": f"未知任务类型: {task_type}"}
             except asyncio.CancelledError:
                 logger.warning(f"任务被取消中止: {task_id}")
@@ -856,6 +912,26 @@ class NodeAgent:
             json=task.get("params", {}),
         )
         return resp.json()
+
+    async def _execute_supervisor(self, task: dict[str, Any]) -> dict[str, Any]:
+        """执行 supervisor_rpc 任务 — 本机 shell-out 调 fusion-sv CLI (进程协调)。
+
+        task["params"] 取 op/svc/timeout。离线安全: fusion-sv 未安装返 available=False,
+        不崩 (agent 仍服务推理)。返回 SupervisorBridge.call 结果 + task_id。
+        """
+        params = task.get("params", {}) or {}
+        op = str(params.get("op", ""))
+        svc = str(params.get("svc", "") or "")
+        timeout = params.get("timeout")
+        try:
+            t = float(timeout) if timeout is not None else None
+        except (TypeError, ValueError):
+            t = None
+        sv = self._get_supervisor()
+        result = await asyncio.to_thread(sv.call, op, svc, t)
+        result["task_id"] = task.get("task_id", "")
+        logger.info(f"#73 supervisor_rpc 完成 task_id={task.get('task_id', '')} op={op} ok={result.get('ok')}")
+        return result
 
     async def _execute_model_sync(self, task: dict[str, Any]) -> dict[str, Any]:
         """执行模型同步任务 — 将指定模型同步到本节点。"""

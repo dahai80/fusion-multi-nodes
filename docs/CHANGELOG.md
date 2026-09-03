@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-03 — Cluster drain, idempotency, fencing, supervisor coordination, optional identity
+
+### Added — cluster-level drain with health-gate (issue #69)
+- **`GET /api/nodes/{node_id}/drain-status`**: returns `{draining, in_flight, ready, long_task_active}`. `ready` is `true` when the node is draining AND has zero in-flight tasks — this is the signal an operator/supervisor waits for before stopping services on the node.
+- **CLI `cluster drain --wait [--timeout N]`**: POSTs drain, then polls `drain-status` every 2s until `ready` or timeout. Exit 0 on ready, exit 1 on timeout (prints `in_flight` + `long_task_active`). MVP refuse-long: a long-running task (config `drain.long_task_threshold_seconds`, default 300) keeps `ready` false — checkpoint migration is future work (cross-node KV transfer #33 is the path).
+- `ClusterMaster._inflight_count_for_node(node_id)` counts RUNNING tasks whose `assigned_nodes` contain the node.
+
+### Added — submit-time exclude_nodes (issue #70)
+- `TaskSubmitRequest.exclude_nodes` already flowed through to `ClusterTask.exclude_nodes` and the `select_nodes` filter; this release adds the regression test and OpenAPI field description, closing the gap.
+
+### Added — X-Idempotency-Key on submit (issue #71)
+- **`ClusterMaster.try_idempotency(key)` / `register_idempotency(key, task_id)`**: idempotency keys (key → task_id + expires_at) guarded under `_tasks_lock`, TTL default 86400s (config `scheduling.idempotency_ttl_seconds`). Duplicate submit with the same `X-Idempotency-Key` header returns the existing task_id without creating a new task; expired keys are purged on access. Both submit routes (`/api/tasks/submit` and `/api/v1/tasks/submit`) honor the header.
+
+### Added — fencing token + authoritative membership (issue #72)
+- **`MasterElection.fencing_token`**: monotonic, incremented in `_become_leader`, persisted with term/voted_for, exposed via `get_state()` + `current_fencing_token` property. On election, `ClusterMaster` stores `self._fencing_token` and propagates `X-Fencing-Token` + `X-Leader-Id` headers in `_dispatch_to_node`.
+- **NodeAgent fencing check**: `execute_task` tracks `self._last_fencing_token`; an incoming token lower than the last seen is rejected as `{"error": "stale master (fencing token expired)", "fencing_rejected": True}` (log warning). Token 0 (single-master / active-active, no election) never rejects — backward compatible. Master classifies `fencing_rejected` as a non-retryable logic failure (a stale master should not retry).
+- **Authoritative `/api/nodes`**: response now carries `cluster_view: bool` (this master is leader OR synced-from-leader within the sync interval) and `partitioned: bool` (this master is a non-leader minority that cannot reach quorum). Clients read `partitioned` to globally disable writes to a partitioned master.
+
+### Added — supervisor coordination (issue #73)
+- **`SupervisorBridge`** (`agent/supervisor_bridge.py`): shells out to `fusion-sv <op> [svc]` via `subprocess.run`. Ops: `status`, `drain`, `rollout`, `shutdown`, `backup`. Offline-safe — `FileNotFoundError` (fusion-sv not installed) returns `{"available": False}` without crashing; inference path is unaffected. Env `FUSION_SV_BIN` overrides the binary path.
+- **NodeAgent**: optional `supervisor` ctor arg (lazy `SupervisorBridge()` on first use); new `supervisor_rpc` task type; heartbeat carries `supervisor_available` (cached ping, 30s throttle, `to_thread` to not block the loop).
+- **AgentServer routes**: `GET /api/supervisor/status`, `POST /api/supervisor/{op}` (op allowlist, optional `svc` query), cross-node reachable via peer master → peer agent HTTP.
+- **MasterServer forward**: `POST /api/nodes/{node_id}/supervisor/{op}` + `GET /api/nodes/{node_id}/supervisor/status` forward to the target node's agent (SSRF-guarded `is_safe_peer_host` + `build_safe_url`).
+- **CLI**: `cluster supervisor <op> <node_id> [--svc S]`; `cluster rollout-node <node_id>` drives the per-node drain → rollout sequence (MVP sequential).
+- `NodeInfo.supervisor_available` aggregated from agent heartbeats; `/api/nodes` includes it.
+
+### Added — OPTIONAL fusion-identity integration (issue #74)
+- **`IdentityProvider`** (`security/identity_provider.py`): OPTIONAL client for the Fusion ecosystem identity service. When the operator sets `FUSION_IDENTITY_URL` (opt-in), it verifies JWTs via `POST /api/v1/auth/verify`, sources per-tenant concurrent quota via `/api/v1/admin/tenants/{tid}/quota`, and reports task usage via `/api/v1/tenants/{tid}/usage` (best-effort, never blocks scheduling). When `FUSION_IDENTITY_URL` is unset, `get_identity_provider()` returns `None` and all behavior falls back to local config + `fmu_` UserStore — the **offline default is unchanged** (100% local/offline rule preserved). Fail-closed: when enabled and the identity service is unreachable, `verify_jwt` raises (the operator opted in, identity is the authority); it never silently admits.
+- **`BearerAuthMiddleware` `jwt_verifier` param**: a JWT-shaped token (three dot-separated parts, not `fmu_`) is routed to the injected `jwt_verifier`; on success, `scope["user_id"]`/`["user_role"]`/`["tenant_quota"]` are injected. On `None` (invalid/revoked) or exception (unreachable), 401 fail-closed. The `fmu_` and cluster-token paths are unchanged and coexist — `fmu_` UserStore is NOT retired.
+- **Per-tenant quota**: `ClusterMaster._tenant_quotas` + `set_tenant_quota(tid, concurrent)`; `assign_task` and `acquire/release_chat_slot` use `_tenant_limit_for(user)` (per-tenant override falls back to the global `_tenant_max_concurrent`). master_server submit routes resolve the quota via identity on submit when enabled.
+- **Usage reporting**: `_finalize_task` captures `(user, model_name, success)` and, after releasing the lock, reports usage best-effort via `asyncio.to_thread` (never blocks finalize).
+
+### Changed
+- `assign_task` quota check uses `_tenant_limit_for(task.user)` (per-tenant override first, else global).
+- `_dispatch_to_node` sends `X-Fencing-Token` + `X-Leader-Id` headers (fencing).
+- `/api/nodes` response carries `cluster_view`, `partitioned`, `supervisor_available` fields.
+
+### Configuration
+- `scheduling.idempotency_ttl_seconds` (default 86400) — idempotency key TTL.
+- `drain.long_task_threshold_seconds` (default 300) — drain refuse-long threshold.
+
+### Tests
+- 1433 passed, 14 skipped (baseline 1356 + 77 new). New: `test_exclude_nodes.py`, `test_idempotency.py`, `test_cluster_drain.py`, `test_fencing.py`, `test_supervisor_bridge.py`, `test_identity_provider.py`, `test_jwt_auth.py`; extended `test_scheduling.py` (per-tenant quota), `test_agent_server.py` (supervisor routes), `test_master_server.py` (supervisor forward).
+
 ## [0.15.0] - 2026-09-02 — Active-Active dual-master + real GPU load + pipeline gate
 
 ### Added — Active-Active dual-master (issue #63)
