@@ -5,16 +5,39 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.17.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.18.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1451%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1471%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **🚀 v0.17.0 (2026-09-04) — Epoch/leader_id exposure + per-leader token stale-write reject (#76 #77)**
+> **🚀 v0.18.0 (2026-09-05) — Test batch orchestration protocol for distributed test execution (#79)**
+>
+> - **#79 Test orchestration protocol** — a minimal documented server-side contract so external test platforms (e.g.
+>   fusion-autotest) register a batch of test jobs, have them scheduled across cluster worker nodes, query aggregate
+>   status, fetch a merged report, and discover node driver availability. Three endpoints:
+>   - `POST /api/test/batches { jobs[] }` -> `{ batch_id, status, assignments[] }` (200 dispatched / 202 queued).
+>   - `GET /api/test/batches/{batch_id}` -> derived status (`pending`/`running`/`completed`/`failed`/`partial`).
+>   - `GET /api/test/batches/{batch_id}/report` -> `{ summary: {total,passed,failed,running,pending}, jobs[] }`.
+> - Each job is a `ClusterTask(task_type="test", batch_id=...)` on the existing scheduling core — timeout/retry,
+>   node-down re-queue, fencing, circuit breaker, active-active owner-wins, HA persistence all inherited. **Zero new
+>   scheduling/failure logic.**
+> - **Node drivers** — `NodeInfo.drivers` advertised via `FUSION_NODE_DRIVERS` env; `select_nodes` matches
+>   `required_capability` against `tags OR drivers`. A job with `required_driver="pytest"` lands only on nodes
+>   advertising it.
+> - **Test execution is opt-in and OFF by default** — `FUSION_NODE_TEST_EXEC=1` enables it (appends `"test"` to
+>   advertised drivers + accepts `task_type="test"`). Commands run in `SandboxExecutor` (OS-level
+>   `sandbox-exec`/`unshare` + rlimit + path/network gates). Defense-in-depth: the agent gate rejects test tasks even
+>   if misrouted. **100% local / offline-capable — no cloud, no new deps.**
+>
+> 1471 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md).
+
+---
+
+> **v0.17.0 (2026-09-04) — Epoch/leader_id exposure + per-leader token stale-write reject (#76 #77)**
 >
 > Two issues resolved:
 > - **#76 Epoch/leader_id exposure** — `ClusterMaster.leader_epoch()` (Raft `current_term`) + `current_leader_id()` exposed
@@ -661,6 +684,67 @@ kv.restore("snapshot.json", merge=True)
 qr = replicator.quorum_write("shard-1", data, storage_volume=sv)
 qread = replicator.quorum_read("shard-1", storage_volume=sv)
 ```
+
+---
+
+## 🧫 Test Orchestration Protocol (v0.18.0, #79)
+
+A minimal server-side contract so external test platforms (e.g. fusion-autotest) can register a batch of test jobs,
+have them scheduled across cluster worker nodes, query aggregate status, fetch a merged report, and discover node
+driver availability. No changes to fusion-autotest — only the multi-node server contract. Test-job scheduling IS
+scheduling; it rides the existing scheduling core (timeout/retry, node-down re-queue, fencing, circuit breaker,
+active-active owner-wins, HA persistence) and adds **no cloud and no non-scheduling dependencies**.
+
+### Endpoints
+
+```bash
+TOKEN=$(cat ~/.fusion/multi-node/.cluster_token)
+H="Authorization: Bearer $TOKEN"
+
+# 1. Register a test batch — each job becomes a ClusterTask(task_type="test", batch_id=...).
+#    required_driver is matched against node.drivers (advertised via FUSION_NODE_DRIVERS).
+curl -s -X POST http://127.0.0.1:11452/api/test/batches -H "$H" -H "Content-Type: application/json" -d '{
+  "jobs": [
+    {"job_id": "unit",    "command": ["pytest","-x","tests/"], "required_driver": "pytest", "timeout": 300},
+    {"job_id": "lint",    "command": ["ruff","check","."],      "required_driver": "ruff",   "timeout": 120}
+  ],
+  "user": "ci", "priority": 0, "tier": "general"
+}'
+# -> {"batch_id":"batch_...","status":"pending","assignments":[{"job_id":"unit","task_id":"tjob_...","node_id":"n1","state":"running"}, ...]}
+
+# 2. Query batch status (derived from member task statuses).
+curl -s http://127.0.0.1:11452/api/test/batches/<batch_id> -H "$H"
+# -> {"batch_id":"...","status":"running","assignments":[...]}
+
+# 3. Fetch merged report.
+curl -s http://127.0.0.1:11452/api/test/batches/<batch_id>/report -H "$H"
+# -> {"batch_id":"...","status":"completed","summary":{"total":2,"passed":2,"failed":0,"running":0,"pending":0},"jobs":[...]}
+```
+
+| Endpoint | Method | Returns |
+|----------|--------|---------|
+| `/api/test/batches` | POST | `200` dispatched / `202` queued / `503` all-fail / `400` bad command |
+| `/api/test/batches/{batch_id}` | GET | derived status (`pending`/`running`/`completed`/`failed`/`partial`); `404` unknown |
+| `/api/test/batches/{batch_id}/report` | GET | `{ summary, jobs[] }` with per-job `exit_code`; `404` unknown |
+
+`POST` honors `X-Idempotency-Key`, RBAC (`task:submit`), the HA standby guard (503 on non-leader), and the audit log.
+`passed` = COMPLETED with `exit_code == 0`.
+
+### Node driver registration
+
+```bash
+# Advertise drivers a node can run tests with (comma-separated).
+export FUSION_NODE_DRIVERS="pytest,ruff,cargo"
+# Enable test execution on this node (DEFAULT OFF — must opt in).
+export FUSION_NODE_TEST_EXEC=1
+```
+
+- `FUSION_NODE_DRIVERS` populates `NodeInfo.drivers`, exposed additively in `/api/nodes` (+`/{id}`) and the v1 node
+  contract. `select_nodes` matches a job's `required_driver` against `tags OR drivers`.
+- `FUSION_NODE_TEST_EXEC=1` appends `"test"` to advertised drivers and makes the agent accept `task_type="test"`.
+  **Default `0`** — a node never advertises the `test` driver, so `select_nodes` never picks it for test jobs, and
+  the agent gate rejects test tasks even if misrouted (defense-in-depth). Commands run in `SandboxExecutor`
+  (OS-level `sandbox-exec`/`unshare` + rlimit + path/network gates) with `cwd`/`env` passthrough.
 
 ---
 

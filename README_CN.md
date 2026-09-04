@@ -5,18 +5,37 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.17.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.18.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1451%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1471%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.17.0。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.18.0。
 
 ---
 
-> **🚀 v0.17.0（2026-09-04）— epoch/leader_id 暴露 + per-leader token 过期写入拒绝（#76 #77）**
+> **🚀 v0.18.0（2026-09-05）— 分布式测试执行测试批次编排协议（#79）**
+>
+> - **#79 测试编排协议** — 最小化的服务端契约，供外部测试平台（如 fusion-autotest）注册一批测试 job、跨集群 worker
+>   节点调度、查询聚合状态、取合并报告、发现节点驱动可用性。不改动 fusion-autotest — 仅多节点服务端契约。三个端点：
+>   - `POST /api/test/batches { jobs[] }` -> `{ batch_id, status, assignments[] }`（200 已派发 / 202 入队）。
+>   - `GET /api/test/batches/{batch_id}` -> 派生状态（`pending`/`running`/`completed`/`failed`/`partial`）。
+>   - `GET /api/test/batches/{batch_id}/report` -> `{ summary: {total,passed,failed,running,pending}, jobs[] }`。
+> - 每个 job = `ClusterTask(task_type="test", batch_id=...)`，复用现有调度核心 — 超时重试、节点下线重派、fencing、
+>   熔断、active-active owner-wins、HA 持久化全继承。**零新增调度/失败逻辑。**
+> - **节点驱动** — `NodeInfo.drivers` 经 `FUSION_NODE_DRIVERS` env 上报；`select_nodes` 用 `required_capability`
+>   匹配 `tags OR drivers`。`required_driver="pytest"` 的 job 只派给广告该驱动的节点。
+> - **测试执行默认关、需显式开启** — `FUSION_NODE_TEST_EXEC=1` 开启（追加 `"test"` 到广告驱动 + 接受 `task_type="test"`）。
+>   命令在 `SandboxExecutor` 内跑（OS 级 `sandbox-exec`/`unshare` + rlimit + 路径/网络门控）。纵深防御：即便误派，agent
+>   gate 仍拒。**100% 本地 / 离线可用 — 无云、无新依赖。**
+>
+> 1471 测试，ruff 通过。见 [CHANGELOG](docs/CHANGELOG.md)。
+
+---
+
+> **v0.17.0（2026-09-04）— epoch/leader_id 暴露 + per-leader token 过期写入拒绝（#76 #77）**
 >
 > 两个 issue 修复：
 > - **#76 epoch/leader_id 暴露** — `ClusterMaster.leader_epoch()`（Raft `current_term`）+ `current_leader_id()` 以增量
@@ -678,6 +697,64 @@ kv.restore("snapshot.json", merge=True)
 qr = replicator.quorum_write("shard-1", data, storage_volume=sv)
 qread = replicator.quorum_read("shard-1", storage_volume=sv)
 ```
+
+---
+
+## 🧫 测试编排协议（v0.18.0，#79）
+
+最小化服务端契约，供外部测试平台（如 fusion-autotest）注册一批测试 job、跨集群 worker 节点调度、查询聚合状态、
+取合并报告、发现节点驱动可用性。不改动 fusion-autotest — 仅多节点服务端契约。测试 job 调度即调度，复用现有调度
+核心（超时重试、节点下线重派、fencing、熔断、active-active owner-wins、HA 持久化），**不引入云、不引入非调度依赖**。
+
+### 端点
+
+```bash
+TOKEN=$(cat ~/.fusion/multi-node/.cluster_token)
+H="Authorization: Bearer $TOKEN"
+
+# 1. 注册测试批次 — 每个 job 成为 ClusterTask(task_type="test", batch_id=...)。
+#    required_driver 匹配 node.drivers（经 FUSION_NODE_DRIVERS 上报）。
+curl -s -X POST http://127.0.0.1:11452/api/test/batches -H "$H" -H "Content-Type: application/json" -d '{
+  "jobs": [
+    {"job_id": "unit", "command": ["pytest","-x","tests/"], "required_driver": "pytest", "timeout": 300},
+    {"job_id": "lint", "command": ["ruff","check","."],      "required_driver": "ruff",   "timeout": 120}
+  ],
+  "user": "ci", "priority": 0, "tier": "general"
+}'
+# -> {"batch_id":"batch_...","status":"pending","assignments":[{"job_id":"unit","task_id":"tjob_...","node_id":"n1","state":"running"}, ...]}
+
+# 2. 查询批次状态（由成员任务状态派生）。
+curl -s http://127.0.0.1:11452/api/test/batches/<batch_id> -H "$H"
+# -> {"batch_id":"...","status":"running","assignments":[...]}
+
+# 3. 取合并报告。
+curl -s http://127.0.0.1:11452/api/test/batches/<batch_id>/report -H "$H"
+# -> {"batch_id":"...","status":"completed","summary":{"total":2,"passed":2,"failed":0,"running":0,"pending":0},"jobs":[...]}
+```
+
+| 端点 | 方法 | 返回 |
+|------|------|------|
+| `/api/test/batches` | POST | `200` 已派发 / `202` 入队 / `503` 全失败 / `400` 命令非法 |
+| `/api/test/batches/{batch_id}` | GET | 派生状态（`pending`/`running`/`completed`/`failed`/`partial`）；未知 `404` |
+| `/api/test/batches/{batch_id}/report` | GET | `{ summary, jobs[] }` 含每 job `exit_code`；未知 `404` |
+
+`POST` 支持 `X-Idempotency-Key`、RBAC（`task:submit`）、HA standby 守卫（非 leader 503）、审计日志。
+`passed` = COMPLETED 且 `exit_code == 0`。
+
+### 节点驱动注册
+
+```bash
+# 上报节点可跑测试的驱动（逗号分隔）。
+export FUSION_NODE_DRIVERS="pytest,ruff,cargo"
+# 在本节点开启测试执行（默认关，须显式开启）。
+export FUSION_NODE_TEST_EXEC=1
+```
+
+- `FUSION_NODE_DRIVERS` 填充 `NodeInfo.drivers`，以增量字段暴露于 `/api/nodes`（+`/{id}`）及 v1 节点契约。
+  `select_nodes` 用 job 的 `required_driver` 匹配 `tags OR drivers`。
+- `FUSION_NODE_TEST_EXEC=1` 追加 `"test"` 到广告驱动并使 agent 接受 `task_type="test"`。**默认 `0`** —
+  节点不广告 `test` 驱动，`select_nodes` 不选它派测试 job；agent gate 即便误派也拒（纵深防御）。命令在
+  `SandboxExecutor` 内跑（OS 级 `sandbox-exec`/`unshare` + rlimit + 路径/网络门控），支持 `cwd`/`env` 透传。
 
 ---
 

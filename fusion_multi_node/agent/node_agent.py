@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -284,6 +284,12 @@ class AgentConfig:
     task_cpu_quota: int = 0
     # #63/#65: 节点角色 — worker(默认)/general/heavy。heavy 节点亲和 heavy 任务 + pipeline shard 派发。
     node_role: str = "worker"
+    # #79: 节点广告的测试驱动/能力清单 (逗号分隔 env FUSION_NODE_DRIVERS)。
+    # select_nodes 据 required_capability 匹配 tags 或 drivers — 未广告的驱动不派该节点。
+    drivers: list[str] = field(default_factory=list)
+    # #79: 测试执行开关 (env FUSION_NODE_TEST_EXEC, 默认 "0"=关)。开 → 追加 "test" 到 drivers
+    # 且 execute_task 接受 task_type="test"。关 → 不广告 "test" + 派发即拒 (纵深防御)。
+    test_exec_enabled: bool = False
 
     def __post_init__(self) -> None:
         env_mt = os.environ.get("FUSION_AGENT_MAX_TASKS")
@@ -309,6 +315,15 @@ class AgentConfig:
         env_role = os.environ.get("FUSION_NODE_ROLE", "").strip().lower()
         if env_role in ("worker", "general", "heavy"):
             self.node_role = env_role
+        # #79: 测试驱动 + 测试执行开关 (默认关 — 安全缺省, 不在 worker 跑 operator 命令)。
+        env_drivers = os.environ.get("FUSION_NODE_DRIVERS", "").strip()
+        if env_drivers:
+            self.drivers = [d.strip() for d in env_drivers.split(",") if d.strip()]
+        env_test_exec = os.environ.get("FUSION_NODE_TEST_EXEC", "0").strip()
+        if env_test_exec == "1":
+            self.test_exec_enabled = True
+            if "test" not in self.drivers:
+                self.drivers.append("test")
 
 
 class NodeAgent:
@@ -664,6 +679,7 @@ class NodeAgent:
                     "protocol_version": _node_protocol_version,
                     "role": self.config.node_role,
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
+                    "drivers": self.config.drivers,
                     "active_tasks": 0,
                     "max_tasks": self.config.max_tasks,
                 },
@@ -752,6 +768,8 @@ class NodeAgent:
                     return await self._execute_pipeline_step(task)
                 if task_type == "supervisor_rpc":
                     return await self._execute_supervisor(task)
+                if task_type == "test":
+                    return await self._execute_test(task)
                 return {"error": f"未知任务类型: {task_type}"}
             except asyncio.CancelledError:
                 logger.warning(f"任务被取消中止: {task_id}")
@@ -1027,6 +1045,53 @@ class NodeAgent:
         except Exception as e:
             logger.error(f"P3 pipeline_step 失败: task={task_id} model={model_id}: {e}")
             return {"task_id": task_id, "error": f"pipeline_step: {e}"}
+
+    async def _execute_test(self, task: dict[str, Any]) -> dict[str, Any]:
+        """#79 测试任务 — 在 SandboxExecutor 子进程内跑 operator 下发的命令。
+
+        安全: 默认 test_exec_enabled=False (env FUSION_NODE_TEST_EXEC=1 开),
+        且 select_nodes 据 required_capability 匹配 drivers — 未广告 "test" 不派本节点。
+        即便误派, 此处 gate 再拒 (纵深防御)。沙箱做 OS 级隔离 (sandbox-exec/unshare + rlimit)。
+        """
+        task_id = task.get("task_id", "")
+        if not self.config.test_exec_enabled:
+            logger.warning(f"#79 测试执行未启用, 拒 task={task_id}")
+            return {
+                "task_id": task_id,
+                "error": "测试执行未启用 (设 FUSION_NODE_TEST_EXEC=1)",
+                "test_exec_disabled": True,
+            }
+        if self._sandbox is None:
+            logger.error(f"#79 沙箱未配置, 拒绝执行测试 task={task_id}")
+            return {
+                "task_id": task_id,
+                "error": "沙箱未配置, 拒绝执行测试",
+                "sandbox_unavailable": True,
+            }
+        params = task.get("params", {}) or {}
+        command = params.get("command", [])
+        cwd = params.get("cwd", "") or None
+        env = params.get("env") or None
+        timeout = int(params.get("timeout") or task.get("timeout_seconds") or 300)
+        if not command or not isinstance(command, list) or not all(isinstance(c, str) for c in command):
+            logger.warning(f"#79 测试命令非法, 拒 task={task_id} command={command!r}")
+            return {"task_id": task_id, "error": "command 必须为非空 list[str]", "invalid_command": True}
+        logger.info(f"#79 执行测试: task={task_id} cmd={command} cwd={cwd} timeout={timeout}")
+        try:
+            result = await self._sandbox.execute_in_sandbox(
+                task_id=task_id,
+                command=command,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+            )
+            result["task_id"] = task_id
+            result["node_id"] = self.config.node_id
+            logger.info(f"#79 测试完成: task={task_id} exit_code={result.get('exit_code')} ok={result.get('success')}")
+            return result
+        except Exception as e:
+            logger.error(f"#79 测试执行失败: task={task_id}: {e}")
+            return {"task_id": task_id, "error": f"test exec: {e}", "node_id": self.config.node_id}
 
     # ── 故障上报 ──
 
