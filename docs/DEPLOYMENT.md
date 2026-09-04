@@ -165,6 +165,46 @@ master-2 镜像配置 (`node_id`/`peers` 互换)。两 master 各跑一份 (laun
 - master 将 `fencing_rejected` 归为不可重试逻辑失败 (过期 master 不应重试)。
 - `/api/nodes` 响应带 `cluster_view` (本 master 为 leader 或近期从 leader 同步) + `partitioned` (本 master 为无法达 quorum 的非 leader 少数派)。**客户端 (fusion-studio / gateway) 读 `partitioned` 对分区 master 全局禁写**。
 
+## epoch/leader_id 暴露 + per-leader token (v0.17.0, issue #76 #77)
+
+### epoch/leader_id 客户端契约 (issue #76)
+
+集群 API 响应增量暴露领导纪元与当前 leader 标识, 客户端据此**确定性拒绝过期 leader 响应**, 替代客户端侧脑裂启发式 (跨轮询数 master 数)。
+
+暴露字段 (`/api/nodes`、`/api/nodes/{id}`、`/api/cluster/stats`、`/api/v1/nodes`、`/api/v1/cluster/stats`):
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `epoch` | int | 领导纪元 (Raft `current_term`, 单调递增)。HA standby → 选举 term; 单 master / active-active → `0` |
+| `leader_id` | str | 当前 leader 标识。HA → 当选 leader node id; active-active → 本 master `_ha_node_id`; 单 master → `""` |
+| `is_leader` | bool | 本 master 是否为 leader |
+| `leader_token` | str | per-leader token (见下, 仅 `/api/cluster/stats` + v1 stats) |
+
+客户端判定逻辑:
+- `epoch == 0` 且 `leader_id == ""` → 单权威 (单 master), 无脑裂概念, 不拒。
+- `epoch` 递增 → 新 leader 当选; 客户端缓存所见最大 epoch, 收到更小 epoch 的响应 → 视为过期 leader, 拒绝/重试。
+- 仅增量字段 — 现有客户端忽略未知字段, 无需改动即可升级。
+
+### per-leader token 过期写入拒绝 (issue #77, opt-in)
+
+**仅 HA standby 模式 + env `FUSION_LEADER_TOKEN_ENFORCE=1` 生效**。单 master / active-active 永不拒绝, 离线默认不变。
+
+- `leader_token()` = `HMAC-SHA256(集群 token, "{epoch}:{leader_id}")[:32]`, 复用现有共享集群 token (`FUSION_CLUSTER_TOKEN` / `.cluster_token`), 无新秘密、无云、离线安全。同一 epoch+leader_id 在所有 master 派生同一 token; failover (新 epoch) 派生不同 token。
+- **`GET /api/leader/credentials`** 返回 `{epoch, leader_id, leader_token, is_leader, enforce}` (Bearer 鉴权不豁免)。客户端 failover 后取此端点刷新本地 token, 再发变更请求带 `X-Leader-Token: <token>`。
+- submit (`/api/tasks/submit`、`/api/v1/tasks/submit`) + cancel (`/api/tasks/{task_id}/cancel`) 路由读 `X-Leader-Token`; enforce 开 + HA + header 存在且 ≠ 当前 `leader_token()` → **`409 LeaderChanged`** (warning + 审计 `leader_token_reject`)。
+- **缺 header 仍放行** (灰度兼容 — 纵深防御: 不发 header 的客户端行为不变; 发了过期 token 才拒)。
+
+启用 (仅 HA standby 部署):
+
+```bash
+export FUSION_LEADER_TOKEN_ENFORCE=1
+```
+
+客户端刷新流程:
+1. 提交收到 `409 LeaderChanged` → 判定 failover 已发生。
+2. `GET /api/leader/credentials` 取新 `leader_token`。
+3. 后续变更请求带 `X-Leader-Token: <新 token>` 重试。
+
 ## 可选 fusion-identity 集成 (v0.16.0, issue #74)
 
 **OPTIONAL — 默认离线不变**。fusion-identity 是 Fusion 生态的租户/鉴权服务 (签发 JWT + per-tenant 配额 + 用量)。multi-node 是它的可选客户端:

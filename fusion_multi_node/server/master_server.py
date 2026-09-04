@@ -288,12 +288,19 @@ class V1NodeResponse(BaseModel):
     max_tasks: int
     score: float
     last_heartbeat: float
+    # #76: 领导纪元 + leader_id (每节点同值, 客户端按节点比对无需另调 stats)。
+    epoch: int = 0
+    leader_id: str = ""
 
 
 class V1NodeListResponse(BaseModel):
     total: int
     online: int
     nodes: list[V1NodeResponse]
+    # #76: 集群级 epoch/leader_id/is_leader (v1 列表响应一并暴露, 客户端单调即得)。
+    epoch: int = 0
+    leader_id: str = ""
+    is_leader: bool = True
 
 
 class V1NodeRegisterResponse(BaseModel):
@@ -495,6 +502,44 @@ class MasterServer:
             return
         if q is not None:
             await self.master.set_tenant_quota(user, q)
+
+    def _check_leader_token(self, request) -> None:
+        """#77: per-leader token 过期写入拒绝 (opt-in, HA standby 模式)。
+
+        仅当 master.leader_token_enforce() (HA + env FUSION_LEADER_TOKEN_ENFORCE=1) 时生效。
+        客户端发 X-Leader-Token: <token>; 与当前 master.leader_token() 不符 → 409 LeaderChanged。
+        缺 header → 放行 (灰度兼容, 不破坏无感知客户端; 仅显式发过期 token 才拒)。
+        单 Master / active-active: enforce 永关, 本方法 no-op。
+        """
+        if not self.master.leader_token_enforce():
+            return
+        presented = request.headers.get("x-leader-token", "").strip()
+        if not presented:
+            # 缺 header — 灰度放行 (客户端尚未接入 token 刷新)
+            return
+        expected = self.master.leader_token()
+        if presented != expected:
+            logger.warning(
+                f"#77 per-leader token 过期拒写: presented_epoch_token={presented[:8]}.. "
+                f"expected={expected[:8]}.. epoch={self.master.leader_epoch()} "
+                f"leader_id={self.master.current_leader_id()}"
+            )
+            scope = request.scope
+            actor = scope.get("user_id") or ""
+            if not actor:
+                for name, value in scope.get("headers", []):
+                    if name == b"x-node-id":
+                        actor = value.decode("utf-8", errors="replace")
+                        break
+            self._audit.log(
+                actor=actor or "unknown",
+                action="leader_token_reject",
+                path=request.url.path,
+                method=request.method,
+                result="denied",
+                detail=f"epoch={self.master.leader_epoch()} leader_id={self.master.current_leader_id()}",
+            )
+            raise HTTPException(status_code=409, detail="LeaderChanged: leader 已切换, 刷新 token 后重试")
 
     def _setup_routes(self):
         app = self.app
@@ -1049,14 +1094,27 @@ class MasterServer:
             online = await self.master.get_online_nodes()
             all_nodes = await self.master.snapshot_nodes()
             view = self.master.membership_view()
+            # #76: 集群级 epoch/leader_id (客户端确定性拒过期 leader); 每节点条目同值 (同一 master 视图)。
+            epoch = self.master.leader_epoch()
+            leader_id = self.master.current_leader_id()
+            nodes_out = []
+            for n in all_nodes:
+                entry = _node_to_resp(n)
+                entry["epoch"] = epoch
+                entry["leader_id"] = leader_id
+                nodes_out.append(entry)
             return {
                 "total": len(all_nodes),
                 "online": len(online),
-                "nodes": [_node_to_resp(n) for n in all_nodes],
+                "nodes": nodes_out,
                 # #72: 成员视图权威性 — cluster_view=本 master 视图权威 (leader 或近窗口同步自 leader);
                 # partitioned=少数派脑裂 (非 leader 且 leader 未知, 无法达仲裁, 客户端应全局写禁用)。
                 "cluster_view": view["cluster_view"],
                 "partitioned": view["partitioned"],
+                # #76: 领导纪元 + leader_id (单调, failover 递增; 客户端拒 epoch < 已知最大值)。
+                "epoch": epoch,
+                "leader_id": leader_id,
+                "is_leader": self.master._is_leader,
             }
 
         @app.get("/api/nodes/{node_id}")
@@ -1064,7 +1122,11 @@ class MasterServer:
             node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
-            return _node_to_resp(node)
+            entry = _node_to_resp(node)
+            # #76: 单节点详情亦带 epoch/leader_id (客户端逐节点比对, 免额外 stats 调用)。
+            entry["epoch"] = self.master.leader_epoch()
+            entry["leader_id"] = self.master.current_leader_id()
+            return entry
 
         @app.delete("/api/nodes/{node_id}")
         async def unregister_node(node_id: str):
@@ -1100,6 +1162,8 @@ class MasterServer:
                 and not self.master._election.leader_known
             ):
                 raise HTTPException(status_code=503, detail="选举过渡中, leader 未定, 拒绝任务提交")
+            # #77: per-leader token 过期写入拒绝 (opt-in, HA + env FUSION_LEADER_TOKEN_ENFORCE=1)。
+            self._check_leader_token(request)
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
             # #65: pipeline 未启用 → 早拒 400 (上游 /distributed/* 未实现 fusion-mlx#621)。
             # 不走下游 404 → 任务直接 FAILED; 这里 fail visibly (Rule 12)。
@@ -1347,6 +1411,8 @@ class MasterServer:
                     detail="权限不足: task cancel",
                 )
                 raise HTTPException(status_code=403, detail="权限不足: task cancel")
+            # #77: per-leader token 过期写入拒绝 (opt-in, HA + env FUSION_LEADER_TOKEN_ENFORCE=1)。
+            self._check_leader_token(request)
             task = await self.master.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
@@ -1501,6 +1567,19 @@ class MasterServer:
         async def cluster_stats():
             return await self.master.get_stats()
 
+        # ── #76/#77 领导凭据端点 ──
+        # 客户端 (Fusion Studio) failover 后取当前 epoch/leader_id/leader_token, 再发变更请求带 X-Leader-Token。
+        @app.get("/api/leader/credentials")
+        async def leader_credentials(request: Request):
+            _enforce_user_rbac(request, "/api/leader/credentials", "GET")
+            return {
+                "epoch": self.master.leader_epoch(),
+                "leader_id": self.master.current_leader_id(),
+                "leader_token": self.master.leader_token(),
+                "is_leader": self.master._is_leader,
+                "enforce": self.master.leader_token_enforce(),
+            }
+
         # ── M7-06 监控 API ──
 
         @app.get("/api/v1/cluster/stats", response_model=V1ClusterStatsResponse)
@@ -1519,6 +1598,12 @@ class MasterServer:
                     "total_memory_gb": round(total_mem, 2),
                     "available_memory_gb": round(avail_mem, 2),
                     "utilization": round(1.0 - avail_mem / max(total_mem, 0.01), 4) if total_mem > 0 else 0.0,
+                    # #76: 领导纪元 + leader_id + is_leader (客户端确定性拒过期 leader 响应)。
+                    "epoch": stats.get("epoch", 0),
+                    "leader_id": stats.get("leader_id", ""),
+                    "is_leader": stats.get("is_leader", True),
+                    # #77: per-leader token (failover 后刷新; 旧 token 提交 → 409, opt-in enforce)。
+                    "leader_token": stats.get("leader_token", ""),
                 },
                 "tasks": {
                     "total": stats.get("total_tasks", 0),
@@ -1737,10 +1822,22 @@ class MasterServer:
         async def v1_list_nodes():
             online = await self.master.get_online_nodes()
             all_nodes = await self.master.snapshot_nodes()
+            # #76: 每节点条目带 epoch/leader_id (同集群视图同值)。
+            epoch = self.master.leader_epoch()
+            leader_id = self.master.current_leader_id()
+            nodes_out = []
+            for n in all_nodes:
+                entry = _node_to_resp(n)
+                entry["epoch"] = epoch
+                entry["leader_id"] = leader_id
+                nodes_out.append(entry)
             return {
                 "total": len(all_nodes),
                 "online": len(online),
-                "nodes": [_node_to_resp(n) for n in all_nodes],
+                "nodes": nodes_out,
+                "epoch": epoch,
+                "leader_id": leader_id,
+                "is_leader": self.master._is_leader,
             }
 
         @app.get("/api/v1/nodes/{node_id}", response_model=V1NodeResponse)
@@ -1748,7 +1845,10 @@ class MasterServer:
             node = await self.master.get_node(node_id)
             if not node:
                 raise HTTPException(status_code=404, detail=f"节点 {node_id} 不存在")
-            return _node_to_resp(node)
+            entry = _node_to_resp(node)
+            entry["epoch"] = self.master.leader_epoch()
+            entry["leader_id"] = self.master.current_leader_id()
+            return entry
 
         @app.post("/api/v1/nodes/register", response_model=V1NodeRegisterResponse)
         async def v1_register_node(req: NodeRegisterRequest, request: Request):
@@ -1863,8 +1963,9 @@ class MasterServer:
                 raise HTTPException(status_code=403, detail="权限不足: task submit")
             if self.master._election is not None and not self.master._is_leader:
                 raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝任务提交")
+            # #77: per-leader token 过期写入拒绝 (opt-in, HA + env FUSION_LEADER_TOKEN_ENFORCE=1)。
+            self._check_leader_token(request)
             mode = ParallelMode.PIPELINE if req.mode == "pipeline" else ParallelMode.DATA
-            # #65: pipeline 未启用 → 早拒 400 (上游 /distributed/* 未实现 fusion-mlx#621)。
             if mode == ParallelMode.PIPELINE:
                 _pipeline_enabled = (
                     bool(self._cluster_config.get("parallel.pipeline_enabled", False))
