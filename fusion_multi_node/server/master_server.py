@@ -26,6 +26,7 @@ from fusion_multi_node.master import (
     TaskStatus,
 )
 from fusion_multi_node.master.load_metrics import LoadMetrics, RoutingStrategy
+from fusion_multi_node.master.test_batch import TestBatch, TestJob
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.security.mtls import scheme as mtls_scheme
 from fusion_multi_node.security.permission import NodeRole, PermissionManager, UserRole, check_user_path_access
@@ -113,6 +114,8 @@ class NodeRegisterRequest(BaseModel):
     network_rtt_ms: float = 0.0
     # #73: 本机 fusion-sv supervisor 可用 (注册时上报)。
     supervisor_available: bool = False
+    # #79 节点驱动/能力清单 (agent 上报, select_nodes 按 required_capability 匹配 tags ∪ drivers)。
+    drivers: list[str] = []
 
 
 class HeartbeatRequest(BaseModel):
@@ -155,6 +158,8 @@ class TaskSubmitRequest(BaseModel):
     temperature: float = 0.7
     # #63: 任务分级 — heavy/general。heavy 亲和 heavy 角色节点; pipeline shard 须 heavy。
     tier: str = "general"
+    # #79 测试批次归属 id (同一批次多任务共享, /api/test/batches 聚合状态/报告)。
+    batch_id: str = ""
 
 
 class TaskCancelRequest(BaseModel):
@@ -291,6 +296,8 @@ class V1NodeResponse(BaseModel):
     # #76: 领导纪元 + leader_id (每节点同值, 客户端按节点比对无需另调 stats)。
     epoch: int = 0
     leader_id: str = ""
+    # #79: 节点驱动/能力清单。
+    drivers: list[str] = []
 
 
 class V1NodeListResponse(BaseModel):
@@ -403,6 +410,38 @@ class ConfirmRelayRequest(BaseModel):
 class V1ConfirmListResponse(BaseModel):
     confirms: list[dict[str, Any]]
     count: int
+
+
+# #79 测试批次编排协议 — /api/test/batches/* 请求/响应模型。
+class TestJobRequest(BaseModel):
+    job_id: str = ""
+    command: list[str]
+    cwd: str = ""
+    env: dict[str, str] = {}
+    timeout: int = 300
+    required_driver: str = ""
+    preferred_node_id: str = ""
+    exclude_nodes: list[str] = []
+
+
+class TestBatchSubmitRequest(BaseModel):
+    jobs: list[TestJobRequest]
+    user: str = ""
+    priority: int = 0
+    tier: str = "general"
+
+
+class TestBatchResponse(BaseModel):
+    batch_id: str
+    status: str
+    assignments: list[dict[str, Any]]
+
+
+class TestBatchReportResponse(BaseModel):
+    batch_id: str
+    status: str
+    summary: dict[str, int]
+    jobs: list[dict[str, Any]]
 
 
 # ── Master Server ──
@@ -797,6 +836,7 @@ class MasterServer:
                 max_tasks=req.max_tasks,
                 network_rtt_ms=req.network_rtt_ms,
                 supervisor_available=req.supervisor_available,
+                drivers=req.drivers,
                 last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
@@ -870,6 +910,7 @@ class MasterServer:
                     tags=md.get("tags", []),
                     active_tasks=0,
                     max_tasks=md.get("max_tasks", 4),
+                    drivers=md.get("drivers", []),
                     last_heartbeat=time.time(),
                 )
                 allowed = await self.master.register_node(node)
@@ -1209,6 +1250,7 @@ class MasterServer:
                     "max_tokens": req.max_tokens,
                     "temperature": req.temperature,
                 },
+                batch_id=req.batch_id,
             )
             self._audit.log(
                 actor=effective_user or "unknown",
@@ -1240,6 +1282,214 @@ class MasterServer:
                 resp["queued"] = True
                 return JSONResponse(status_code=202, content=resp)
             return _task_to_resp(task)
+
+        # #79 测试批次编排协议 — /api/test/batches/* (供 fusion-autotest 等外部测试平台调度分布式测试)。
+        # 复用现有调度核心: 批次内每 job = ClusterTask(task_type="test", batch_id=...),
+        # assign_task 派发, 失败/超时/节点下线重派/fencing/熔断全继承 (零新增失败逻辑)。
+        async def _build_test_batch(req: TestBatchSubmitRequest, request: Request) -> dict[str, Any]:
+            user_actor = _enforce_user_rbac(request, "/api/test/batches", "POST")
+            if not await _check_permission("master", "/api/tasks/submit", "POST"):
+                self._audit.log(
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/test/batches",
+                    method="POST",
+                    result="denied",
+                    detail="权限不足: test batch submit",
+                )
+                raise HTTPException(status_code=403, detail="权限不足: test batch submit")
+            if self.master._election is not None and not self.master._is_leader:
+                raise HTTPException(status_code=503, detail="standby 模式, 非 leader 拒绝测试批次提交")
+            effective_user = user_actor if user_actor else req.user
+            await self._resolve_tenant_quota(effective_user)
+            _aa_prefix = self.master.aa_task_prefix()
+            _aa_owner = self.master.aa_owner()
+            _batch_id = (
+                f"{_aa_prefix}-batch_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"batch_{uuid.uuid4().hex[:12]}"
+            )
+            now = time.time()
+            jobs_meta: list[TestJob] = []
+            assignments: list[dict[str, Any]] = []
+            queued_any = False
+            assigned_any = False
+            for idx, job in enumerate(req.jobs):
+                if not job.command or not isinstance(job.command, list):
+                    raise HTTPException(status_code=400, detail=f"job[{idx}].command 必须为非空 list[str]")
+                _jid = job.job_id or f"job_{idx}_{uuid.uuid4().hex[:8]}"
+                _tid = f"{_aa_prefix}-tjob_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"tjob_{uuid.uuid4().hex[:12]}"
+                task = ClusterTask(
+                    task_id=_tid,
+                    name=f"test-batch:{_jid}",
+                    mode=ParallelMode.DATA,
+                    timeout_seconds=float(job.timeout),
+                    user=effective_user,
+                    created_at=now,
+                    required_capability=job.required_driver,
+                    preferred_node_id=job.preferred_node_id,
+                    exclude_nodes=list(job.exclude_nodes),
+                    priority=req.priority,
+                    tier=req.tier,
+                    task_type="test",
+                    owner_master=_aa_owner,
+                    batch_id=_batch_id,
+                    params={
+                        "command": job.command,
+                        "cwd": job.cwd,
+                        "env": dict(job.env),
+                        "timeout": job.timeout,
+                    },
+                )
+                ok = await self.master.assign_task(task)
+                jobs_meta.append(
+                    TestJob(
+                        job_id=_jid,
+                        task_id=_tid,
+                        required_driver=job.required_driver,
+                        created_at=now,
+                    )
+                )
+                node_id = task.assigned_nodes[0] if task.assigned_nodes else ""
+                state = task.status.value if hasattr(task.status, "value") else str(task.status)
+                if task.status == TaskStatus.PENDING and task.task_id in {
+                    t.task_id for t in self.master._pending_queue
+                }:
+                    queued_any = True
+                    state = "pending"
+                if ok:
+                    assigned_any = True
+                assignments.append({"job_id": _jid, "task_id": _tid, "node_id": node_id, "state": state})
+            batch = TestBatch(
+                batch_id=_batch_id,
+                created_at=now,
+                owner_master=_aa_owner,
+                jobs=jobs_meta,
+            )
+            self.master.register_test_batch(batch)
+            self._audit.log(
+                actor=effective_user or "unknown",
+                action="test_batch_submit",
+                path="/api/test/batches",
+                method="POST",
+                node_id="",
+                result="ok",
+                detail=f"batch_id={_batch_id} jobs={len(jobs_meta)}",
+            )
+            status = "pending"
+            if not assigned_any and not queued_any:
+                raise HTTPException(status_code=503, detail="可用节点不足, 批次内所有 job 派发失败")
+            return {
+                "batch_id": _batch_id,
+                "status": status,
+                "assignments": assignments,
+            }
+
+        @app.post("/api/test/batches", response_model=TestBatchResponse)
+        async def submit_test_batch(req: TestBatchSubmitRequest, request: Request):
+            _idem_key = request.headers.get("x-idempotency-key", "").strip()
+            if _idem_key:
+                existing_id = await self.master.try_idempotency(_idem_key)
+                if existing_id is not None:
+                    existing_batch = self.master.get_test_batch(existing_id)
+                    if existing_batch is not None:
+                        logger.info(f"#79 幂等命中, 复用批次: key={_idem_key!r} batch_id={existing_id}")
+                        assignments = [
+                            {
+                                "job_id": j.job_id,
+                                "task_id": j.task_id,
+                                "node_id": j.node_id,
+                                "state": "pending",
+                            }
+                            for j in existing_batch.jobs
+                        ]
+                        return {"batch_id": existing_id, "status": existing_batch.status, "assignments": assignments}
+            result = await _build_test_batch(req, request)
+            if _idem_key:
+                await self.master.register_idempotency(_idem_key, result["batch_id"])
+            code = 202 if any(a["state"] == "pending" for a in result["assignments"]) else 200
+            return JSONResponse(status_code=code, content=result)
+
+        @app.get("/api/test/batches/{batch_id}")
+        async def get_test_batch(batch_id: str, request: Request):
+            if not await _check_permission("master", "/api/tasks", "GET"):
+                self._audit.log(
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/test/batches",
+                    method="GET",
+                    result="denied",
+                    detail="权限不足: test batch status",
+                )
+                raise HTTPException(status_code=403, detail="权限不足: test batch status")
+            batch = self.master.get_test_batch(batch_id)
+            if batch is None:
+                raise HTTPException(status_code=404, detail=f"测试批次 {batch_id} 不存在")
+            status = batch.derive_status(self.master.tasks)
+            assignments = []
+            for j in batch.jobs:
+                task = self.master.tasks.get(j.task_id)
+                state = task.status.value if task and hasattr(task.status, "value") else "pending"
+                node_id = task.assigned_nodes[0] if task and task.assigned_nodes else j.node_id
+                assignments.append({"job_id": j.job_id, "task_id": j.task_id, "node_id": node_id, "state": state})
+            return {"batch_id": batch_id, "status": status, "assignments": assignments}
+
+        @app.get("/api/test/batches/{batch_id}/report")
+        async def get_test_batch_report(batch_id: str, request: Request):
+            if not await _check_permission("master", "/api/tasks", "GET"):
+                self._audit.log(
+                    actor="master",
+                    action="permission_deny",
+                    path="/api/test/batches/report",
+                    method="GET",
+                    result="denied",
+                    detail="权限不足: test batch report",
+                )
+                raise HTTPException(status_code=403, detail="权限不足: test batch report")
+            batch = self.master.get_test_batch(batch_id)
+            if batch is None:
+                raise HTTPException(status_code=404, detail=f"测试批次 {batch_id} 不存在")
+            status = batch.derive_status(self.master.tasks)
+            summary = {"total": len(batch.jobs), "passed": 0, "failed": 0, "running": 0, "pending": 0}
+            job_reports = []
+            for j in batch.jobs:
+                task = self.master.tasks.get(j.task_id)
+                state = task.status.value if task and hasattr(task.status, "value") else "pending"
+                result_obj = None
+                error = ""
+                exit_code = None
+                if task:
+                    result_obj = task.result if isinstance(task.result, dict) else None
+                    error = task.error or ""
+                    if isinstance(result_obj, dict):
+                        # _dispatch_data 包装 result={"outputs":[{exit_code,...}], ...};
+                        # 取首个 output 的 exit_code (DATA 单节点派发)。
+                        outputs = result_obj.get("outputs") or []
+                        if outputs and isinstance(outputs[0], dict):
+                            exit_code = outputs[0].get("exit_code")
+                        else:
+                            exit_code = result_obj.get("exit_code")
+                    node_id = task.assigned_nodes[0] if task.assigned_nodes else j.node_id
+                else:
+                    node_id = j.node_id
+                if state == "completed" and exit_code == 0:
+                    summary["passed"] += 1
+                elif state in ("failed", "timeout", "cancelled"):
+                    summary["failed"] += 1
+                elif state == "running":
+                    summary["running"] += 1
+                else:
+                    summary["pending"] += 1
+                job_reports.append(
+                    {
+                        "job_id": j.job_id,
+                        "task_id": j.task_id,
+                        "node": node_id,
+                        "state": state,
+                        "result": result_obj,
+                        "error": error,
+                        "exit_code": exit_code,
+                    }
+                )
+            return {"batch_id": batch_id, "status": status, "summary": summary, "jobs": job_reports}
 
         @app.get("/api/tasks")
         async def list_tasks():
@@ -1914,6 +2164,7 @@ class MasterServer:
                 max_tasks=req.max_tasks,
                 network_rtt_ms=req.network_rtt_ms,
                 supervisor_available=req.supervisor_available,
+                drivers=req.drivers,
                 last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
@@ -2005,6 +2256,7 @@ class MasterServer:
                     "max_tokens": req.max_tokens,
                     "temperature": req.temperature,
                 },
+                batch_id=req.batch_id,
             )
             self._audit.log(
                 actor=effective_user or "unknown",
@@ -2522,6 +2774,7 @@ def _node_to_resp(n: NodeInfo) -> dict[str, Any]:
         "last_heartbeat": n.last_heartbeat,
         "draining": n.draining,
         "supervisor_available": n.supervisor_available,
+        "drivers": n.drivers,
     }
 
 
@@ -2544,4 +2797,5 @@ def _task_to_resp(t: ClusterTask) -> dict[str, Any]:
         "cancel_reason": t.cancel_reason,
         "sub_tasks": t.sub_tasks,
         "result": t.result,
+        "batch_id": t.batch_id,
     }

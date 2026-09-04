@@ -77,6 +77,26 @@ async def test_execute_in_sandbox_not_found(executor):
     assert result["exit_code"] != 0
 
 
+@pytest.mark.asyncio
+async def test_execute_in_sandbox_cwd_env(executor):
+    # #79: cwd + env 透传 — pwd 输出指定目录, env 注入自定义变量。
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        result = await executor.execute_in_sandbox(
+            "t-cwd",
+            ["sh", "-c", "echo $PWD $FUSION_TEST_VAR"],
+            cwd=td,
+            env={"FUSION_TEST_VAR": "batch-ok"},
+        )
+        assert "success" in result
+        if executor.backend == "python-resource":
+            assert result["exit_code"] == 0
+            assert result["success"] is True
+            assert td in result["stdout"]
+            assert "batch-ok" in result["stdout"]
+
+
 class TestMetalCryptoBackend:
     def test_detect(self):
         from fusion_multi_node.security.crypto import MetalCryptoBackend

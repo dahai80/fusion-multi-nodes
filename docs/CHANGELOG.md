@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-05 — Test batch orchestration protocol for distributed test execution
+
+### Added — test orchestration protocol (issue #79)
+Minimal documented server-side contract so external test platforms (e.g. fusion-autotest) can register a batch of test jobs, have them scheduled across cluster worker nodes, query aggregate status, fetch a merged report, and discover which nodes are online + their driver availability. **No changes to fusion-autotest** — only the multi-node server contract. fusion-multi-node stays a 100% local / offline-capable distributed compute scheduler; test-job scheduling IS scheduling (in scope), reuses the existing scheduling core, adds no cloud and no non-scheduling deps.
+
+- **`POST /api/test/batches`** — register a test batch. Body `TestBatchSubmitRequest`: `{ jobs: [{ job_id, command: list[str], cwd, env: dict, timeout, required_driver, preferred_node_id, exclude_nodes }], user, priority, tier }`. Each job becomes a `ClusterTask(task_type="test", batch_id=...)` and is dispatched via the existing `assign_task` -> `select_nodes` -> `_dispatch_to_node` path. Returns `{ batch_id, status, assignments: [{ job_id, task_id, node_id, state }] }` — `200` when all jobs dispatched, `202` when any job is queued (no node available yet). Honors `X-Idempotency-Key`, RBAC (`task:submit`), HA standby guard (503 on non-leader), audit log.
+- **`GET /api/test/batches/{batch_id}`** — batch status derived from member task statuses: `pending` -> `running` -> `completed` (all pass) / `failed` (all terminal-fail) / `partial` (mixed). `404` if unknown.
+- **`GET /api/test/batches/{batch_id}/report`** — merged report: `{ batch_id, status, summary: { total, passed, failed, running, pending }, jobs: [{ job_id, task_id, node, state, result, error, exit_code }] }`. `passed` = COMPLETED with `exit_code == 0`.
+- **Node driver advertisement** — `NodeInfo.drivers: list[str]`. Agent advertises via `FUSION_NODE_DRIVERS` env (comma-separated). `select_nodes` matches `required_capability` against `tags OR drivers` (additive — tags still matched). A test job with `required_driver="pytest"` is only assigned to nodes advertising that driver.
+- **`/api/nodes` (+`/{id}`) and v1 node responses** — carry `drivers` additively.
+
+### Added — node-side test execution (opt-in, default OFF)
+- **`FUSION_NODE_TEST_EXEC`** env (default `0`): when `1`, the agent appends `"test"` to its advertised `drivers` and accepts `task_type="test"`. Default OFF — nodes do not advertise the `test` driver, so `select_nodes` never picks them for test jobs. Defense-in-depth: the agent gate rejects test tasks even if misrouted.
+- **`NodeAgent._execute_test`** — runs the operator-supplied command via the existing `SandboxExecutor.execute_in_sandbox` (OS-level `sandbox-exec`/`unshare` + rlimit + path/network gates). Rejects if `test_exec_enabled` is off, if no sandbox is configured, or if `command` is not a non-empty `list[str]`.
+- **`SandboxExecutor.execute_in_sandbox`** — extended with `cwd` and `env` parameters (default `None` = existing behavior), passed through to the subprocess. Adds a `success` boolean (`exit_code == 0`) to the result dict.
+- **`agent_server.py`** — `ALLOWED_TASK_TYPES` adds `"test"`; `TEST_EXTRA_KEYS = {"command","cwd","env","timeout"}` lets test params flow through the `/api/execute` extra-key filter to `_execute_test`.
+
+### Reuse — zero new failure/scheduling logic
+Batch jobs are ordinary `ClusterTask` instances. All existing semantics are inherited unchanged: timeout -> auto-retry queue (max 1), node-down -> MIGRATED -> re-queue, fencing token gate, circuit breaker / node ban, active-active owner-wins (`batch_id` prefixed, `owner_master` set), HA task persistence (batch metadata snapshotted alongside tasks in the atomic task store, restored on master restart).
+
+### Tests
+- `tests/test_test_batch.py` — submit/queue, status derivation (completed/failed/partial), report aggregation, node `drivers` exposure, `select_nodes` driver match/miss, no-driver-node queueing, invalid-command 400, 404, batch snapshot/restore, `test_exec` disabled default (12 cases).
+- `tests/test_sandbox_executor.py` — `cwd` + `env` passthrough case.
+- Suite: 1471 passed, 0 failed, 8 skipped (baseline 1451 + 20 new).
+
 ## [0.17.0] - 2026-09-04 — Epoch/leader_id exposure + per-leader token stale-write reject
 
 ### Added — epoch/leader_id exposure (issue #76)

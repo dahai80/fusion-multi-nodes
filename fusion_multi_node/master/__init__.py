@@ -48,6 +48,7 @@ from .task_sharding import (
     TaskSharder,
 )
 from .task_spec import TaskPriority, TaskSpec
+from .test_batch import TestBatch, TestJob
 
 __all__ = [
     "STRATEGY_WEIGHTS",
@@ -82,6 +83,8 @@ __all__ = [
     "TaskSharder",
     "TaskSpec",
     "TaskStatus",
+    "TestBatch",
+    "TestJob",
     "VoteRequest",
     "VoteResponse",
     "build_manifest",

@@ -28,7 +28,7 @@ try:
 except Exception:
     _VERSION = "0.2.0"
 
-ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin", "model_sync", "pipeline_step"}
+ALLOWED_TASK_TYPES = {"inference", "embedding", "plugin", "model_sync", "pipeline_step", "test"}
 ALLOWED_EXTRA_KEYS = {"temperature", "top_p", "top_k", "repeat_penalty", "seed"}
 # P3 pipeline_step 经 extra 透传的字段 (model_id/layer_range/hidden_states/input_ids/...)。
 # hidden_states 为 b64.npy 字符串 (上游 /distributed/* 激活格式)。
@@ -40,6 +40,8 @@ PIPELINE_EXTRA_KEYS = {
     "input_ids",
     "position_ids",
 }
+# #79 test 任务经 extra 透传的字段 (operator 下发的命令/工作目录/环境/超时)。
+TEST_EXTRA_KEYS = {"command", "cwd", "env", "timeout"}
 
 
 class InMemoryRateLimiter:
@@ -403,6 +405,8 @@ class AgentServer:
             filtered_extra = {k: v for k, v in req.extra.items() if k in ALLOWED_EXTRA_KEYS}
             # P3: pipeline_step 字段经 extra 透传到 params (隐藏状态 b64.npy/层段)。
             pipeline_extra = {k: v for k, v in req.extra.items() if k in PIPELINE_EXTRA_KEYS}
+            # #79: test 字段经 extra 透传到 params (command/cwd/env/timeout)。
+            test_extra = {k: v for k, v in req.extra.items() if k in TEST_EXTRA_KEYS}
             # 消费契约 (见 NodeAgent.execute_task docstring): {task_id, type, model, params}。
             # 旧实现下扁平键 (model_name/prompt/...) 与 _execute_inference 读取的
             # task["task_id"]/task.get("model")/task.get("params",{}) 错位 → KeyError + 空模型/空提示,
@@ -414,6 +418,7 @@ class AgentServer:
                 "temperature": req.temperature,
                 **filtered_extra,
                 **pipeline_extra,
+                **test_extra,
             }
             task = {
                 # P1-14: 透传真实 task_id (master 派发带入), 空=直接调用无追踪 (agent 分配匿名 id)。

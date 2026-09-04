@@ -37,6 +37,7 @@ from fusion_multi_node.master.load_metrics import (
     RoutingStrategy,
 )
 from fusion_multi_node.master.task_spec import TaskSpec
+from fusion_multi_node.master.test_batch import TestBatch
 from fusion_multi_node.observability import ClusterObservability
 from fusion_multi_node.security.data_scrubber import DataScrubber
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
@@ -114,6 +115,8 @@ class NodeInfo:
     # #73: 本机 fusion-sv supervisor 可用 (agent 心跳上报, SupervisorBridge.call ping)。
     # master 聚合供 /api/nodes 展示 + 网关/操作员据以决定 supervisor 协调可达性。
     supervisor_available: bool = False
+    # #79 节点驱动/能力清单 (agent 上报, select_nodes 按 required_capability 匹配 tags ∪ drivers)
+    drivers: list[str] = field(default_factory=list)
 
     @property
     def score(self) -> float:
@@ -148,6 +151,8 @@ class ClusterTask:
     exclude_nodes: list[str] = field(default_factory=list)
     # #63 active-active: 归属 master (owner 派发, peer 仅镜像); 单 master 模式留空
     owner_master: str = ""
+    # #79 测试批次归属 id (同一批次多任务共享, /api/test/batches 聚合状态/报告)
+    batch_id: str = ""
     # #63/#65 任务分级: heavy/general, heavy 任务亲和 heavy 角色节点, pipeline shard 须 heavy 节点
     tier: str = "general"
     priority: int = 0
@@ -225,6 +230,10 @@ class ClusterMaster:
         self.nodes: dict[str, NodeInfo] = {}
         self.tasks: dict[str, ClusterTask] = {}
         self.kv_cache: dict[str, KVCacheEntry] = {}
+        # #79 测试批次注册表 (batch_id → TestBatch), 持 _tasks_lock 守护 (与任务生命周期耦合)。
+        self._test_batches: dict[str, TestBatch] = {}
+        # #79 批次快照暂存 (锁内 _persist_tasks_locked 建, 锁外 _write_task_store 读落盘)。
+        self._pending_batch_snap: list[dict[str, Any]] = []
         # P2-20 (审计 §6.8): ClusterConfig 实例 (start() 注入), 供 MasterServer 热加载。
         self._cluster_config: ClusterConfig | None = None
         # P1-3 (审计 §3.7): HTTP 派发路径 PII 脱敏器 — 懒加载, 仅 security.http_pii_scrub 开时构造。
@@ -534,6 +543,7 @@ class ClusterMaster:
             result=d.get("result", {}),
             owner_master=d.get("owner_master", ""),
             tier=d.get("tier", "general"),
+            batch_id=d.get("batch_id", ""),
         )
         # P2-26 (审计 §5.7): 恢复 _retry_count, 避崩溃后重试预算被重置 (允许超限重试)。
         t._retry_count = int(d.get("_retry_count", 0) or 0)
@@ -590,6 +600,8 @@ class ClusterMaster:
                 TaskStatus.CANCELLED,
                 TaskStatus.TIMEOUT,
             }
+        # #79 同步快照测试批次 (锁内建, 锁外 _write_task_store 落盘)。仅存非空批次 (有非终态任务)。
+        self._pending_batch_snap = [b.to_snapshot() for b in self._test_batches.values()]
         return [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
 
     def _write_task_store(self, pending: list[dict[str, Any]]) -> None:
@@ -600,7 +612,11 @@ class ClusterMaster:
             self._task_store_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._task_store_path.with_suffix(self._task_store_path.suffix + ".tmp")
             with open(tmp, "w") as f:
-                json.dump({"tasks": pending, "saved_at": time.time()}, f, ensure_ascii=False)
+                json.dump(
+                    {"tasks": pending, "batches": list(self._pending_batch_snap), "saved_at": time.time()},
+                    f,
+                    ensure_ascii=False,
+                )
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._task_store_path)
@@ -650,6 +666,7 @@ class ClusterMaster:
             logger.error(f"H3 任务恢复读盘失败: {e}")
             return 0
         tasks = data.get("tasks", [])
+        batches_data = data.get("batches", [])
         restored = 0
         async with self._tasks_lock:
             for d in tasks:
@@ -659,6 +676,14 @@ class ClusterMaster:
                     restored += 1
                 except Exception as e:
                     logger.warning(f"H3 任务恢复跳过 {d.get('task_id', '?')}: {e}")
+            # #79 恢复测试批次注册表 (向后兼容: 旧文件无 batches key → 空列表跳过)
+            for bd in batches_data:
+                try:
+                    batch = TestBatch.from_snapshot(bd)
+                    if batch.batch_id:
+                        self._test_batches[batch.batch_id] = batch
+                except Exception as e:
+                    logger.warning(f"#79 测试批次恢复跳过 {bd.get('batch_id', '?')}: {e}")
         if restored:
             logger.warning(f"H3 启动恢复 {restored} 任务 (崩溃前未完成, 已置 PENDING 待重派)")
         return restored
@@ -941,9 +966,9 @@ class ClusterMaster:
                 logger.warning(f"select_nodes: exclude_nodes={list(excluded)} 过滤后无候选节点")
                 return []
 
-        # M3-05 capability 过滤
+        # M3-05 capability 过滤 (#79: tags ∪ drivers, 节点按 drivers 上报能力)
         if required_capability:
-            candidates = [n for n in candidates if required_capability in n.tags]
+            candidates = [n for n in candidates if required_capability in n.tags or required_capability in n.drivers]
 
         if required_memory_gb > 0:
             candidates = [n for n in candidates if n.available_memory_gb >= required_memory_gb]
@@ -1006,7 +1031,7 @@ class ClusterMaster:
             and not n.draining  # #63: drain 中节点不接新任务
         ]
         if required_capability:
-            candidates = [n for n in candidates if required_capability in n.tags]
+            candidates = [n for n in candidates if required_capability in n.tags or required_capability in n.drivers]
         if required_memory_gb > 0:
             candidates = [n for n in candidates if n.available_memory_gb >= required_memory_gb]
         if mode == ParallelMode.PIPELINE:
@@ -1219,6 +1244,14 @@ class ClusterMaster:
     def aa_owner(self) -> str:
         """#63: active-active 模式下本机 owner_master; 否则空串。"""
         return self._ha_node_id if self._ha_mode == "active-active" else ""
+
+    def register_test_batch(self, batch: TestBatch) -> None:
+        """#79 注册测试批次 (持 _tasks_lock)。同 batch_id 覆盖。"""
+        self._test_batches[batch.batch_id] = batch
+
+    def get_test_batch(self, batch_id: str) -> TestBatch | None:
+        """#79 取测试批次 (无锁, 调用方按需持锁)。"""
+        return self._test_batches.get(batch_id)
 
     async def assign_task(self, task: ClusterTask) -> bool:
         """分配任务到节点 — 幂等: 已 RUNNING 的任务直接返回 True。
@@ -1793,18 +1826,27 @@ class ClusterMaster:
             else:
                 # 常规推理/Embedding 派发
                 # P1-14 (审计 §5.3): 传真实 task_id 供 agent 拒同 task_id 重复派发。
-                payload = {
-                    "task_id": task.task_id,
-                    "task_type": task.task_type,
-                    "model_name": task.model_name,
-                    "prompt": params.get("prompt", ""),
-                    "messages": params.get("messages", []),
-                    "max_tokens": params.get("max_tokens", 2048),
-                    "temperature": params.get("temperature", 0.7),
-                    "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
-                }
-                # P1-3 (审计 §3.7): HTTP 派发路径可选 PII 脱敏 (config security.http_pii_scrub, 默认关)。
-                payload = self._scrub_payload_text_fields(payload)
+                if task.task_type == "test":
+                    # #79 测试任务派发: command/cwd/env/timeout 透传 extra (agent _execute_test 读取)
+                    payload = {
+                        "task_id": task.task_id,
+                        "task_type": "test",
+                        "model_name": task.model_name,
+                        "extra": {k: v for k, v in params.items() if k in ("command", "cwd", "env", "timeout")},
+                    }
+                else:
+                    payload = {
+                        "task_id": task.task_id,
+                        "task_type": task.task_type,
+                        "model_name": task.model_name,
+                        "prompt": params.get("prompt", ""),
+                        "messages": params.get("messages", []),
+                        "max_tokens": params.get("max_tokens", 2048),
+                        "temperature": params.get("temperature", 0.7),
+                        "extra": {k: v for k, v in params.items() if k in ("top_p", "top_k", "repeat_penalty", "seed")},
+                    }
+                    # P1-3 (审计 §3.7): HTTP 派发路径可选 PII 脱敏 (config security.http_pii_scrub, 默认关)。
+                    payload = self._scrub_payload_text_fields(payload)
             # #72: 注入 fencing token + leader id, agent 据此拒过期 master 派发 (stale-after-partition)。
             payload["fencing_token"] = self._fencing_token
             payload["leader_id"] = self._ha_node_id or "master"

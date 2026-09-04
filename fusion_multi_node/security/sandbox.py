@@ -310,8 +310,18 @@ class SandboxExecutor:
             logger.debug(f"SandboxExecutor: 生成 SBPL profile {profile_path}")
         return self._profile_cache[task_id]
 
-    async def execute_in_sandbox(self, task_id: str, command: list, timeout: int | None = None) -> dict[str, Any]:
-        """在 OS 沙箱中执行命令，返回执行结果。"""
+    async def execute_in_sandbox(
+        self,
+        task_id: str,
+        command: list,
+        timeout: int | None = None,
+        cwd: str | None = None,
+        env: dict | None = None,
+    ) -> dict[str, Any]:
+        """在 OS 沙箱中执行命令，返回执行结果。
+
+        #79: cwd/env 透传到子进程 (测试任务工作目录 + 环境覆盖)。默认 None = 既有行为。
+        """
         import asyncio as _asyncio
 
         exec_timeout = timeout or self.config.execution_timeout
@@ -320,6 +330,7 @@ class SandboxExecutor:
             "exit_code": -1,
             "stdout": "",
             "stderr": "",
+            "success": False,
         }
 
         if self._backend == "sandbox-exec":
@@ -352,17 +363,25 @@ class SandboxExecutor:
             )
 
         try:
+            # #79: cwd=工作目录, env=环境覆盖 (None → 继承父进程, 既有行为)。
+            child_env = None
+            if env:
+                child_env = dict(os.environ)
+                child_env.update({str(k): str(v) for k, v in env.items()})
             proc = await _asyncio.create_subprocess_exec(
                 *full_cmd,
                 stdout=_asyncio.subprocess.PIPE,
                 stderr=_asyncio.subprocess.PIPE,
                 preexec_fn=preexec,
+                cwd=cwd,
+                env=child_env,
             )
             try:
                 stdout, stderr = await _asyncio.wait_for(proc.communicate(), timeout=exec_timeout)
                 result["exit_code"] = proc.returncode or 0
                 result["stdout"] = stdout.decode(errors="replace")
                 result["stderr"] = stderr.decode(errors="replace")
+                result["success"] = result["exit_code"] == 0
             except TimeoutError:
                 proc.kill()
                 await proc.wait()
