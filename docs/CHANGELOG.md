@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-04 — Epoch/leader_id exposure + per-leader token stale-write reject
+
+### Added — epoch/leader_id exposure (issue #76)
+- **`ClusterMaster.leader_epoch()`**: returns the monotonic leadership epoch (Raft `current_term`). HA standby: the election term (increments on `_become_leader`). Single-master / active-active: `0` (no election, deterministic — a client seeing epoch 0 + empty `leader_id` knows there is a single authority, no split-brain to detect).
+- **`ClusterMaster.current_leader_id()`**: HA → the elected leader's node id; active-active → this master's `_ha_node_id`; single-master → `""`.
+- Exposed additively in cluster API responses so clients (Fusion Studio MultiNode Track B) reject stale-leader responses deterministically instead of client-side split-brain heuristics (counting masters across polls):
+  - `/api/nodes` and `/api/nodes/{node_id}` — per-node `epoch` + `leader_id` (same value across nodes in one master's view) + cluster-level `epoch`/`leader_id`/`is_leader`.
+  - `/api/cluster/stats` — `epoch`/`leader_id`/`is_leader`/`leader_token` in the stats dict.
+  - `/api/v1/nodes` (incl. `{node_id}`) and `/api/v1/cluster/stats` — same fields added to the typed v1 contract (`V1NodeResponse`/`V1NodeListResponse` gained optional `epoch`/`leader_id`; cluster sub-dict of v1 stats carries `epoch`/`leader_id`/`is_leader`/`leader_token`).
+- Additive fields only — existing clients ignore unknown fields; no client behavior change required to ship.
+
+### Added — per-leader token stale-write reject, opt-in (issue #77)
+- **`ClusterMaster.leader_token()`**: `HMAC-SHA256(cluster_secret, "{epoch}:{leader_id}")[:32]`. The cluster secret is the existing shared cluster token (`FUSION_CLUSTER_TOKEN` / `.cluster_token`), reused — no new secret, no cloud, offline-safe. Same epoch + leader_id derives the same token on every master; a failover (new epoch) derives a different token.
+- **`GET /api/leader/credentials`**: returns `{epoch, leader_id, leader_token, is_leader, enforce}`. A client fetches this after a failover, refreshes its stored token, then sends it on subsequent mutations. Bearer-authenticated (not exempt).
+- **Stale-token reject on mutations**: opt-in via env `FUSION_LEADER_TOKEN_ENFORCE=1`, active only in HA standby mode (`_election is not None`). Submit (`/api/tasks/submit`, `/api/v1/tasks/submit`) and cancel (`/api/tasks/{task_id}/cancel`) routes read `X-Leader-Token`; if enforcement is on, HA is active, and a header is present that differs from the current `leader_token()`, the route returns **`409 LeaderChanged`** (warning log + audit `leader_token_reject`). A missing header is still accepted (graceful — defense-in-depth; a client that never sends the header behaves as before, a client that refreshes + sends gets stale reject). Single-master and active-active never reject regardless of env.
+- **`ClusterMaster.leader_token_enforce()`**: reports whether enforcement is active (`_election is not None` AND env `FUSION_LEADER_TOKEN_ENFORCE=1`).
+
+### Tests
+- `tests/test_epoch_leader.py` — single-master zero/empty exposure across all 6 routes; HA leader/standby epoch + leader_id; leader_token determinism + cross-epoch divergence (9 cases).
+- `tests/test_leader_token.py` — enforce-off accepts stale; HA correct/stale/missing; single-master + active-active never reject; `/api/leader/credentials` consistency; cancel + v1-submit reject paths (10 cases).
+- Suite: 1451 passed, 0 failed, 15 skipped (baseline 1433 + 18 new).
+
 ## [0.16.0] - 2026-09-03 — Cluster drain, idempotency, fencing, supervisor coordination, optional identity
 
 ### Added — cluster-level drain with health-gate (issue #69)

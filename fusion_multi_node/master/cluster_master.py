@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -3627,6 +3628,51 @@ class ClusterMaster:
         # follower 且 leader 未知 (选举空窗 / 少数派脑裂) → 非权威, 标 partitioned
         return {"cluster_view": False, "partitioned": True}
 
+    def leader_epoch(self) -> int:
+        """#76: 当前领导纪元 (单调递增, Raft term)。
+
+        - HA standby: self._election.current_term (新 leader 当选 term 递增)。
+        - 单 Master / active-active: 0 (无选举, 确定性; 客户端见 0 即无脑裂判定)。
+        """
+        if self._election is None:
+            return 0
+        return int(self._election.current_term)
+
+    def current_leader_id(self) -> str:
+        """#76: 当前 leader 标识。
+
+        - HA standby: election._leader_id (已当选) 或 _ha_node_id (本节点配置 id, 兜底)。
+        - active-active: _ha_node_id (双主各自 id, owner-wins, 无脑裂概念)。
+        - 单 Master: "" (无 HA 节点 id; 客户端见空 + epoch 0 即单权威, 不拒)。
+        """
+        if self._election is not None:
+            lid = getattr(self._election, "_leader_id", None)
+            if lid:
+                return lid
+        return self._ha_node_id or ""
+
+    def leader_token(self) -> str:
+        """#77: per-leader token — HMAC(epoch:leader_id, 集群密钥)。
+
+        同一集群密钥 (FUSION_CLUSTER_TOKEN / .cluster_token, 全 master 共享) 下,
+        同一 epoch+leader_id 派生同一 token; 不同 epoch (failover 后) 派生不同 token。
+        客户端经 /api/leader/credentials 取当前 token, failover 后刷新; 旧 token 提交 → 409。
+        单 Master / active-active: epoch=0, leader_id="" → 常量 token (enforce 仅 HA 生效, 不拒)。
+        """
+        secret = self._get_dispatch_token()
+        msg = f"{self.leader_epoch()}:{self.current_leader_id()}".encode()
+        return hmac.new(secret.encode(), msg, "sha256").hexdigest()[:32]
+
+    def leader_token_enforce(self) -> bool:
+        """#77: 是否强制 per-leader token 校验。
+
+        仅 HA standby 模式 (_election 配置) + env FUSION_LEADER_TOKEN_ENFORCE=1 时开。
+        单 Master / active-active 永不强制 (离线默认不变, 不破坏无感知客户端)。
+        """
+        if self._election is None:
+            return False
+        return os.environ.get("FUSION_LEADER_TOKEN_ENFORCE", "").strip() == "1"
+
     async def snapshot_tasks(self) -> list[ClusterTask]:
         """任务表快照 (tasks 域只读) — 供外部迭代用, 避免裸读 self.tasks。"""
         async with self._tasks_lock:
@@ -3724,6 +3770,12 @@ class ClusterMaster:
             "kv_cache_entries": kv_cache_entries,
             "total_memory_gb": sum(n.total_memory_gb for n in online_nodes),
             "available_memory_gb": sum(n.available_memory_gb for n in online_nodes),
+            # #76: 领导纪元 + leader_id + 是否 leader (客户端据此确定性拒过期 leader 响应, 替代计票启发式)。
+            "epoch": self.leader_epoch(),
+            "leader_id": self.current_leader_id(),
+            "is_leader": self._is_leader,
+            # #77: per-leader token (failover 后刷新; 旧 token 提交 → 409, opt-in enforce)。
+            "leader_token": self.leader_token(),
         }
         stats["load_summary"] = self.load_router.get_cluster_load_summary()
         return stats

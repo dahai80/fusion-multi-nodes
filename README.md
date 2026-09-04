@@ -5,16 +5,34 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.16.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.17.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1433%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1451%20passed-brightgreen" alt="Tests">
 </p>
 
 ---
 
-> **🚀 v0.16.0 (2026-09-03) — Cluster drain, idempotency, fencing, supervisor coordination, optional identity (#69-#74)**
+> **🚀 v0.17.0 (2026-09-04) — Epoch/leader_id exposure + per-leader token stale-write reject (#76 #77)**
+>
+> Two issues resolved:
+> - **#76 Epoch/leader_id exposure** — `ClusterMaster.leader_epoch()` (Raft `current_term`) + `current_leader_id()` exposed
+>   additively in `/api/nodes`, `/api/nodes/{id}`, `/api/cluster/stats`, and the typed v1 contract. A client (Fusion Studio
+>   MultiNode Track B) rejects stale-leader responses deterministically instead of a client-side split-brain heuristic
+>   (counting masters across polls). Single-master / active-active: epoch `0` + empty `leader_id` (deterministic — single
+>   authority, nothing to detect). Additive only — existing clients ignore unknown fields.
+> - **#77 Per-leader token stale-write reject (opt-in)** — `leader_token()` = `HMAC-SHA256(cluster_secret, "{epoch}:{leader_id}")[:32]`
+>   reusing the existing shared cluster token (no new secret, no cloud, offline-safe). `GET /api/leader/credentials` returns
+>   the current token. Submit/cancel routes read `X-Leader-Token`; with env `FUSION_LEADER_TOKEN_ENFORCE=1` + HA standby, a
+>   stale token returns `409 LeaderChanged`. A missing header is still accepted (graceful — defense-in-depth). Single-master
+>   and active-active never reject regardless of env. **Offline default unchanged.**
+>
+> 1451 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md).
+
+---
+
+> **v0.16.0 (2026-09-03) — Cluster drain, idempotency, fencing, supervisor coordination, optional identity (#69-#74)**
 >
 > Six issues resolved:
 > - **#69 Cluster drain + health-gate** — `GET /api/nodes/{id}/drain-status` returns `{draining, in_flight, ready,

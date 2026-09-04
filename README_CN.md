@@ -5,18 +5,34 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.16.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.17.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1433%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1451%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.16.0。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.17.0。
 
 ---
 
-> **🚀 v0.16.0（2026-09-03）— 集群 drain + 幂等 + fencing + supervisor 协调 + 可选 identity（#69-#74）**
+> **🚀 v0.17.0（2026-09-04）— epoch/leader_id 暴露 + per-leader token 过期写入拒绝（#76 #77）**
+>
+> 两个 issue 修复：
+> - **#76 epoch/leader_id 暴露** — `ClusterMaster.leader_epoch()`（Raft `current_term`）+ `current_leader_id()` 以增量
+>   字段暴露于 `/api/nodes`、`/api/nodes/{id}`、`/api/cluster/stats` 及类型化 v1 契约。客户端（Fusion Studio
+>   MultiNode Track B）据此确定性拒绝过期 leader 响应，替代客户端侧脑裂启发式（跨轮询数 master 数）。单 master /
+>   active-active：epoch `0` + 空 `leader_id`（确定性 — 单权威，无需判定）。仅增量字段 — 现有客户端忽略未知字段。
+> - **#77 per-leader token 过期写入拒绝（opt-in）** — `leader_token()` = `HMAC-SHA256(集群密钥, "{epoch}:{leader_id}")[:32]`，
+>   复用现有共享集群 token（无新密钥、无云、离线安全）。`GET /api/leader/credentials` 返回当前 token。submit/cancel 路由读
+>   `X-Leader-Token`；env `FUSION_LEADER_TOKEN_ENFORCE=1` + HA standby 下，过期 token 返回 `409 LeaderChanged`。缺
+>   header 仍放行（灰度兼容 — 纵深防御）。单 master 与 active-active 无论 env 永不拒绝。**离线默认不变。**
+>
+> 1451 测试，ruff 通过。见 [CHANGELOG](docs/CHANGELOG.md)。
+
+---
+
+> **v0.16.0（2026-09-03）— 集群 drain + 幂等 + fencing + supervisor 协调 + 可选 identity（#69-#74）**
 >
 > 六个 issue 修复：
 > - **#69 集群 drain + 健康门控** — `GET /api/nodes/{id}/drain-status` 返回 `{draining, in_flight, ready,
