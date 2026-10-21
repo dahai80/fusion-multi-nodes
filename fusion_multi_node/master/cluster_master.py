@@ -117,6 +117,9 @@ class NodeInfo:
     supervisor_available: bool = False
     # #79 节点驱动/能力清单 (agent 上报, select_nodes 按 required_capability 匹配 tags ∪ drivers)
     drivers: list[str] = field(default_factory=list)
+    # #82: 常驻节点 — 过夜常驻机 (FUSION_NODE_RESIDENT=1), 承接定时任务托管 + 会话交接宿主。
+    # 驱动清单同步含 "resident", 任务经 required_capability="resident" 绑定常驻节点。
+    resident: bool = False
 
     @property
     def score(self) -> float:
@@ -205,6 +208,48 @@ class KVCacheEntry:
     access_count: int = 0
 
 
+@dataclass
+class ClusterSession:
+    """#82 常驻节点会话登记 — cowork 起会话先登记 (origin 设备), 笔记本离线时 handoff 到
+    常驻节点; master 作分布式状态层记录归属, 实际流转发由 cowork WS 层做 (本仓只管状态)。
+    状态机: active (origin 设备在跑) → handed_off (host_node 常驻机接管) → closed (终态)。
+    """
+
+    session_id: str
+    origin_node: str = ""
+    host_node: str = ""
+    state: str = "active"
+    owner: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "origin_node": self.origin_node,
+            "host_node": self.host_node,
+            "state": self.state,
+            "owner": self.owner,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "meta": self.meta,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ClusterSession:
+        return cls(
+            session_id=d.get("session_id", ""),
+            origin_node=d.get("origin_node", ""),
+            host_node=d.get("host_node", ""),
+            state=d.get("state", "active"),
+            owner=d.get("owner", ""),
+            created_at=float(d.get("created_at", 0.0)),
+            updated_at=float(d.get("updated_at", 0.0)),
+            meta=dict(d.get("meta", {})),
+        )
+
+
 # ── Cluster Master ──
 
 
@@ -232,8 +277,13 @@ class ClusterMaster:
         self.kv_cache: dict[str, KVCacheEntry] = {}
         # #79 测试批次注册表 (batch_id → TestBatch), 持 _tasks_lock 守护 (与任务生命周期耦合)。
         self._test_batches: dict[str, TestBatch] = {}
-        # #79 批次快照暂存 (锁内 _persist_tasks_locked 建, 锁外 _write_task_store 读落盘)。
+        # #79 批次快照暂存 (锁内 _persist_tasks_locked 建, 锁外 _write_task_store 落盘)。
         self._pending_batch_snap: list[dict[str, Any]] = []
+        # #82 常驻节点会话登记表 (session_id → ClusterSession), 持 _tasks_lock 守护
+        # (与任务生命周期同域: handoff 会挡派发, close 走任务终态同款审计)。
+        self._sessions: dict[str, ClusterSession] = {}
+        # #82 会话快照暂存 (同 _pending_batch_snap 模式: 锁内建, 锁外落盘)。
+        self._pending_session_snap: list[dict[str, Any]] = []
         # P2-20 (审计 §6.8): ClusterConfig 实例 (start() 注入), 供 MasterServer 热加载。
         self._cluster_config: ClusterConfig | None = None
         # P1-3 (审计 §3.7): HTTP 派发路径 PII 脱敏器 — 懒加载, 仅 security.http_pii_scrub 开时构造。
@@ -602,6 +652,7 @@ class ClusterMaster:
             }
         # #79 同步快照测试批次 (锁内建, 锁外 _write_task_store 落盘)。仅存非空批次 (有非终态任务)。
         self._pending_batch_snap = [b.to_snapshot() for b in self._test_batches.values()]
+        self._pending_session_snap = [s.to_dict() for s in self._sessions.values()]
         return [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
 
     def _write_task_store(self, pending: list[dict[str, Any]]) -> None:
@@ -613,7 +664,12 @@ class ClusterMaster:
             tmp = self._task_store_path.with_suffix(self._task_store_path.suffix + ".tmp")
             with open(tmp, "w") as f:
                 json.dump(
-                    {"tasks": pending, "batches": list(self._pending_batch_snap), "saved_at": time.time()},
+                    {
+                        "tasks": pending,
+                        "batches": list(self._pending_batch_snap),
+                        "sessions": list(self._pending_session_snap),
+                        "saved_at": time.time(),
+                    },
                     f,
                     ensure_ascii=False,
                 )
@@ -684,6 +740,14 @@ class ClusterMaster:
                         self._test_batches[batch.batch_id] = batch
                 except Exception as e:
                     logger.warning(f"#79 测试批次恢复跳过 {bd.get('batch_id', '?')}: {e}")
+            # #82 恢复会话登记 (向后兼容: 旧文件无 sessions key → 空列表跳过)
+            for sd in data.get("sessions", []):
+                try:
+                    sess = ClusterSession.from_dict(sd)
+                    if sess.session_id:
+                        self._sessions[sess.session_id] = sess
+                except Exception as e:
+                    logger.warning(f"#82 会话恢复跳过 {sd.get('session_id', '?')}: {e}")
         if restored:
             logger.warning(f"H3 启动恢复 {restored} 任务 (崩溃前未完成, 已置 PENDING 待重派)")
         return restored
@@ -714,6 +778,86 @@ class ClusterMaster:
                 node.status = NodeStatus.ONLINE
                 logger.info(f"节点恢复上线: {node_id}")
             return True
+
+    # ── #82 常驻节点会话登记 ──
+
+    async def register_session(
+        self,
+        session_id: str,
+        origin_node: str = "",
+        host_node: str = "",
+        owner: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """登记/刷新常驻节点会话 (upsert, 幂等)。
+
+        origin 设备起会话先登记; handoff 后 host_node=常驻节点。closed 后再登记 = 重新激活。
+        """
+        if not session_id:
+            raise ValueError("session_id 不可为空")
+        async with self._tasks_lock:
+            now = time.time()
+            s = self._sessions.get(session_id)
+            if s is None:
+                s = ClusterSession(session_id=session_id, created_at=now)
+                self._sessions[session_id] = s
+            s.origin_node = origin_node or s.origin_node
+            # host 未指定默认 origin (登记即本机跑); handoff 时再改 host_node。
+            s.host_node = host_node or s.host_node or origin_node
+            s.owner = owner or s.owner
+            if meta:
+                s.meta = {**(s.meta or {}), **meta}
+            s.state = "active"
+            s.updated_at = now
+            self._persist_dirty = True
+        logger.info(f"#82 会话登记: {session_id} origin={s.origin_node} host={s.host_node}")
+        return s.to_dict()
+
+    async def handoff_session(self, session_id: str, target_node_id: str) -> dict[str, Any]:
+        """会话交接 — origin 笔记本离线, host_node 改为常驻节点, state → handed_off。
+
+        目标节点须已注册 (校验在 _nodes_lock, 会话操作在 _tasks_lock, 两锁顺序不嵌套)。
+        """
+        if not session_id:
+            raise ValueError("session_id 不可为空")
+        if not target_node_id:
+            raise ValueError("target_node_id 不可为空")
+        async with self._nodes_lock:
+            target_exists = target_node_id in self.nodes
+        if not target_exists:
+            raise ValueError(f"目标节点未注册: {target_node_id}")
+        async with self._tasks_lock:
+            s = self._sessions.get(session_id)
+            if s is None:
+                raise KeyError(session_id)
+            if s.state == "closed":
+                raise ValueError(f"会话已终态 (closed), 不可交接: {session_id}")
+            s.host_node = target_node_id
+            s.state = "handed_off"
+            s.updated_at = time.time()
+            self._persist_dirty = True
+        logger.info(f"#82 会话交接: {session_id} → {target_node_id} (state=handed_off)")
+        return s.to_dict()
+
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        async with self._tasks_lock:
+            s = self._sessions.get(session_id)
+            return s.to_dict() if s else None
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        async with self._tasks_lock:
+            return [s.to_dict() for s in self._sessions.values()]
+
+    async def close_session(self, session_id: str) -> dict[str, Any]:
+        async with self._tasks_lock:
+            s = self._sessions.get(session_id)
+            if s is None or s.state == "closed":
+                raise KeyError(session_id)
+            s.state = "closed"
+            s.updated_at = time.time()
+            self._persist_dirty = True
+        logger.info(f"#82 会话关闭: {session_id}")
+        return s.to_dict()
 
     async def report_fault(self, node_id: str, fault_type: str = "", message: str = "") -> bool:
         """加锁标记节点故障 + 累计故障计数 (F-A13: 窗口内达阈值自动 ban)。"""
@@ -3819,6 +3963,7 @@ class ClusterMaster:
             # #77: per-leader token (failover 后刷新; 旧 token 提交 → 409, opt-in enforce)。
             "leader_token": self.leader_token(),
         }
+        stats["resident_nodes"] = sum(1 for n in online_nodes if getattr(n, "resident", False))
         stats["load_summary"] = self.load_router.get_cluster_load_summary()
         return stats
 

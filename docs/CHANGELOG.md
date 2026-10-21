@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-10-21 — Resident-node scheduling host + cluster status web UI
+
+### Added — resident node / home-server mode (#82)
+- `AgentConfig.resident` (env `FUSION_NODE_RESIDENT=1`, default off): advertises the `resident` driver so
+  tasks bind to resident nodes via `required_capability: "resident"` (reuses the existing tags ∪ drivers
+  scheduler filter — zero new scheduling logic). `NodeInfo.resident` persisted at registration and exposed in
+  `/api/nodes` + `/api/nodes/{id}` (`resident` field) and `/api/cluster/stats` (`resident_nodes` count).
+- New module `fusion_multi_node/agent/scheduling.py`: `ScheduleSpec` (interval / daily / weekly; validation:
+  min interval 60s, HH:MM format, weekday 0-6, task types limited to `inference`/`embedding` — command-type
+  tasks are never schedulable), `ScheduleRun` (per-schedule run ring, capped at 50), and `ScheduleHost`
+  (register/remove/list/get/set_enabled, deterministic `next_run_at`, fire loop wired to `NodeAgent` start/stop).
+- Agent routes: `POST /api/schedules` (register/overwrite; 403 when not resident), `GET /api/schedules`,
+  `GET /api/schedules/{id}` (spec + run history), `PATCH /api/schedules/{id}` (enable/disable),
+  `DELETE /api/schedules/{id}`. Node-level RBAC: `/api/schedules` mapped to `TASK_EXECUTE`.
+- Firing goes through the normal `execute_task` chain (task ids `{schedule_id}-{seq:06d}`), inheriting dedup,
+  sandbox gates, and the concurrency gate. Persistence `~/.fusion/multi-node/schedules.json`
+  (atomic tmp+replace+fsync): schedules + run history restored on start; interval schedules resume from
+  `now + every` (missed ticks are not replayed, no catch-up storm); daily/weekly resume at the next matching time.
+- Master session registry for live-session handoff: `ClusterSession` (`active` → `handed_off` → `closed`),
+  `register_session`/`handoff_session`/`get_session`/`list_sessions`/`close_session`; handoff validates the
+  target node is registered. Master routes: `POST /api/sessions`, `GET /api/sessions`, `GET /api/sessions/{id}`,
+  `POST /api/sessions/{id}/handoff`, `DELETE /api/sessions/{id}`. User-RBAC map: sessions read `task:list`,
+  write/close `task:submit` (no new permission strings). Sessions persist in the task store (`sessions` key,
+  backward-compatible) and restore on restart.
+
+### Added — Union Web cluster status UI package (#81)
+- New `web/` package (React 18 + Vite + TypeScript + Tailwind + Bun; vendored `@fusion/web-ui` +
+  `@fusion/web-sdk`): hash-routed pages `#/topology` (leader/epoch card, node groups by role),
+  `#/nodes` (DataTable + status badges + polling), `#/nodes/{id}` (drilldown: hardware KVPanel, metric tiles,
+  per-node tasks), `#/metrics` (cluster tiles + charts from the Prometheus exposition).
+- `manifest.json` shell module: id `fusion-multi-nodes`, category `platform`, devices `desktop` +
+  `mobile-readonly` (ReadOnlyBanner in embedded narrow view), dev port 11472 (vite proxy `/api` → master 11452),
+  gateway hosting at `/shell/fusion-multi-nodes/` with `?embedded=1` nav hiding. No UI auth logic — gateway
+  session in embedded mode, `VITE_API_KEY` standalone-dev only.
+- `web/README.md` (English) + `web/README_CN.md` (Chinese mirror); 28 bun tests (API base derivation,
+  Prometheus text parsing, munging helpers).
+
+### Tests
+- 23 new: schedule host unit tests (16 — validation, next_run determinism, persistence roundtrip, fire loop,
+  failure recording, disable semantics, run cap), agent schedule routes (2 — 403 when not resident, full
+  register/list/get/patch/delete roundtrip), master session registry (5 — HTTP contract, handoff flow with
+  target validation, close flow, resident flag exposure + `resident_nodes`, persist/restore roundtrip).
+
 ## [0.18.0] - 2026-09-05 — Test batch orchestration protocol for distributed test execution
 
 ### Added — test orchestration protocol (issue #79)

@@ -5,12 +5,36 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.18.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.19.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1471%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1494%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **🛰️ v0.19.0 (2026-10-21) — Resident-node scheduling host + cluster status web UI (#81 #82)**
+>
+> Two issues resolved:
+> - **#82 Resident node / home-server mode** — an always-on LAN Mac keeps scheduled work alive when laptops shut down.
+>   `AgentConfig.resident` (env `FUSION_NODE_RESIDENT=1`) turns a node agent into a scheduling host: it advertises the
+>   `resident` driver (bind tasks via `required_capability: "resident"`), exposes the schedule host API on the agent —
+>   `POST/GET/PATCH/DELETE /api/schedules` (interval/daily/weekly specs, inference/embedding only) — fires them on the
+>   agent event loop through the normal `execute_task` chain (dedup/sandbox/capacity gates inherited), and persists
+>   schedules + run records to `schedules.json` (atomic tmp+replace+fsync, restart-safe; missed interval ticks are not
+>   replayed). The master adds a session registry for live-session handoff: `POST/GET/DELETE /api/sessions`,
+>   `POST /api/sessions/{id}/handoff` (state machine `active` → `handed_off` → `closed`, target-node validated),
+>   persisted in the task store and restored on restart. `/api/nodes` carries `resident`; `/api/cluster/stats` carries
+>   `resident_nodes`. 100% LAN/offline — no cloud, no new deps.
+> - **#81 Union Web cluster status UI** — new `web/` package (React 18 + Vite + TS + Tailwind + Bun, vendored
+>   `@fusion/web-ui` + `@fusion/web-sdk`): topology / nodes / per-node drilldown / cluster metrics pages, served as a
+>   shell module (`manifest.json` id `fusion-multi-nodes`, gateway `/shell/fusion-multi-nodes/`, `?embedded=1`,
+>   devices `mobile-readonly`, dev port 11472). Consumes the master API (`/api/nodes`, `/api/cluster/stats`,
+>   `/api/tasks`, `/api/v1/metrics`); no UI auth logic (gateway session injects credentials; standalone dev uses
+>   `VITE_API_KEY`). Spec S1-S14 compliant (tokens, four states, bilingual, embedded mode).
+>
+> 1494 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md).
 
 ---
 
