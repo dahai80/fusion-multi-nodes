@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-10-21 — Patch: web tooling format normalization
+
+### Changed
+- `web/` config and test files (`tailwind.config.ts`, `vite.config.ts`, `tests/api.test.ts`) normalized to
+  Biome formatter output (double quotes, trailing commas). The `lint` script only covers `src/`, so these
+  root-level files had drifted from formatter style. Pure formatting — no behavior change
+  (web suite 28 pass, `vite build` clean).
+- Version bump 0.19.0 → 0.19.1 (pyproject.toml + `__init__.py` + README badges). Python suite unchanged:
+  1494 passed / 8 skipped.
+
 ## [0.19.0] - 2026-10-21 — Resident-node scheduling host + cluster status web UI
 
 ### Added — resident node / home-server mode (#82)
