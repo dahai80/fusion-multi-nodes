@@ -732,3 +732,54 @@ class TestSupervisorRoutes:
         body = r.json()
         assert body["ok"] is True
         assert body["svc"] == "mlx"
+
+
+class TestScheduleRoutes:
+    """#82 常驻节点定时任务路由 — 注册/列表/详情/启停/删除, 非 resident 一律 403。"""
+
+    async def test_register_denied_when_not_resident(self, mock_agent, agent_server, client, tmp_path):
+        from fusion_multi_node.agent.scheduling import ScheduleHost
+
+        mock_agent._schedule_host = ScheduleHost(
+            resident=False, executor=mock_agent.execute_task, store_path=tmp_path / "s.json"
+        )
+        resp = await client.post(
+            "/api/schedules",
+            json={"kind": "interval", "every_seconds": 3600},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 403
+
+    async def test_register_list_get_patch_delete_roundtrip(self, mock_agent, agent_server, client, tmp_path):
+        from fusion_multi_node.agent.scheduling import ScheduleHost
+
+        mock_agent.config.resident = True
+        mock_agent._schedule_host = ScheduleHost(
+            resident=True, executor=mock_agent.execute_task, store_path=tmp_path / "s.json"
+        )
+        resp = await client.post(
+            "/api/schedules",
+            json={"schedule_id": "sched-a", "kind": "interval", "every_seconds": 3600, "params": {"prompt": "hi"}},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["schedule"]["schedule_id"] == "sched-a"
+        # 非法 kind → 400
+        bad = await client.post("/api/schedules", json={"kind": "cron", "every_seconds": 3600}, headers=AUTH_HEADERS)
+        assert bad.status_code == 400
+        listing = await client.get("/api/schedules", headers=AUTH_HEADERS)
+        assert listing.status_code == 200
+        assert any(s["schedule_id"] == "sched-a" for s in listing.json()["schedules"])
+        got = await client.get("/api/schedules/sched-a", headers=AUTH_HEADERS)
+        assert got.status_code == 200
+        assert got.json()["schedule"]["runs"] == []
+        missing = await client.get("/api/schedules/nope", headers=AUTH_HEADERS)
+        assert missing.status_code == 404
+        patched = await client.patch("/api/schedules/sched-a", json={"enabled": False}, headers=AUTH_HEADERS)
+        assert patched.status_code == 200
+        assert patched.json()["schedule"]["enabled"] is False
+        removed = await client.delete("/api/schedules/sched-a", headers=AUTH_HEADERS)
+        assert removed.status_code == 200
+        again = await client.delete("/api/schedules/sched-a", headers=AUTH_HEADERS)
+        assert again.status_code == 404

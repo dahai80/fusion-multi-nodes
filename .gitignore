@@ -45,3 +45,4 @@ audit_multi_node_report.md
 .env.stress
 logs/
 
+.fusion-multi-node.*.pid

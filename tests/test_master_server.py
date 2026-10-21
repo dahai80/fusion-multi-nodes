@@ -1131,3 +1131,104 @@ class TestSupervisorForward:
         body = r.json()
         assert body["ok"] is False
         assert body["available"] is False
+
+
+class TestSessionRegistry:
+    """#82 常驻节点会话登记/交接 — HTTP 契约 + 持久化恢复。"""
+
+    async def test_register_list_get(self, client):
+        resp = await client.post(
+            "/api/sessions",
+            json={"session_id": "sess-1", "origin_node": "laptop", "owner": "dahai"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session"]["state"] == "active"
+        assert body["session"]["host_node"] == "laptop"
+        listing = await client.get("/api/sessions", headers=AUTH_HEADERS)
+        assert listing.status_code == 200
+        assert any(s["session_id"] == "sess-1" for s in listing.json()["sessions"])
+        got = await client.get("/api/sessions/sess-1", headers=AUTH_HEADERS)
+        assert got.status_code == 200
+        missing = await client.get("/api/sessions/ghost", headers=AUTH_HEADERS)
+        assert missing.status_code == 404
+        empty = await client.post("/api/sessions", json={"session_id": ""}, headers=AUTH_HEADERS)
+        assert empty.status_code == 400
+
+    async def test_handoff_flow(self, client):
+        await _register_node(client, "resident-1")
+        resp = await client.post(
+            "/api/sessions",
+            json={"session_id": "sess-2", "origin_node": "laptop"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200
+        handoff = await client.post(
+            "/api/sessions/sess-2/handoff",
+            json={"target_node_id": "resident-1"},
+            headers=AUTH_HEADERS,
+        )
+        assert handoff.status_code == 200
+        body = handoff.json()
+        assert body["session"]["state"] == "handed_off"
+        assert body["session"]["host_node"] == "resident-1"
+        bad_target = await client.post(
+            "/api/sessions/sess-2/handoff",
+            json={"target_node_id": "ghost-node"},
+            headers=AUTH_HEADERS,
+        )
+        assert bad_target.status_code == 400
+        unknown = await client.post(
+            "/api/sessions/ghost/handoff",
+            json={"target_node_id": "resident-1"},
+            headers=AUTH_HEADERS,
+        )
+        assert unknown.status_code == 404
+
+    async def test_close_flow(self, client):
+        await client.post("/api/sessions", json={"session_id": "sess-3"}, headers=AUTH_HEADERS)
+        closed = await client.delete("/api/sessions/sess-3", headers=AUTH_HEADERS)
+        assert closed.status_code == 200
+        assert closed.json()["session"]["state"] == "closed"
+        again = await client.delete("/api/sessions/sess-3", headers=AUTH_HEADERS)
+        assert again.status_code == 404
+
+    async def test_register_resident_flag_exposed(self, client):
+        payload = {
+            "node_id": "resident-node",
+            "hostname": "mac-mini",
+            "ip_address": "10.0.1.9",
+            "port": 11458,
+            "resident": True,
+        }
+        resp = await client.post("/api/nodes/register", json=payload, headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        nodes = await client.get("/api/nodes", headers=AUTH_HEADERS)
+        assert nodes.status_code == 200
+        data = nodes.json()
+        entries = data["nodes"] if isinstance(data, dict) else data
+        target = [n for n in entries if n["node_id"] == "resident-node"]
+        assert target and target[0]["resident"] is True
+        stats = await client.get("/api/cluster/stats", headers=AUTH_HEADERS)
+        assert stats.status_code == 200
+        assert stats.json()["resident_nodes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_session_persist_restore_roundtrip(self, tmp_path):
+        master = ClusterMaster(heartbeat_timeout=60.0)
+        master._task_store_path = tmp_path / "tasks.json"
+        from fusion_multi_node.master.cluster_master import NodeInfo
+
+        await master.register_node(NodeInfo(node_id="resident-9", hostname="mini", ip_address="10.0.0.9", port=11458))
+        await master.register_session("sess-p", origin_node="laptop", owner="dahai")
+        await master.handoff_session("sess-p", "resident-9")
+        await master._persist_tasks()
+        master2 = ClusterMaster(heartbeat_timeout=60.0)
+        master2._task_store_path = tmp_path / "tasks.json"
+        restored = await master2._restore_tasks()
+        session = await master2.get_session("sess-p")
+        assert session is not None
+        assert session["state"] == "handed_off"
+        assert session["host_node"] == "resident-9"
+        assert restored == 0

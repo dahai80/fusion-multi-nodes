@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -290,6 +291,10 @@ class AgentConfig:
     # #79: 测试执行开关 (env FUSION_NODE_TEST_EXEC, 默认 "0"=关)。开 → 追加 "test" 到 drivers
     # 且 execute_task 接受 task_type="test"。关 → 不广告 "test" + 派发即拒 (纵深防御)。
     test_exec_enabled: bool = False
+    # #82: 常驻节点开关 (env FUSION_NODE_RESIDENT, 默认 "0"=关)。开 → 追加 "resident" 到
+    # drivers (select_nodes required_capability="resident" 据此绑定时序任务) + 启用调度宿主
+    # (/api/schedules 托管定时任务, 笔记本关机照跑)。
+    resident: bool = False
 
     def __post_init__(self) -> None:
         env_mt = os.environ.get("FUSION_AGENT_MAX_TASKS")
@@ -324,6 +329,12 @@ class AgentConfig:
             self.test_exec_enabled = True
             if "test" not in self.drivers:
                 self.drivers.append("test")
+        # #82: 常驻节点 (默认关 — 只有过夜常驻机才开, 笔记本不开)。
+        env_resident = os.environ.get("FUSION_NODE_RESIDENT", "0").strip()
+        if env_resident == "1":
+            self.resident = True
+            if "resident" not in self.drivers:
+                self.drivers.append("resident")
 
 
 class NodeAgent:
@@ -380,6 +391,15 @@ class NodeAgent:
         self._supervisor = supervisor
         self._supervisor_available: bool = False
         self._supervisor_last_ping: float = 0.0
+        # #82: 常驻节点调度宿主 — executor 直连 execute_task (同 dedup/sandbox/并发 gate 链路),
+        # 到点触发本地推理。仅 config.resident=True 时 start()/register 放行, 否则 403。
+        from fusion_multi_node.agent.scheduling import ScheduleHost
+
+        self._schedule_host = ScheduleHost(
+            resident=self.config.resident,
+            executor=self.execute_task,
+            store_path=Path.home() / ".fusion" / "multi-node" / "schedules.json",
+        )
 
     def build_subprocess_sandbox_config(self):
         # P2-9 (审计 §6.2): AgentConfig.task_mem_limit_mb/task_cpu_quota → SandboxConfig
@@ -680,6 +700,8 @@ class NodeAgent:
                     "role": self.config.node_role,
                     "tags": ["apple-silicon"] if info.get("is_apple_silicon") else [],
                     "drivers": self.config.drivers,
+                    # #82: 常驻节点声明 — master NodeInfo.resident 存档 + /api/nodes 展示。
+                    "resident": self.config.resident,
                     "active_tasks": 0,
                     "max_tasks": self.config.max_tasks,
                 },
@@ -1131,6 +1153,11 @@ class NodeAgent:
         # 硬件上报循环
         self._hardware_task = asyncio.create_task(self._hardware_report_loop())
 
+        # #82: 常驻节点 — 恢复持久化定时任务 + 启动调度宿主循环。
+        if self.config.resident:
+            await self._schedule_host.load()
+            self._schedule_host.start()
+
         if with_server:
             from fusion_multi_node.server import AgentServer
 
@@ -1159,6 +1186,8 @@ class NodeAgent:
                 except (asyncio.CancelledError, Exception):
                     pass
             self._running_task_handles.clear()
+        # #82: 停调度宿主 (stop 内落盘 schedules.json, 重启恢复)
+        await self._schedule_host.stop()
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
             self._http_client = None

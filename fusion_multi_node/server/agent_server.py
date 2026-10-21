@@ -153,6 +153,21 @@ class ExecuteRequest(BaseModel):
     leader_id: str = ""
 
 
+class ScheduleRegisterRequest(BaseModel):
+    """#82 常驻节点定时任务注册体 — 字段对齐 ScheduleSpec, 校验在 ScheduleHost.register。"""
+
+    kind: str = "interval"
+    every_seconds: int = 0
+    at: str = ""
+    weekday: int = -1
+    task_type: str = "inference"
+    model_name: str = ""
+    params: dict[str, Any] = {}
+    timeout_seconds: float = 300.0
+    enabled: bool = True
+    schedule_id: str = ""
+
+
 class ChatCompletionsRequest(BaseModel):
     # F3 (#27): OpenAI 兼容 chat 透传体。透传到 fusion-mlx /v1/chat/completions,
     # 经 FusionMLXBackend.chat (429 退避 + api_key Bearer), 不经任务流水线。
@@ -437,6 +452,77 @@ class AgentServer:
             except Exception as e:
                 logger.error(f"任务执行失败: {e}")
                 raise HTTPException(status_code=500, detail="内部错误")
+
+        # ── #82 常驻节点定时任务 ──
+
+        def _require_resident() -> None:
+            if not self.agent.config.resident:
+                raise HTTPException(status_code=403, detail="本节点非常驻节点 (FUSION_NODE_RESIDENT=1 开启)")
+
+        @app.post("/api/schedules")
+        async def register_schedule(req: ScheduleRegisterRequest, request: Request):
+            await _check_permission(request, "/api/schedules", "POST")
+            _require_resident()
+            from fusion_multi_node.agent.scheduling import ScheduleSpec
+
+            spec = ScheduleSpec(
+                schedule_id=req.schedule_id,
+                kind=req.kind,
+                every_seconds=req.every_seconds,
+                at=req.at,
+                weekday=req.weekday,
+                task_type=req.task_type,
+                model_name=req.model_name,
+                params=dict(req.params),
+                timeout_seconds=req.timeout_seconds,
+                enabled=req.enabled,
+            )
+            try:
+                saved = self.agent._schedule_host.register(spec)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except PermissionError:
+                raise HTTPException(status_code=403, detail="本节点非常驻节点 (FUSION_NODE_RESIDENT=1 开启)")
+            return {"status": "ok", "schedule": saved}
+
+        @app.get("/api/schedules")
+        async def list_schedules(request: Request):
+            await _check_permission(request, "/api/schedules", "GET")
+            _require_resident()
+            return {"status": "ok", "schedules": self.agent._schedule_host.list_schedules()}
+
+        @app.get("/api/schedules/{schedule_id}")
+        async def get_schedule(schedule_id: str, request: Request):
+            await _check_permission(request, "/api/schedules", "GET")
+            _require_resident()
+            if not is_safe_path_segment(schedule_id):
+                raise HTTPException(status_code=400, detail=f"非法 schedule_id: {schedule_id!r}")
+            detail = self.agent._schedule_host.get(schedule_id)
+            if detail is None:
+                raise HTTPException(status_code=404, detail=f"定时任务不存在: {schedule_id}")
+            return {"status": "ok", "schedule": detail}
+
+        @app.patch("/api/schedules/{schedule_id}")
+        async def patch_schedule(schedule_id: str, req: ScheduleRegisterRequest, request: Request):
+            # PATCH 仅启停 (enabled) — 其余字段改注册语义, 直接重发 POST 覆盖。
+            await _check_permission(request, "/api/schedules", "POST")
+            _require_resident()
+            if not is_safe_path_segment(schedule_id):
+                raise HTTPException(status_code=400, detail=f"非法 schedule_id: {schedule_id!r}")
+            saved = self.agent._schedule_host.set_enabled(schedule_id, req.enabled)
+            if saved is None:
+                raise HTTPException(status_code=404, detail=f"定时任务不存在: {schedule_id}")
+            return {"status": "ok", "schedule": saved}
+
+        @app.delete("/api/schedules/{schedule_id}")
+        async def remove_schedule(schedule_id: str, request: Request):
+            await _check_permission(request, "/api/schedules", "DELETE")
+            _require_resident()
+            if not is_safe_path_segment(schedule_id):
+                raise HTTPException(status_code=400, detail=f"非法 schedule_id: {schedule_id!r}")
+            if not self.agent._schedule_host.remove(schedule_id):
+                raise HTTPException(status_code=404, detail=f"定时任务不存在: {schedule_id}")
+            return {"status": "ok"}
 
         # F3 (#27): chat 透传 — master /v1/chat/completions 转发到此, 直调 fusion-mlx,
         # 保留原生 OpenAI 格式 (非 /api/execute 扁平 result), 支持流式。

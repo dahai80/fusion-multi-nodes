@@ -5,14 +5,37 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.18.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.19.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1471%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1494%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.18.0。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.19.0。
+
+---
+
+> **🛰️ v0.19.0（2026-10-21）— 常驻节点调度宿主 + 集群状态 Web UI（#81 #82）**
+>
+> 两个 issue 落地:
+> - **#82 常驻节点 / 家庭服务器模式** — 局域网常驻 Mac 在笔记本关机后继续承接定时任务。
+>   `AgentConfig.resident`（env `FUSION_NODE_RESIDENT=1`）将节点 agent 变为调度宿主：广告 `resident` 驱动
+>   （任务经 `required_capability: "resident"` 绑定常驻节点）；agent 侧开放调度宿主 API ——
+>   `POST/GET/PATCH/DELETE /api/schedules`（interval/daily/weekly 规格，仅 inference/embedding 任务类型），
+>   到点经 `execute_task` 全链路触发（继承 dedup/沙箱/容量 gate）；schedules + 运行记录原子落盘
+>   `schedules.json`（tmp+replace+fsync，重启恢复；interval 错过的 tick 不补跑）。Master 新增会话登记表
+>   承接 live-session 交接：`POST/GET/DELETE /api/sessions`、`POST /api/sessions/{id}/handoff`
+>   （状态机 `active` → `handed_off` → `closed`，目标节点须已注册），随任务仓库持久化、启动恢复。
+>   `/api/nodes` 带 `resident`；`/api/cluster/stats` 带 `resident_nodes`。100% 局域网/离线 —— 无云、零新依赖。
+> - **#81 Union Web 集群状态 UI** — 新增 `web/` 包（React 18 + Vite + TS + Tailwind + Bun，vendor
+>   `@fusion/web-ui` + `@fusion/web-sdk`）：拓扑 / 节点 / 节点下钻 / 集群指标页，作为 shell 模块托管
+>   （`manifest.json` id `fusion-multi-nodes`，gateway `/shell/fusion-multi-nodes/`，`?embedded=1`，
+>   devices `mobile-readonly`，开发端口 11472）。消费 master API（`/api/nodes`、`/api/cluster/stats`、
+>   `/api/tasks`、`/api/v1/metrics`）；UI 无鉴权逻辑（网关 session 注入凭据；独立开发用 `VITE_API_KEY`）。
+>   符合 Spec S1-S14（token 化色值、四态、双语、内嵌模式）。
+>
+> 1494 tests, ruff clean. 详见 [CHANGELOG](docs/CHANGELOG.md)。
 
 ---
 

@@ -93,6 +93,8 @@ _PATH_PERMISSION_MAP: dict[str, Permission] = {
     "/api/execute": Permission.TASK_EXECUTE,
     # F3 (#27): agent chat 透传路由 — 同 TASK_EXECUTE 权限 (集群内部 master 派发)。
     "/api/v1/chat/completions": Permission.TASK_EXECUTE,
+    # #82: 常驻节点定时任务注册/查询 — master/cowork 控制面 (持 cluster_token), 同 execute 权限级。
+    "/api/schedules": Permission.TASK_EXECUTE,
     "/api/kv/register": Permission.KV_REGISTER,
     "/api/kv/find": Permission.KV_FIND,
     "/api/kv/lookup": Permission.KV_LOOKUP,
@@ -246,6 +248,10 @@ _USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/nodes"): "node:list",
     ("GET", "/api/cluster/stats"): "cluster:stats",
     ("GET", "/api/v1/cluster/stats"): "cluster:stats",
+    # #82 常驻节点会话登记/交接 — 借用任务权限级 (read=list, write/关闭=submit), 不新增权限串。
+    ("POST", "/api/sessions"): "task:submit",
+    ("GET", "/api/sessions"): "task:list",
+    ("DELETE", "/api/sessions"): "task:submit",
     # 观测
     ("GET", "/api/v1/observability/suggestions"): "observability:read",
     ("GET", "/api/v1/observability/alerts"): "observability:read",

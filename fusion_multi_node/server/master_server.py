@@ -116,6 +116,8 @@ class NodeRegisterRequest(BaseModel):
     supervisor_available: bool = False
     # #79 节点驱动/能力清单 (agent 上报, select_nodes 按 required_capability 匹配 tags ∪ drivers)。
     drivers: list[str] = []
+    # #82: 常驻节点声明 (FUSION_NODE_RESIDENT=1 的 agent 上报 true)。
+    resident: bool = False
 
 
 class HeartbeatRequest(BaseModel):
@@ -164,6 +166,22 @@ class TaskSubmitRequest(BaseModel):
 
 class TaskCancelRequest(BaseModel):
     reason: str = ""
+
+
+class SessionRegisterRequest(BaseModel):
+    """#82 常驻节点会话登记体 — origin 设备起会话登记, handoff 由独立路由承接。"""
+
+    session_id: str
+    origin_node: str = ""
+    host_node: str = ""
+    owner: str = ""
+    meta: dict[str, Any] = {}
+
+
+class SessionHandoffRequest(BaseModel):
+    """#82 会话交接体 — origin 笔记本离线, 会话宿主切到常驻节点。"""
+
+    target_node_id: str
 
 
 # GAP-8 (Phase F2): 用户管理 CRUD 请求模型 — 仅 ADMIN 可调 (user:manage 权限)。
@@ -837,6 +855,7 @@ class MasterServer:
                 network_rtt_ms=req.network_rtt_ms,
                 supervisor_available=req.supervisor_available,
                 drivers=req.drivers,
+                resident=req.resident,
                 last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
@@ -1502,6 +1521,92 @@ class MasterServer:
         # P1-18 (审计 §5.5): 任务状态 SSE 推送 — 客户端无需轮询即知 FAILED/COMPLETED。
         # 必须注册在 /api/tasks/{task_id} 之前, 否则 "events" 被 path param 捕获。
         # BearerAuthMiddleware 已覆盖 /api/* (仅豁免 health/docs), SSE 鉴权同其它端点。
+        # ── #82 常驻节点会话登记/交接 — cowork 经此登记 origin 会话, 笔记本离线时交接常驻节点 ──
+
+        @app.post("/api/sessions")
+        async def register_session(req: SessionRegisterRequest, request: Request):
+            actor = _enforce_user_rbac(request, "/api/sessions", "POST")
+            if not req.session_id:
+                raise HTTPException(status_code=400, detail="session_id 不可为空")
+            if req.origin_node and not is_safe_path_segment(req.origin_node):
+                raise HTTPException(status_code=400, detail=f"非法 origin_node: {req.origin_node!r}")
+            if req.host_node and not is_safe_path_segment(req.host_node):
+                raise HTTPException(status_code=400, detail=f"非法 host_node: {req.host_node!r}")
+            session = await self.master.register_session(
+                session_id=req.session_id,
+                origin_node=req.origin_node,
+                host_node=req.host_node,
+                owner=actor or req.owner,
+                meta=req.meta,
+            )
+            self._audit.log(
+                actor=actor or req.session_id,
+                action="session_register",
+                path="/api/sessions",
+                method="POST",
+                result="ok",
+                detail=f"session={req.session_id} origin={req.origin_node} host={req.host_node}",
+            )
+            return {"status": "ok", "session": session}
+
+        @app.get("/api/sessions")
+        async def list_sessions(request: Request):
+            _enforce_user_rbac(request, "/api/sessions", "GET")
+            sessions = await self.master.list_sessions()
+            return {"status": "ok", "sessions": sessions}
+
+        @app.get("/api/sessions/{session_id}")
+        async def get_session(session_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/sessions", "GET")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            session = await self.master.get_session(session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+            return {"status": "ok", "session": session}
+
+        @app.post("/api/sessions/{session_id}/handoff")
+        async def handoff_session(session_id: str, req: SessionHandoffRequest, request: Request):
+            actor = _enforce_user_rbac(request, "/api/sessions", "POST")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            if not is_safe_path_segment(req.target_node_id):
+                raise HTTPException(status_code=400, detail=f"非法 target_node_id: {req.target_node_id!r}")
+            try:
+                session = await self.master.handoff_session(session_id, req.target_node_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            self._audit.log(
+                actor=actor or session_id,
+                action="session_handoff",
+                path="/api/sessions/handoff",
+                method="POST",
+                result="ok",
+                detail=f"session={session_id} target={req.target_node_id}",
+            )
+            return {"status": "ok", "session": session}
+
+        @app.delete("/api/sessions/{session_id}")
+        async def close_session(session_id: str, request: Request):
+            actor = _enforce_user_rbac(request, "/api/sessions", "DELETE")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            try:
+                session = await self.master.close_session(session_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+            self._audit.log(
+                actor=actor or session_id,
+                action="session_close",
+                path="/api/sessions",
+                method="DELETE",
+                result="ok",
+                detail=f"session={session_id}",
+            )
+            return {"status": "ok", "session": session}
+
         @app.get("/api/tasks/events")
         async def task_events():
             async def event_stream():
@@ -2165,6 +2270,7 @@ class MasterServer:
                 network_rtt_ms=req.network_rtt_ms,
                 supervisor_available=req.supervisor_available,
                 drivers=req.drivers,
+                resident=req.resident,
                 last_heartbeat=time.time(),
             )
             allowed = await self.master.register_node(node)
@@ -2775,6 +2881,7 @@ def _node_to_resp(n: NodeInfo) -> dict[str, Any]:
         "draining": n.draining,
         "supervisor_available": n.supervisor_available,
         "drivers": n.drivers,
+        "resident": n.resident,
     }
 
 
