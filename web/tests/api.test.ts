@@ -71,7 +71,7 @@ describe("parseClusterMetrics", () => {
 
     it("last sample wins on duplicate metrics", () => {
         const m = parseClusterMetrics(
-            "fusion_cluster_nodes_online 1\nfusion_cluster_nodes_online 5"
+            "fusion_cluster_nodes_online 1\nfusion_cluster_nodes_online 5",
         );
         expect(m.nodes_online).toBe(5);
     });
@@ -79,14 +79,24 @@ describe("parseClusterMetrics", () => {
 
 describe("status kind mapping", () => {
     it("maps node status + draining to badge kinds", () => {
-        expect(nodeStatusKind({ status: "online", draining: false })).toBe("success");
-        expect(nodeStatusKind({ status: "busy", draining: false })).toBe("running");
-        expect(nodeStatusKind({ status: "online", draining: true })).toBe("warning");
-        expect(nodeStatusKind({ status: "draining", draining: true })).toBe("warning");
-        expect(nodeStatusKind({ status: "offline", draining: false })).toBe("offline");
-        expect(nodeStatusKind({ status: "future_status", draining: false })).toBe(
-            "offline"
+        expect(nodeStatusKind({ status: "online", draining: false })).toBe(
+            "success",
         );
+        expect(nodeStatusKind({ status: "busy", draining: false })).toBe(
+            "running",
+        );
+        expect(nodeStatusKind({ status: "online", draining: true })).toBe(
+            "warning",
+        );
+        expect(nodeStatusKind({ status: "draining", draining: true })).toBe(
+            "warning",
+        );
+        expect(nodeStatusKind({ status: "offline", draining: false })).toBe(
+            "offline",
+        );
+        expect(
+            nodeStatusKind({ status: "future_status", draining: false }),
+        ).toBe("offline");
     });
 
     it("maps task status to badge kinds", () => {
