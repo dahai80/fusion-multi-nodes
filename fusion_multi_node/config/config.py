@@ -208,6 +208,11 @@ class ClusterConfig:
             "token_budget": 10_000_000,
             "tool_timeout": 60.0,
         },
+        # #84 集群侧共享会话存储 — agent-studio 跨节点 resume 的 transcript/checkpoint 落盘目录。
+        # 空 = 默认 ~/.fusion/multi-node/session-store (env FUSION_MULTINODE_SESSION_STORE_DIR 覆盖)。
+        "session_store": {
+            "dir": "",
+        },
         "observability": {
             "retention_hours": 24.0,
             "alert_enabled": True,

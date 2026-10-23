@@ -252,6 +252,13 @@ _USER_PATH_PERMISSION_MAP: dict[tuple[str, str], str] = {
     ("POST", "/api/sessions"): "task:submit",
     ("GET", "/api/sessions"): "task:list",
     ("DELETE", "/api/sessions"): "task:submit",
+    # #84 共享会话存储 — 同 #82 借用任务权限级 (read=task:list VIEWER 可读, 写/fork=task:submit)。
+    ("GET", "/api/v1/session-store"): "task:list",
+    ("PUT", "/api/v1/session-store"): "task:submit",
+    ("DELETE", "/api/v1/session-store"): "task:submit",
+    ("POST", "/api/v1/session-store"): "task:submit",
+    # #84 sandbox 委派 run 查询 — 只读, 同任务列表权限。
+    ("GET", "/api/v1/runs"): "task:list",
     # 观测
     ("GET", "/api/v1/observability/suggestions"): "observability:read",
     ("GET", "/api/v1/observability/alerts"): "observability:read",

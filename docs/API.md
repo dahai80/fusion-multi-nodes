@@ -70,6 +70,8 @@ Submits a task. Returns `200` (dispatched/running) or `202` (queued — no nodes
 
 Body: `name`, `mode` (`data`\|`pipeline`), `model_name`, `prompt`, optional `priority`, `required_capability`, `timeout_seconds`, `target_node_id`, `task_id`.
 
+Optional headers (issue #84 sandbox delegation): `X-Fusion-Target-Node: <node_id>` hard-pins the task to the named node (never rerouted; `404` unregistered / `409` offline-draining-banned / `400` bad segment, pipeline mode, or exclude_nodes conflict), `X-Fusion-Run-Id: <run_id>` registers a run→task index for later `GET /api/v1/runs/{run_id}` lookup.
+
 Response `V1TaskSubmitResponse` (V1TaskResponse + `queued: bool`). `V1TaskResponse` (16 fields): `task_id`, `name`, `mode`, `model_name`, `status`, `assigned_nodes`, `created_at`, `started_at`, `completed_at`, `error`, `required_capability`, `priority`, `degraded_from_model`, `degradation_count`, `cancel_reason`, `sub_tasks`, `result`.
 
 ### 5. migrate_task — `POST /api/v1/tasks/{task_id}/migrate`
@@ -189,6 +191,25 @@ agent/guard → master confirm 中继 (MAC 校验 — `derive_confirm_relay_key`
 ### `GET /api/v1/confirms?epoch=N`
 
 guard 查 confirm 聚合, 可按 epoch 过滤。RBAC: CLUSTER_INTERNAL。
+
+---
+
+## Shared Session Store — Issue #84
+
+Cluster-side shared session/checkpoint store backing fusion-agent-studio cross-node resume (its `SessionStore` adapter, non-default backend; SQLite default path unchanged). Master is the single source of truth; any node hydrates/persists via these endpoints. Semantics mirror the adapter: `list/get/put/delete/fork`.
+
+| Method + Path | Description | RBAC |
+|---------------|-------------|------|
+| `GET /api/v1/session-store?limit=50` | List sessions (messages stripped, newest first) | `task:list` (VIEWER read) |
+| `GET /api/v1/session-store/{session_id}` | Get full session transcript | `task:list` |
+| `PUT /api/v1/session-store/{session_id}` | Put/overwrite session (body `id` must match path) | `task:submit` |
+| `DELETE /api/v1/session-store/{session_id}` | Delete session | `task:submit` |
+| `POST /api/v1/session-store/{session_id}/fork` | Fork session (new id, `metadata.forked_from` set) | `task:submit` |
+| `GET /api/v1/runs/{run_id}` | Sandbox-delegation run lookup (`X-Fusion-Run-Id` → task status) | `task:list` |
+
+Storage dir: config `session_store.dir` > env `FUSION_MULTINODE_SESSION_STORE_DIR` > default `~/.fusion/multi-node/session-store`. Atomic tmp+replace writes; session ids are path-segment validated.
+
+Sandbox run delegation (`sandbox: multi-node:<node>`): submit via `POST /api/tasks/submit` with `X-Fusion-Target-Node` + `X-Fusion-Run-Id` headers (see contract op 4). The task is hard-pinned — dispatch never reroutes to another node; unavailable target fails visibly at submit (`404`/`409`), a full target queues until free.
 
 ---
 

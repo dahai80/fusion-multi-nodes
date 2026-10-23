@@ -5,12 +5,34 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.19.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.20.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1494%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1533%20passed-brightgreen" alt="Tests">
 </p>
+
+---
+
+> **🛰️ v0.20.0 (2026-10-24) — Shared session store + sandbox run delegation for agent-studio cross-node resume (#84)**
+>
+> - **#84 Cluster-side shared session/checkpoint store** — master-hosted store backing fusion-agent-studio's
+>   `SessionStore` adapter (non-default backend; its SQLite default path unchanged). Semantics mirror the adapter
+>   (`list/get/put/delete/fork`): `GET /api/v1/session-store`, `GET/PUT/DELETE /api/v1/session-store/{id}`,
+>   `POST /api/v1/session-store/{id}/fork`. Any node hydrates/persists session transcripts over the existing
+>   Bearer-authed master API; file-backed with atomic tmp+replace writes, path-segment-validated ids, RBAC
+>   (read `task:list` / write `task:submit`), audited writes. Storage dir: config `session_store.dir` >
+>   env `FUSION_MULTINODE_SESSION_STORE_DIR` > default `~/.fusion/multi-node/session-store`.
+> - **#84 Sandbox run delegation** — `POST /api/tasks/submit` accepts `X-Fusion-Target-Node: <node_id>`
+>   (hard-pins the task to the named node for `sandbox: multi-node:<node>` runs; never rerouted — unregistered `404`,
+>   offline/draining/banned `409`, pipeline/exclude conflicts `400`; a busy target queues until free) and
+>   `X-Fusion-Run-Id: <run_id>` (run→task index, persisted with the task store, queryable via
+>   `GET /api/v1/runs/{run_id}`). Retry and crash-recovery paths preserve the pin (pinned node never lands in
+>   `exclude_nodes`).
+> - E2E verified: session checkpointed on node A hydrates on node B, delegated run executes only on the named node,
+>   B-side updates readable from A. 100% LAN/offline — no cloud, no new deps.
+>
+> 1533 tests, ruff clean. See [CHANGELOG](docs/CHANGELOG.md).
 
 ---
 
@@ -680,6 +702,7 @@ from fusion_multi_node.storage import StorageVolume, VolumeSpec, VolumeType
 from fusion_multi_node.storage import ShardReplicator, ReplicationConfig
 from fusion_multi_node.storage import CheckpointManager, CheckpointEntry
 from fusion_multi_node.storage import DistributedKVStore, KVEntry
+from fusion_multi_node.storage import ClusterSessionStore
 
 # Volume management
 sv = StorageVolume(base_dir="/data/volumes")
@@ -707,6 +730,12 @@ kv.restore("snapshot.json", merge=True)
 # Quorum read/write for shard replication
 qr = replicator.quorum_write("shard-1", data, storage_volume=sv)
 qread = replicator.quorum_read("shard-1", storage_volume=sv)
+
+# #84 Shared session store (agent-studio cross-node resume, master-hosted)
+ss = ClusterSessionStore()  # dir: config session_store.dir > env > default
+ss.put_session({"id": "sess-1", "title": "t", "messages": [...]})
+ss.get_session("sess-1")       # hydrate on any node
+ss.fork_session("sess-1")      # new id + metadata.forked_from
 ```
 
 ---
@@ -807,6 +836,9 @@ Default config at `~/.fusion/multi-node/config.json`:
     "token_budget": 10000000,
     "tool_timeout": 60.0
   },
+  "session_store": {
+    "dir": ""
+  },
   "observability": {
     "retention_hours": 24.0,
     "alert_enabled": true,
@@ -816,6 +848,8 @@ Default config at `~/.fusion/multi-node/config.json`:
 ```
 
 **Port migration**: v0.6.5 legacy ports (master 9753 / discovery 9754 / agent 9755 / mcp 9756 / fusion_mlx 8000) are auto-migrated to current defaults on config load, and a mis-set `master_host=0.0.0.0` is reverted to `127.0.0.1`; the migration is written back to `config.json`. `ClusterConfig` load uses a deep copy, so `set()` does not pollute the class-level `DEFAULT_CONFIG`.
+
+**`session_store.dir`** (#84): storage directory for the shared session store. Empty = env `FUSION_MULTINODE_SESSION_STORE_DIR` > default `~/.fusion/multi-node/session-store`.
 
 
 ---

@@ -154,6 +154,9 @@ class ClusterTask:
     exclude_nodes: list[str] = field(default_factory=list)
     # #63 active-active: 归属 master (owner 派发, peer 仅镜像); 单 master 模式留空
     owner_master: str = ""
+    # #84 sandbox 委派硬绑定 — agent-studio `sandbox: multi-node:<node>` 经
+    # X-Fusion-Target-Node 指定节点, 调度只派该节点 (不可重路由), 节点不可用即失败/排队。
+    pinned_node_id: str = ""
     # #79 测试批次归属 id (同一批次多任务共享, /api/test/batches 聚合状态/报告)
     batch_id: str = ""
     # #63/#65 任务分级: heavy/general, heavy 任务亲和 heavy 角色节点, pipeline shard 须 heavy 节点
@@ -284,6 +287,10 @@ class ClusterMaster:
         self._sessions: dict[str, ClusterSession] = {}
         # #82 会话快照暂存 (同 _pending_batch_snap 模式: 锁内建, 锁外落盘)。
         self._pending_session_snap: list[dict[str, Any]] = []
+        # #84 sandbox 委派 run-id 索引 (X-Fusion-Run-Id → task_id), 持 _tasks_lock 守护;
+        # agent-studio 按 run_id 查询派发状态 (attach/resume), 随任务快照持久化恢复。
+        self._run_ids: dict[str, str] = {}
+        self._pending_runs_snap: dict[str, str] = {}
         # P2-20 (审计 §6.8): ClusterConfig 实例 (start() 注入), 供 MasterServer 热加载。
         self._cluster_config: ClusterConfig | None = None
         # P1-3 (审计 §3.7): HTTP 派发路径 PII 脱敏器 — 懒加载, 仅 security.http_pii_scrub 开时构造。
@@ -559,7 +566,11 @@ class ClusterMaster:
         recovered_assigned = list(d.get("assigned_nodes", []))
         if was_running and recovered_assigned:
             seen = set(recovered_exclude)
+            # #84: 硬绑定任务不把 pinned 节点并入 exclude (否则恢复重派无节点可派)
+            _pinned = d.get("pinned_node_id", "")
             for nid in recovered_assigned:
+                if nid == _pinned:
+                    continue
                 if nid not in seen:
                     recovered_exclude.append(nid)
                     seen.add(nid)
@@ -592,6 +603,7 @@ class ClusterMaster:
             params=d.get("params", {}),
             result=d.get("result", {}),
             owner_master=d.get("owner_master", ""),
+            pinned_node_id=d.get("pinned_node_id", ""),
             tier=d.get("tier", "general"),
             batch_id=d.get("batch_id", ""),
         )
@@ -653,6 +665,8 @@ class ClusterMaster:
         # #79 同步快照测试批次 (锁内建, 锁外 _write_task_store 落盘)。仅存非空批次 (有非终态任务)。
         self._pending_batch_snap = [b.to_snapshot() for b in self._test_batches.values()]
         self._pending_session_snap = [s.to_dict() for s in self._sessions.values()]
+        # #84 run-id 索引快照 (只留仍存在的任务, 终态任务查询走内存 tasks 表)
+        self._pending_runs_snap = {r: t for r, t in self._run_ids.items() if t in self.tasks}
         return [self._task_to_dict(t) for t in self.tasks.values() if t.status not in _TERMINAL]
 
     def _write_task_store(self, pending: list[dict[str, Any]]) -> None:
@@ -668,6 +682,7 @@ class ClusterMaster:
                         "tasks": pending,
                         "batches": list(self._pending_batch_snap),
                         "sessions": list(self._pending_session_snap),
+                        "runs": dict(self._pending_runs_snap),
                         "saved_at": time.time(),
                     },
                     f,
@@ -748,6 +763,10 @@ class ClusterMaster:
                         self._sessions[sess.session_id] = sess
                 except Exception as e:
                     logger.warning(f"#82 会话恢复跳过 {sd.get('session_id', '?')}: {e}")
+            # #84 恢复 run-id 索引 (向后兼容: 旧文件无 runs key → 空跳过)
+            for rid, tid in (data.get("runs", {}) or {}).items():
+                if rid and tid in self.tasks:
+                    self._run_ids[rid] = tid
         if restored:
             logger.warning(f"H3 启动恢复 {restored} 任务 (崩溃前未完成, 已置 PENDING 待重派)")
         return restored
@@ -780,6 +799,28 @@ class ClusterMaster:
             return True
 
     # ── #82 常驻节点会话登记 ──
+
+    async def register_run_id(self, run_id: str, task_id: str) -> None:
+        """#84 sandbox 委派 run-id 登记 (X-Fusion-Run-Id → task_id), 幂等覆盖。
+
+        agent-studio 按 run_id 查派发状态 (attach/resume); 同 run_id 重提交 (幂等键
+        复用/重试) 覆盖指向最新任务。
+        """
+        if not run_id or not task_id:
+            raise ValueError("run_id/task_id 不可为空")
+        async with self._tasks_lock:
+            self._run_ids[run_id] = task_id
+            self._persist_dirty = True
+        logger.info(f"#84 run-id 登记: {run_id} → {task_id}")
+
+    def get_task_by_run_id(self, run_id: str) -> ClusterTask | None:
+        """#84 按 run_id 查任务 (无锁读 dict, 键值均在 _tasks_lock 下写入; GIL 下原子)。"""
+        if not run_id:
+            return None
+        task_id = self._run_ids.get(run_id)
+        if not task_id:
+            return None
+        return self.tasks.get(task_id)
 
     async def register_session(
         self,
@@ -1083,12 +1124,15 @@ class ClusterMaster:
         exclude_nodes: list[str] | None = None,
         task_tier: str = "general",
         shard_roles: list[str] | None = None,
+        pinned_node_id: str = "",
     ) -> list[NodeInfo]:
         """根据策略选择最优节点。M4-01 负载感知 + M4-02 本地优先。
 
         #63: task_tier — heavy/general, 传 LoadRouter 做 heavy 角色亲和 (软加分)。
         #63: drain 中节点不接新任务 (in-flight 继续)。
         #65: shard_roles — pipeline 模式只选具备这些角色的节点 (硬过滤)。
+        #84: pinned_node_id — sandbox 委派硬绑定, 候选收敛到该节点 (离线/ban/draining
+        过滤后不在候选 → 返回空, 派发失败/排队, 绝不重路由到其它节点)。
         """
         candidates = await self.get_online_nodes()
 
@@ -1108,6 +1152,13 @@ class ClusterMaster:
             candidates = [n for n in candidates if n.node_id not in excluded]
             if not candidates:
                 logger.warning(f"select_nodes: exclude_nodes={list(excluded)} 过滤后无候选节点")
+                return []
+
+        # #84: 硬绑定过滤 — 候选只留 pinned 节点 (在 exclude/ban/draining 之后, 语义最强)
+        if pinned_node_id:
+            candidates = [n for n in candidates if n.node_id == pinned_node_id]
+            if not candidates:
+                logger.warning(f"select_nodes: pinned 节点不可用: {pinned_node_id}")
                 return []
 
         # M3-05 capability 过滤 (#79: tags ∪ drivers, 节点按 drivers 上报能力)
@@ -1493,6 +1544,7 @@ class ClusterMaster:
                 exclude_nodes=task.exclude_nodes,
                 task_tier=task.tier,
                 shard_roles=_shard_roles,
+                pinned_node_id=task.pinned_node_id,
             )
         finally:
             if self._is_vram_first(task) and self.load_router.strategy != original_strategy:
@@ -1524,6 +1576,13 @@ class ClusterMaster:
                 # TOCTOU 补选: 首选节点被并发抢占满载 → 锁内补选其它空闲节点, 不直接 503。
                 if len(confirmed) < need:
                     shortfall = need - len(confirmed)
+                    # #84: 硬绑定任务不并发补选其它节点 (sandbox 语义 = 只跑指定节点),
+                    # 不足直接走下方入队等待 (pinned 节点空闲后 _persist_loop 排空)。
+                    if task.pinned_node_id:
+                        logger.info(
+                            f"#84 pinned 任务并发抢占不足: {task.task_id} pinned={task.pinned_node_id} → 入队等待"
+                        )
+                        return bool(self._enqueue_pending(task))
                     excluded = {n.node_id for n in confirmed}
                     # #31: 补选同样遵守重试节点黑名单, 不回退到失败节点
                     excluded.update(task.exclude_nodes)
@@ -1579,7 +1638,10 @@ class ClusterMaster:
         # 避重派回原失败节点 (与 P1-1 崩溃恢复协同, 与 #31 重试黑名单对齐)。
         if task.assigned_nodes:
             seen = set(task.exclude_nodes)
+            # #84: 硬绑定任务不把 pinned 节点并入 exclude (否则重试无节点可派)
             for nid in task.assigned_nodes:
+                if nid == task.pinned_node_id:
+                    continue
                 if nid not in seen:
                     task.exclude_nodes.append(nid)
                     seen.add(nid)

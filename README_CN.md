@@ -5,14 +5,35 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.19.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.20.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
-  <img src="https://img.shields.io/badge/tests-1494%20passed-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-1533%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.19.1。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.20.0。
+
+---
+
+> **🛰️ v0.20.0（2026-10-24）— 集群侧共享会话存储 + sandbox 运行委派，支撑 agent-studio 跨节点 resume（#84）**
+>
+> - **#84 集群侧共享会话/checkpoint 存储** — master 托管的会话存储，作为 fusion-agent-studio
+>   `SessionStore` 适配器的非默认集群后端（其 SQLite 默认路径不变）。语义对齐适配器
+>   （`list/get/put/delete/fork`）：`GET /api/v1/session-store`、`GET/PUT/DELETE /api/v1/session-store/{id}`、
+>   `POST /api/v1/session-store/{id}/fork`。任一节点经既有 Bearer 鉴权 master API 水化/回写会话
+>   transcript；文件落盘 + 原子 tmp+replace 写入、会话 id 路径段强校验、RBAC（读 `task:list` /
+>   写 `task:submit`）、写操作全审计。存储目录：config `session_store.dir` >
+>   env `FUSION_MULTINODE_SESSION_STORE_DIR` > 默认 `~/.fusion/multi-node/session-store`。
+> - **#84 sandbox 运行委派** — `POST /api/tasks/submit` 接受 `X-Fusion-Target-Node: <node_id>`
+>   （`sandbox: multi-node:<node>` 运行的硬绑定，绝不重路由 — 未注册 `404`、离线/draining/ban `409`、
+>   pipeline/exclude 冲突 `400`；目标忙则排队等空闲）与 `X-Fusion-Run-Id: <run_id>`
+>   （run→task 索引，随任务仓库持久化，经 `GET /api/v1/runs/{run_id}` 查询）。重试与崩溃恢复路径
+>   保留硬绑定（pinned 节点绝不进 `exclude_nodes`）。
+> - E2E 验证：节点 A checkpoint 的会话在节点 B 水化、委派运行只在指定节点执行、B 侧更新 A 侧可读。
+>   100% 局域网/离线 — 无云、无新依赖。
+>
+> 1533 项测试通过，ruff 无告警。详见 [CHANGELOG](docs/CHANGELOG.md)。
 
 ---
 
@@ -213,7 +234,7 @@
 | **Distributed MLX Bridge** | 流水线/数据并行、模型分片、Caveman 压缩、KV 缓存共享。✅跨节点 KV 传输生产就绪（GAP-7/#33，v0.11.0）：`SyntheticKVTransport` 默认后端路由合成 KVCacheEntry 跨节点；真张量 `MLXKVTransport` env-gated 实验附加（`FUSION_KV_TENSOR_BACKEND=mlx`，待上游 #650） |
 | **Security** | 节点审批、Master/Worker 权限隔离、Worker 沙箱、OS 级 sandbox-exec、数据脱敏、FMPCrypto（AES-256-GCM + ECDH）、Metal AES-GCM 加速 |
 | **Observability** ✅已接 | 指标、日志、告警、日志存储与导出、智能故障诊断、优化建议。**P0-8 接入 `ClusterMaster.start/stop` 生命周期 + `_health_check_loop` 周期采集指标/告警（去重）；`/api/v1/observability/{logs/export,suggestions,alerts}` 现返 200；`/api/v1/metrics`（Prometheus）亦接。v0.14.0 持久化默认开启（`observability.persist=True`，`observability.jsonl` 落盘，`_cleanup_loop` 300s 周期落盘）** |
-| **Storage Volumes** | 卷抽象、checkpoint 持久化、容量监控、LRU 淘汰。**ShardReplicator / DistributedKVStore / quorum 读写未接入生产路径，仅库级** |
+| **Storage Volumes** | 卷抽象、checkpoint 持久化、容量监控、LRU 淘汰。**ShardReplicator / DistributedKVStore / quorum 读写未接入生产路径，仅库级。v0.20.0 新增 `ClusterSessionStore`（#84 共享会话存储，master 托管，`/api/v1/session-store/*` 已接生产）** |
 
 ### 架构
 

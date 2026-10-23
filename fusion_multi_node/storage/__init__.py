@@ -1,5 +1,6 @@
 from .checkpoint import CheckpointEntry, CheckpointManager
 from .kv_store import DistributedKVStore, KVEntry, KVSnapEntry
+from .session_store import ClusterSessionStore
 from .shard_replication import (
     ReplicationConfig,
     ShardReplica,
@@ -19,6 +20,7 @@ __all__ = [
     "CapacityReport",
     "CheckpointEntry",
     "CheckpointManager",
+    "ClusterSessionStore",
     "DistributedKVStore",
     "FileEntry",
     "KVEntry",

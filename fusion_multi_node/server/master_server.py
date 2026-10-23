@@ -33,6 +33,7 @@ from fusion_multi_node.security.permission import NodeRole, PermissionManager, U
 
 # issue #52: 共享 Pydantic 模型从 agent_server 反向 import (cycle-safe — agent 零 import master)。
 from fusion_multi_node.server.agent_server import RuleEpochReceiveRequest, V1AuditChainResponse
+from fusion_multi_node.storage import ClusterSessionStore
 from fusion_multi_node.utils.auth import (
     BearerAuthMiddleware,
     build_safe_url,
@@ -479,6 +480,12 @@ class MasterServer:
         self._shared_token = shared_token or load_or_create_token()
         # P2-20 (审计 §6.8): 持有 ClusterConfig 供 /api/v1/config/reload 热重载。
         self._cluster_config = config
+        # #84 集群侧共享会话存储 — master 唯一权威, 任一节点经 /api/v1/session-store/* 水化/回写。
+        # 目录优先级: config session_store.dir > env FUSION_MULTINODE_SESSION_STORE_DIR > 默认。
+        _session_dir = ""
+        if config is not None:
+            _session_dir = str(config.get("session_store.dir", "") or "")
+        self.session_store = ClusterSessionStore(_session_dir)
         # GAP-8 (Phase F1): 用户令牌存储 — 多租户 per-user 鉴权。load_user_store() 无文件/无 env
         # 时返回 None → 中间件回退纯 cluster_token (单租户零配置向后兼容)。FUSION_BOOTSTRAP_ADMIN
         # env 指定首启引导 ADMIN 用户名 (无用户库时自动创建并签发首个令牌, 记日志)。
@@ -603,6 +610,38 @@ class MasterServer:
 
         async def _check_permission(node_id: str, path: str, method: str = "GET") -> bool:
             return self._permission_manager.check_path_access(node_id, path, method)
+
+        # #84 sandbox 委派头解析 — agent-studio `sandbox: multi-node:<node>` 提交时带
+        # X-Fusion-Target-Node (硬绑定节点) + X-Fusion-Run-Id (run→task 索引)。
+        # 校验失败可见拒绝 (4xx), 绝不静默回落到负载路由 (sandbox 语义 = 指定节点跑)。
+        async def _resolve_sandbox_headers(request, exclude_nodes, mode) -> tuple[str, str]:
+            target = request.headers.get("x-fusion-target-node", "").strip()
+            run_id = request.headers.get("x-fusion-run-id", "").strip()
+            if not target and not run_id:
+                return "", ""
+            if run_id and not is_safe_path_segment(run_id):
+                raise HTTPException(status_code=400, detail=f"非法 X-Fusion-Run-Id: {run_id!r}")
+            if not target:
+                return "", run_id
+            if not is_safe_path_segment(target):
+                raise HTTPException(status_code=400, detail=f"非法 X-Fusion-Target-Node: {target!r}")
+            if mode == ParallelMode.PIPELINE:
+                raise HTTPException(status_code=400, detail="pipeline 模式不支持节点硬绑定 (shard 跨节点)")
+            if target in set(exclude_nodes or []):
+                raise HTTPException(status_code=400, detail=f"target 节点在 exclude_nodes 内: {target!r}")
+            async with self.master._nodes_lock:
+                node = self.master.nodes.get(target)
+                _online = bool(node and node.status == NodeStatus.ONLINE)
+                _draining = bool(node and node.draining)
+            if node is None:
+                raise HTTPException(status_code=404, detail=f"目标节点未注册: {target!r}")
+            if not _online:
+                raise HTTPException(status_code=409, detail=f"目标节点不在线: {target!r}")
+            if _draining:
+                raise HTTPException(status_code=409, detail=f"目标节点 draining 中: {target!r}")
+            if self.master.is_node_banned(target):
+                raise HTTPException(status_code=409, detail=f"目标节点熔断 ban 中: {target!r}")
+            return target, run_id
 
         # GAP-8 (Phase F2): 用户令牌身份解析 + per-user RBAC。
         # 中间件对 fmu_ 令牌注入 scope["user_id"]/["user_role"] (auth.py)。
@@ -1243,6 +1282,8 @@ class MasterServer:
             # 集群令牌 → req.user (内部可信自声明, HA/CLI/agent 路径)。
             effective_user = user_actor if user_actor else req.user
             await self._resolve_tenant_quota(effective_user)
+            # #84 sandbox 委派: X-Fusion-Target-Node 硬绑定 + X-Fusion-Run-Id 登记
+            _pinned, _run_id = await _resolve_sandbox_headers(request, req.exclude_nodes, mode)
             _aa_prefix = self.master.aa_task_prefix()
             _aa_owner = self.master.aa_owner()
             _tid = f"{_aa_prefix}-task_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"task_{uuid.uuid4().hex[:12]}"
@@ -1270,7 +1311,11 @@ class MasterServer:
                     "temperature": req.temperature,
                 },
                 batch_id=req.batch_id,
+                # #84: sandbox 硬绑定节点 (调度只派该节点, 不重路由)
+                pinned_node_id=_pinned,
             )
+            if _pinned:
+                task.preferred_node_id = _pinned
             self._audit.log(
                 actor=effective_user or "unknown",
                 action="task_submit",
@@ -1278,7 +1323,10 @@ class MasterServer:
                 method="POST",
                 node_id="",
                 result="ok",
-                detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
+                detail=(
+                    f"task_id={task.task_id} model={req.model_name} mode={req.mode}"
+                    f"{' pinned=' + _pinned if _pinned else ''}{' run_id=' + _run_id if _run_id else ''}"
+                ),
             )
             # #71 幂等: X-Idempotency-Key 命中 → 复用已存在任务, 不新建 (客户端重试不产生重复任务)。
             _idem_key = request.headers.get("x-idempotency-key", "").strip()
@@ -1295,6 +1343,9 @@ class MasterServer:
             # #71 幂等: 派发成功后登记键 → task_id (后续同键重试复用)。
             if _idem_key:
                 await self.master.register_idempotency(_idem_key, task.task_id)
+            # #84: run-id 登记 (attach/resume 按 run_id 查任务)
+            if _run_id:
+                await self.master.register_run_id(_run_id, task.task_id)
             # P1-H: 任务可能入优先级队列 (节点不足/配额满) → PENDING 状态返回 202。
             if task.status == TaskStatus.PENDING and task.task_id in {t.task_id for t in self.master._pending_queue}:
                 resp = _task_to_resp(task)
@@ -1606,6 +1657,97 @@ class MasterServer:
                 detail=f"session={session_id}",
             )
             return {"status": "ok", "session": session}
+
+        # ── #84 集群侧共享会话存储 — agent-studio 跨节点 resume 的 transcript/checkpoint 载体 ──
+        # Master 唯一权威存储; 任一节点上的消费者经 Bearer 直连 master 水化/回写。
+        # 语义对齐 fusion-agent-studio SessionStore 适配器 (list/get/put/delete/fork)。
+        # RBAC: 读 = task:list (VIEWER 可读), 写/删/fork = task:submit (USER 起)。
+
+        @app.get("/api/v1/session-store")
+        async def session_store_list(request: Request, limit: int = 50):
+            _enforce_user_rbac(request, "/api/v1/session-store", "GET")
+            sessions = self.session_store.list_sessions(limit=limit)
+            return {"status": "ok", "sessions": sessions, "total": len(sessions)}
+
+        @app.get("/api/v1/session-store/{session_id}")
+        async def session_store_get(session_id: str, request: Request):
+            _enforce_user_rbac(request, "/api/v1/session-store", "GET")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            session = self.session_store.get_session(session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+            return {"status": "ok", "session": session}
+
+        @app.put("/api/v1/session-store/{session_id}")
+        async def session_store_put(session_id: str, session: dict[str, Any], request: Request):
+            actor = _enforce_user_rbac(request, "/api/v1/session-store", "PUT")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            if str(session.get("id", "") or "") != session_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"会话 id 不匹配: body={session.get('id')!r} path={session_id!r}",
+                )
+            stored = self.session_store.put_session(session)
+            self._audit.log(
+                actor=actor or session_id,
+                action="session_store_put",
+                path="/api/v1/session-store",
+                method="PUT",
+                node_id="",
+                result="ok",
+                detail=f"session={session_id} messages={len(stored.get('messages') or [])}",
+            )
+            return {"status": "ok", "session": stored}
+
+        @app.delete("/api/v1/session-store/{session_id}")
+        async def session_store_delete(session_id: str, request: Request):
+            actor = _enforce_user_rbac(request, "/api/v1/session-store", "DELETE")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            if not self.session_store.delete_session(session_id):
+                raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+            self._audit.log(
+                actor=actor or session_id,
+                action="session_store_delete",
+                path="/api/v1/session-store",
+                method="DELETE",
+                node_id="",
+                result="ok",
+                detail=f"session={session_id}",
+            )
+            return {"status": "ok", "deleted": session_id}
+
+        @app.post("/api/v1/session-store/{session_id}/fork")
+        async def session_store_fork(session_id: str, request: Request):
+            actor = _enforce_user_rbac(request, "/api/v1/session-store", "POST")
+            if not is_safe_path_segment(session_id):
+                raise HTTPException(status_code=400, detail=f"非法 session_id: {session_id!r}")
+            forked = self.session_store.fork_session(session_id)
+            if forked is None:
+                raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+            self._audit.log(
+                actor=actor or session_id,
+                action="session_store_fork",
+                path="/api/v1/session-store",
+                method="POST",
+                node_id="",
+                result="ok",
+                detail=f"from={session_id} to={forked.get('id')}",
+            )
+            return {"status": "ok", "session": forked}
+
+        @app.get("/api/v1/runs/{run_id}")
+        async def run_lookup(run_id: str, request: Request):
+            """#84 sandbox 委派 run 查询 — X-Fusion-Run-Id → 任务状态 (attach/resume 用)。"""
+            _enforce_user_rbac(request, "/api/v1/runs", "GET")
+            if not is_safe_path_segment(run_id):
+                raise HTTPException(status_code=400, detail=f"非法 run_id: {run_id!r}")
+            task = self.master.get_task_by_run_id(run_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"run 不存在: {run_id}")
+            return {"status": "ok", "run_id": run_id, "task": _task_to_resp(task)}
 
         @app.get("/api/tasks/events")
         async def task_events():
@@ -2337,6 +2479,8 @@ class MasterServer:
                     )
             effective_user = user_actor if user_actor else req.user
             await self._resolve_tenant_quota(effective_user)
+            # #84 sandbox 委派: X-Fusion-Target-Node 硬绑定 + X-Fusion-Run-Id 登记
+            _pinned, _run_id = await _resolve_sandbox_headers(request, req.exclude_nodes, mode)
             _aa_prefix = self.master.aa_task_prefix()
             _aa_owner = self.master.aa_owner()
             _tid = f"{_aa_prefix}-task_{uuid.uuid4().hex[:12]}" if _aa_prefix else f"task_{uuid.uuid4().hex[:12]}"
@@ -2363,7 +2507,11 @@ class MasterServer:
                     "temperature": req.temperature,
                 },
                 batch_id=req.batch_id,
+                # #84: sandbox 硬绑定节点 (调度只派该节点, 不重路由)
+                pinned_node_id=_pinned,
             )
+            if _pinned:
+                task.preferred_node_id = _pinned
             self._audit.log(
                 actor=effective_user or "unknown",
                 action="task_submit",
@@ -2371,7 +2519,10 @@ class MasterServer:
                 method="POST",
                 node_id="",
                 result="ok",
-                detail=f"task_id={task.task_id} model={req.model_name} mode={req.mode}",
+                detail=(
+                    f"task_id={task.task_id} model={req.model_name} mode={req.mode}"
+                    f"{' pinned=' + _pinned if _pinned else ''}{' run_id=' + _run_id if _run_id else ''}"
+                ),
             )
             # #71 幂等: X-Idempotency-Key 命中 → 复用已存在任务, 不新建。
             _idem_key = request.headers.get("x-idempotency-key", "").strip()
@@ -2387,6 +2538,9 @@ class MasterServer:
                 raise HTTPException(status_code=503, detail="可用节点不足，任务分配失败")
             if _idem_key:
                 await self.master.register_idempotency(_idem_key, task.task_id)
+            # #84: run-id 登记 (attach/resume 按 run_id 查任务)
+            if _run_id:
+                await self.master.register_run_id(_run_id, task.task_id)
             resp = _task_to_resp(task)
             if task.status == TaskStatus.PENDING and task.task_id in {t.task_id for t in self.master._pending_queue}:
                 resp["queued"] = True

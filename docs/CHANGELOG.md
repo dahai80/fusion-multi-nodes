@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-10-24 — Shared session store + sandbox run delegation (#84)
+
+### Added
+- **Cluster-side shared session/checkpoint store** (issue #84) — master-hosted store backing
+  fusion-agent-studio's `SessionStore` adapter as its non-default cluster backend (SQLite default path
+  unchanged). Semantics mirror the adapter (`list/get/put/delete/fork`):
+  - `GET /api/v1/session-store?limit=50` — list sessions (messages stripped, newest first).
+  - `GET /api/v1/session-store/{session_id}` — full transcript.
+  - `PUT /api/v1/session-store/{session_id}` — put/overwrite (body `id` must match path).
+  - `DELETE /api/v1/session-store/{session_id}` — delete.
+  - `POST /api/v1/session-store/{session_id}/fork` — fork (new id, `metadata.forked_from`).
+  - `GET /api/v1/runs/{run_id}` — sandbox-delegation run lookup.
+  - `ClusterSessionStore` (`fusion_multi_node.storage.session_store`): file-backed, atomic tmp+replace writes,
+    path-segment-validated session ids, dir resolution `config session_store.dir` >
+    env `FUSION_MULTINODE_SESSION_STORE_DIR` > default `~/.fusion/multi-node/session-store`.
+  - RBAC reuses task permission levels (read `task:list` VIEWER-observable, write `task:submit`); writes audited.
+- **Sandbox run delegation headers** on `POST /api/tasks/submit` + `POST /api/v1/tasks/submit` (issue #84,
+  consumes fusion-agent-studio `sandbox: multi-node:<node>`):
+  - `X-Fusion-Target-Node: <node_id>` — hard-pins the task to the named node (`ClusterTask.pinned_node_id`);
+    scheduling never reroutes. Visible submit-time rejection: `404` unregistered, `409` offline/draining/banned,
+    `400` bad path segment / pipeline mode / `exclude_nodes` conflict. A busy pinned target enters the pending
+    queue until free; the TOCTOU re-select path skips pinned tasks.
+  - `X-Fusion-Run-Id: <run_id>` — run→task index (`ClusterMaster._run_ids`, `_tasks_lock`-guarded), persisted
+    in the task store snapshot and restored on restart.
+- Config section `session_store.dir` (empty = env/default). Tests: `tests/test_session_store.py` (37 cases —
+  unit + HTTP API + RBAC + pin validation + run-id persistence), `tests/test_session_resume_e2e.py`
+  (2 cases — cross-node checkpoint/hydrate/delegate/reread E2E over real FastAPI master + 2 agent servers,
+  plus fail-visible delegation to an unavailable node).
+
+### Fixed
+- Retry and crash-recovery paths no longer merge the pinned node into `exclude_nodes` — a pinned task
+  previously would have had no dispatchable node after one failed attempt.
+
 ## [0.19.1] - 2026-10-21 — Patch: web tooling format normalization
 
 ### Changed
