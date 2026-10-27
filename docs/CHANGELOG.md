@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-10-27 — Re-vendor @fusion/web-sdk to v0.1.2 (#87)
+
+### Fixed
+- **Vendored `@fusion/web-sdk` re-synced to upstream v0.1.2** (issue #87, `web/vendor/@fusion/web-sdk/`):
+  - **Host bridge TypeError on non-object request results** (fusion-web-shell #75, fixed v0.1.1): the
+    `'__httpError' in (result as object)` check threw `TypeError: Cannot use 'in' operator` when a
+    bridge method returned a bare string (e.g. `theme` → `'light'`), so the module never received its
+    response. Now guarded by the `isHttpErrorResult()` type predicate (`src/host.ts`).
+  - **Stale `theme.get()` in embedded mode** (fusion-web-shell #77, fixed v0.1.2): `theme.get()` read
+    the module's own `documentElement`, which never carries the host theme class — fresh tabs reported
+    the wrong mode until the next push. Now a synchronous cached read seeded by a background host pull
+    at init and kept fresh by host push events (`src/theme.ts`). API unchanged: `get(): ThemeMode`
+    stays sync.
+  - Upstream tests vendored alongside (`tests/host.test.ts`, `tests/theme.test.ts`); web suite
+    36 pass / 0 fail, typecheck + biome + vite build clean. The module has no hand-rolled postMessage
+    theme pulls to migrate — it consumes the SDK via the single `createShellSdk()` instance only.
+
 ## [0.20.0] - 2026-10-24 — Shared session store + sandbox run delegation (#84)
 
 ### Added
