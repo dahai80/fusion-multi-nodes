@@ -42,6 +42,10 @@ def test_legacy_mlx_api_key_alias_with_warning(monkeypatch, caplog):
 
 
 def test_dev_missing_key_returns_empty_with_warning(caplog):
+    # _ANON_WARNED 进程级 once-only — 先清, 防随机顺序下前序用例已消费掉 warning。
+    import fusion_core.config as _fc_config
+
+    _fc_config._ANON_WARNED.clear()
     with caplog.at_level("WARNING", logger="fusion_core.config"):
         backend = FusionMLXBackend()
     assert backend.api_key == ""
