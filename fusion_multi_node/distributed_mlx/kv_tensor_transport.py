@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 import httpx
+from fusion_core.config import client_key
 
 from fusion_multi_node.security.mtls import client_kwargs as mtls_client_kwargs
 from fusion_multi_node.utils.auth import is_safe_outbound_host
@@ -128,7 +129,7 @@ class MLXKVTransport:
         resolved = (env_url or base_url).rstrip("/")
         # P2-2: 构造即校验出站 host — 不安全直接 raise (fail-closed), 不留到首请求。
         self._base_url = _ssrf_guard(resolved)
-        self._api_key = api_key or os.environ.get("FUSION_MLX_API_KEY", "")
+        self._api_key = api_key or client_key()
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
 

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from fusion_core.config import client_key
 
 from fusion_multi_node import __version__ as _node_protocol_version
 from fusion_multi_node.agent.mlx_memory import fetch_mlx_memory
@@ -84,8 +85,8 @@ class FusionMLXBackend(InferenceBackend):
         env_url = os.environ.get("FUSION_MLX_URL")
         self._base_url = (env_url or base_url).rstrip("/")
         self._timeout = timeout
-        # 显式 api_key 优先 (确定性, Rule 5); 未显式传则回落 env。
-        self._api_key = api_key or os.environ.get("FUSION_MLX_API_KEY", "")
+        # 显式 api_key 优先 (确定性, Rule 5); 未显式传则回落 fusion_core 单点解析 (#89)。
+        self._api_key = api_key or client_key()
         self._client: httpx.AsyncClient | None = None
         # GAP-6 客户端限流: 429 退避重试。默认 PacerConfig (3 次, 指数退避, 10s 预算)。
         # 上游 fusion-mlx --rate-limit 限流 (#635 已修: 0 默认关, 显式上限仍 429);
@@ -105,7 +106,7 @@ class FusionMLXBackend(InferenceBackend):
 
     @property
     def api_key(self) -> str:
-        # 暴露解析后的 api_key (含 FUSION_MLX_API_KEY env) — deep-health / readiness
+        # 暴露解析后的 api_key (含 fusion_core client_key env 链) — deep-health / readiness
         # /v1/models 探测须带 Bearer, fusion-mlx 启用 api_key 时无头恒 401 (issue #60)。
         return self._api_key
 
@@ -572,7 +573,7 @@ class NodeAgent:
         try:
             _mlx_url = os.environ.get("FUSION_MLX_URL") or f"http://localhost:{self.config.fusion_mlx_port}"
             # /v1/models 须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (issue #60)。
-            _api_key = self.config.fusion_mlx_api_key or os.environ.get("FUSION_MLX_API_KEY", "")
+            _api_key = self.config.fusion_mlx_api_key or client_key()
             _headers = {"Authorization": f"Bearer {_api_key}"} if _api_key else {}
             resp = httpx.get(f"{_mlx_url}/v1/models", timeout=3.0, headers=_headers)
             if resp.status_code == 200:
