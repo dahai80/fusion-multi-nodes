@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 import click
+from fusion_core.config import service_port
 
 from . import __app_name__, __version__
 from .agent import NodeAgent
@@ -421,7 +422,7 @@ async def _master_http(method: str, path: str, json_body: dict | None = None) ->
     from fusion_multi_node.utils.auth import load_or_create_token
 
     host = os.environ.get("FUSION_MULTINODE_HOST") or _get_config().get("cluster.master_host", "127.0.0.1")
-    port = int(os.environ.get("FUSION_MULTINODE_PORT") or _get_config().get("cluster.master_port", 11452))
+    port = service_port("multinode", _get_config().get("cluster.master_port", 11452))
     token = load_or_create_token()
     headers = {"Authorization": f"Bearer {token}"}
     url = f"http://{host}:{port}{path}"

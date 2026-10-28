@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fusion_core.config import client_key
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
@@ -387,7 +388,7 @@ class AgentServer:
                 f"http://localhost:{self.agent.config.fusion_mlx_port}"
             )
             # /v1/models 须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (issue #60)。
-            _api_key = getattr(self.agent._backend, "api_key", "") or os.environ.get("FUSION_MLX_API_KEY", "")
+            _api_key = getattr(self.agent._backend, "api_key", "") or client_key()
             _probe_headers = {"Authorization": f"Bearer {_api_key}"} if _api_key else {}
             fusion_mlx_ok = False
             try:

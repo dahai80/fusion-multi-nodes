@@ -22,6 +22,7 @@ from enum import StrEnum
 from typing import Any
 
 import httpx
+from fusion_core.config import client_key
 
 from fusion_multi_node.utils.auth import build_safe_url, is_safe_path_segment, is_safe_peer_host
 
@@ -408,7 +409,7 @@ class ClusterSyncManager:
         from fusion_multi_node.agent.mlx_memory import fetch_mlx_memory_sync
 
         _mlx_url = os.environ.get("FUSION_MLX_URL") or "http://localhost:11432"
-        _api_key = os.environ.get("FUSION_MLX_API_KEY", "")
+        _api_key = client_key()
         gpu_total = 0.0
         gpu_used = 0.0
         mlx_mem = fetch_mlx_memory_sync(_mlx_url, _api_key, timeout=2.0)
