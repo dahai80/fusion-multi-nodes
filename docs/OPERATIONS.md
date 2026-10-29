@@ -70,7 +70,7 @@
 **处置**:
 1. `~/claude-home/fusion-mlx/start.sh status` — 进程/端口/已载模型。
 2. 停 → `start.sh start` (真实加载模型); 等待 `/v1/models` 返回模型列表。
-3. api_key 不匹配 → `FUSION_MLX_API_KEY` 须与 fusion-mlx 启用 key 一致 (401 = 漏带/错 key)。
+3. api_key 不匹配 → `FUSION_CLIENT_KEY` 须与 fusion-mlx 启用 key 一致 (401 = 漏带/错 key)。
 4. Master 侧: 推理失败任务 `report_fault` → 节点进熔断 ban 期, 不再派发; fusion-mlx 恢复后 ban 期过自动复派。
 **恢复验证**: Agent `/api/health/deep` `ok` + `/v1/models` 含目标模型 id。
 

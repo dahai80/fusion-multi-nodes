@@ -78,7 +78,8 @@ services:
       # 推理引擎在裸机: 经 host.docker.internal 回连 (Docker Desktop 内置)。
       FUSION_MLX_URL: "http://host.docker.internal:11434"
       # P2-23 (审计 §6.10): 不带硬编码默认 API key。未设则 compose 启动失败并提示。
-      FUSION_MLX_API_KEY: "${FUSION_MLX_API_KEY:?必须设置 FUSION_MLX_API_KEY — 填 fusion-mlx 启用的 api_key}"
+      # #92 Config Phase 3: 规范名 FUSION_CLIENT_KEY (config-conventions §1), 旧名迁移期 2027-01-01 截止。
+      FUSION_CLIENT_KEY: "${FUSION_CLIENT_KEY:?必须设置 FUSION_CLIENT_KEY — 填 fusion-mlx 启用的 api_key}"
       # 单 agent 并发任务上限 — 压测时调高以充分利用 MLX 后端并发。
       FUSION_AGENT_MAX_TASKS: "${FUSION_AGENT_MAX_TASKS:-4}"
       # v0.14.0 mTLS 节点互信 (生产必配, 与 master 同 CA): 集群内 HTTP 双向证书认证。

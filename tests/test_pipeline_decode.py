@@ -54,7 +54,10 @@ class TestFusionMLXBackendDecode:
 
     @pytest.mark.asyncio
     async def test_decode_no_api_key_omits_auth(self, monkeypatch):
+        # client_key() env 链三态全清, 隔离本机 shell 常驻 FUSION_CLIENT_KEY。
+        monkeypatch.delenv("FUSION_CLIENT_KEY", raising=False)
         monkeypatch.delenv("FUSION_MLX_API_KEY", raising=False)
+        monkeypatch.delenv("MLX_API_KEY", raising=False)
         backend = FusionMLXBackend(base_url="http://127.0.0.1:11432")
         mock_client = AsyncMock()
         mock_client.is_closed = False

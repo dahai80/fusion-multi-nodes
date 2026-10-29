@@ -64,7 +64,7 @@ docker compose up -d --scale agent=2
 - 推理引擎 fusion-mlx 跑裸机, 容器经 `host.docker.internal:11434` 回连。
 - `--scale agent=N` 无上限扩容; agent 无 host 端口映射。
 - `restart:unless-stopped` 容器级崩溃重启; json-file 日志轮转 10MB×3 (P1-16)。
-- 凭据: compose 不带弱默认, 未设 `FUSION_CLUSTER_TOKEN`/`FUSION_MLX_API_KEY` 启动失败并提示 (P2-23)。
+- 凭据: compose 不带弱默认, 未设 `FUSION_CLUSTER_TOKEN`/`FUSION_CLIENT_KEY` 启动失败并提示 (P2-23; #92 规范名)。
 - 可信网段自动审批: `FUSION_AUTO_APPROVE_PATTERNS` (生产收紧到精确 CIDR)。
 
 跨机真网络: 多台 Mac 各跑 agent, Master 统一调度。详见 E2E 测试 `tests/test_data_parallelism_e2e.py`。
