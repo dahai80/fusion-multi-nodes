@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3] - 2026-10-30 — Config Phase 3: legacy key cleanup + registry self-check (#92)
+
+### Changed
+- **Legacy key-name cleanup (issue #92, hard deadline 2027-01-01)** —
+  `docker-compose.yml` and `.env.example` renamed `FUSION_MLX_API_KEY` to
+  the canonical `FUSION_CLIENT_KEY` (config-conventions §1). No alias
+  chain kept in this repo — alias compatibility is fusion-core's job.
+  Deployment docs (`DEPLOYMENT.md`, `OPERATIONS.md`,
+  `deploy/README-DOCKER.md`) follow the rename. `scripts/check-env.py`
+  now reports 0 legacy findings for this repo (was 1).
+
+### Added
+- **`start.sh` register-then-start self-check (Phase 3.3)** —
+  `check_port_registry()` runs at the top of `start()`: refuses to start
+  when the serving port is missing from `port-registry.yaml`;
+  `FUSION_SKIP_REGISTRY_CHECK=1` bypasses; a missing registry file warns
+  and continues (standalone deploy). Role-aware: master checks
+  `fusion-multi-node`/`FUSION_MULTINODE_PORT`, agent checks
+  `fusion-multi-node-agent`/`FUSION_AGENT_PORT`. `FUSION_REGISTRY`
+  overrides the registry path.
+
+### Fixed
+- `tests/test_pipeline_decode.py` + `tests/test_rate_pacer.py`: no-key
+  header tests now clear the full `client_key()` env chain — a local
+  shell `FUSION_CLIENT_KEY` leaked in via the #89 resolution and broke
+  the no-Authorization-header assertions.
+
 ## [0.20.2] - 2026-10-28 — Adopt fusion_core single-point config resolution (#89)
 
 ### Changed
