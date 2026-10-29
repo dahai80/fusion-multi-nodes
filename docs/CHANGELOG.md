@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.2] - 2026-10-28 — Adopt fusion_core single-point config resolution (#89)
+
+### Changed
+- **Config Phase 2.2 migration (issue #89, PR #90)** — all 5 hand-rolled
+  `FUSION_MLX_API_KEY` env fallbacks replaced with
+  `fusion_core.config.client_key()` (`FusionMLXBackend` ctor,
+  `NodeAgent._get_mlx_version`, `AgentServer` readiness probe,
+  `ClusterSyncManager.collect_load_report`, `MLXKVTransport` ctor); CLI
+  master-port resolution now routes through
+  `service_port("multinode", ...)` (env name `FUSION_MULTINODE_PORT`
+  unchanged). Resolution chain: `FUSION_CLIENT_KEY` →
+  `FUSION_MLX_API_KEY` (deprecated alias, warns) → `MLX_API_KEY`;
+  explicit arg/config always wins.
+- **`FUSION_PROFILE=prod` fail-fast**: missing key now raises
+  `RuntimeError` per config-conventions §3 (dev keeps the previous
+  empty-key + warning behavior). New behavior, intentionally introduced
+  by the conventions contract.
+- **`fusion-core` added to dependencies**; CI installs it from the public
+  `dahai80/fusion-core` repo (same pattern as fusion-rag). No
+  `ImportError` fallback shim needed.
+- `.env.example` documents `FUSION_CLIENT_KEY` as the canonical name;
+  `docker-compose.yml` keeps the legacy var for zero-downtime migration
+  (the alias chain makes both equivalent).
+
+### Added
+- `tests/test_fusion_core_config.py` — 8 regression tests covering
+  explicit-wins, env chain, deprecated-alias warning, dev anonymous mode,
+  prod fail-fast, and `service_port` env-name mapping.
+
 ## [0.20.1] - 2026-10-27 — Re-vendor @fusion/web-sdk to v0.1.2 (#87)
 
 ### Fixed

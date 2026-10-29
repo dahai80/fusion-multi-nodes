@@ -5,14 +5,14 @@
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.20.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.20.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
   <img src="https://img.shields.io/badge/tests-1533%20passed-brightgreen" alt="Tests">
 </p>
 
-> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.20.1。
+> 本文件是 fusion-multi-node 的中文 README，镜像英文 `README.md`，版本 v0.20.2。
 
 ---
 
