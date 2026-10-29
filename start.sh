@@ -10,6 +10,8 @@
 #   FUSION_MULTINODE_HOST / FUSION_MULTINODE_PORT (master)
 #   FUSION_AGENT_HOST / FUSION_AGENT_PORT (agent, default 127.0.0.1/11458)
 #   FUSION_MASTER_HOST / FUSION_MASTER_PORT (agent 回连 master, default 127.0.0.1/11452)
+#   FUSION_REGISTRY (port-registry.yaml 路径, default ~/fusion/architecture/port-registry.yaml)
+#   FUSION_SKIP_REGISTRY_CHECK=1 (旁路注册自检)
 
 set -euo pipefail
 
@@ -75,11 +77,33 @@ except Exception:
 PY
 }
 
+# Phase 3.3 (issue #92): start 前自检 port-registry — 未注册端口拒绝启动 (把 CI 检查前置到 start)。
+# 未注册端口 fail-fast; FUSION_SKIP_REGISTRY_CHECK=1 旁路; registry 文件缺失 = warn 继续 (standalone 部署)。
+check_port_registry() {
+    local service="fusion-multi-node" check_port="$PORT"
+    if [[ "$ROLE" == "agent" ]]; then
+        service="fusion-multi-node-agent"
+        check_port="$AGENT_PORT"
+    fi
+    local registry="${FUSION_REGISTRY:-$HOME/fusion/architecture/port-registry.yaml}"
+    if [[ ! -f "$registry" ]]; then
+        log_warn "port-registry.yaml not found at $registry — registry self-check skipped"
+    elif grep -A3 "^  ${service}:" "$registry" 2>/dev/null | grep -q "port: ${check_port}$"; then
+        log_info "registry self-check ok: ${service} port ${check_port} registered"
+    elif [[ "${FUSION_SKIP_REGISTRY_CHECK:-}" == "1" ]]; then
+        log_warn "registry check bypassed (FUSION_SKIP_REGISTRY_CHECK=1)"
+    else
+        log_error "port ${check_port} for ${service} not registered in $registry — refusing to start"
+        exit 1
+    fi
+}
+
 start() {
     if is_running; then
         log_info "multi-node ${ROLE} already running (PID $(get_pid))"
         exit 0
     fi
+    check_port_registry
     mkdir -p "$LOG_DIR"
     ensure_venv
 

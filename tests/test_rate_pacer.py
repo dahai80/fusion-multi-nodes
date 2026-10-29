@@ -192,7 +192,10 @@ class TestFusionMLXBackendPacing:
     @pytest.mark.asyncio
     async def test_health_probe_no_key_omits_auth_header(self, monkeypatch):
         # 无 api_key → 不发 Authorization 头 (回退匿名探测, 兼容未启鉴权的 fusion-mlx)。
+        # client_key() env 链三态全清, 隔离本机 shell 常驻 FUSION_CLIENT_KEY。
+        monkeypatch.delenv("FUSION_CLIENT_KEY", raising=False)
         monkeypatch.delenv("FUSION_MLX_API_KEY", raising=False)
+        monkeypatch.delenv("MLX_API_KEY", raising=False)
         mock_resp = AsyncMock()
         mock_resp.status_code = 200
         mock_client = AsyncMock()

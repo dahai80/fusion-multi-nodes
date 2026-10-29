@@ -51,7 +51,7 @@ docker compose up -d --scale agent=3
 | `FUSION_MASTER_PORT` | Agent 回连 Master 端口 | `11452` |
 | `FUSION_CLUSTER_TOKEN` | **集群共享密钥** (必填, 所有容器一致) | `dev-cluster-token-change-me` |
 | `FUSION_MLX_URL` | 推理引擎地址 (Agent 回连 fusion-mlx) | `http://host.docker.internal:11434` |
-| `FUSION_MLX_API_KEY` | fusion-mlx API key (鉴权 `/v1/*` 与 `/distributed/*`) | `dahai168` |
+| `FUSION_CLIENT_KEY` | fusion-mlx API key (鉴权 `/v1/*` 与 `/distributed/*`) | `dahai168` |
 
 ## 指向裸机 fusion-mlx
 
@@ -70,7 +70,7 @@ docker compose up -d --scale agent=3
 - 容器内测试: `docker compose exec agent python -c "import httpx; print(httpx.get('http://host.docker.internal:11434/v1/models').status_code)"`
 - Mac/Windows: 确认 Docker Desktop 运行中。
 - Linux: 确认 `extra_hosts` 生效 (`docker compose exec agent getent hosts host.docker.internal`)。
-- fusion-mlx 启用了 api_key: 确认 `FUSION_MLX_API_KEY` 与裸机 `settings.auth.api_key` 一致。
+- fusion-mlx 启用了 api_key: 确认 `FUSION_CLIENT_KEY` 与裸机 `settings.auth.api_key` 一致。
 
 ### Agent 注册被 Master 拒绝 (403 未审批)
 - Master 默认启用 `NodeApprovalManager` 节点审批门。
