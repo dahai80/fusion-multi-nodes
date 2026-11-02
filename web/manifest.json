@@ -1,7 +1,7 @@
 {
     "id": "fusion-multi-nodes",
-    "title": "多节点集群状态",
-    "title_en": "Multi-Node Cluster Status",
+    "title": "多节点集群",
+    "title_en": "Multi-Node",
     "description": "多节点集群监控：节点拓扑、服务状态、跨节点资源用量、任务概览。",
     "description_en": "Multi-node cluster monitoring: topology, node services, cross-node resource usage, task overview.",
     "version": "0.1.0",
