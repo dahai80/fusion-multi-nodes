@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4] - 2026-11-02 — Union web menu alignment for the cluster console (#95)
+
+### Changed
+- **`web/manifest.json` titles aligned to the approved shell menu
+  taxonomy** (issue #95, PR #96): `多节点集群状态` / `Multi-Node Cluster
+  Status` → `多节点集群` / `Multi-Node`. Keeps the module self-report
+  consistent with the approved menu inventory (platform group, sort 44).
+
+### Notes
+- The union-menu registration itself is a static manifest declaration in
+  fusion-gateway config (trainer pattern, gateway#462) — filed upstream as
+  **dahai80/fusion-gateway#464** (category platform, sort 44, health =
+  master `/api/health` :11452, modules upstream :11472). This repo cannot
+  edit fusion-gateway directly; issue #95 stays open until #464 merges.
+
 ## [0.20.3] - 2026-10-30 — Config Phase 3: legacy key cleanup + registry self-check (#92)
 
 ### Changed
