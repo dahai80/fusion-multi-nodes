@@ -96,7 +96,13 @@ class Handler(BaseHTTPRequestHandler):
             # hash router: 非文件路径一律回落 index.html (仅 GET 导航)
             candidate = DIST_DIR / "index.html"
         ctype = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
-        self._send_body(200, candidate.read_bytes(), ctype)
+        try:
+            body = candidate.read_bytes()
+        except OSError as e:
+            logger.warning(f"静态文件读取失败: {candidate} err={e}")
+            self._send_body(500, b'{"error":"internal"}', "application/json")
+            return
+        self._send_body(200, body, ctype)
 
     def do_GET(self):
         self._handle()

@@ -12,12 +12,11 @@ from pathlib import Path
 
 import pytest
 
-_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-_spec = importlib.util.spec_from_file_location("serve_dist", _WEB_DIR / "serve_dist.py")
+_spec = importlib.util.spec_from_file_location(
+    "serve_dist", Path(__file__).resolve().parent.parent / "web" / "serve_dist.py"
+)
 sd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sd)
-
-WEB_DIR = _WEB_DIR
 
 
 class _StubMaster(http.server.BaseHTTPRequestHandler):
@@ -55,9 +54,14 @@ def stub_master(monkeypatch):
 
 
 @pytest.fixture()
-def web_server(monkeypatch):
+def web_server(monkeypatch, tmp_path):
+    # CI 不跑 bun build — 用 fixture dist, 不依赖真实 web/dist 产物。
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>mn</body></html>")
+    (dist / "assets" / "app.js").write_text("console.log(1)")
     monkeypatch.setattr(sd, "WEB_PORT", 0)
-    monkeypatch.setattr(sd, "DIST_DIR", WEB_DIR / "dist")
+    monkeypatch.setattr(sd, "DIST_DIR", dist)
     sd.Handler.cluster_token = "tok-123"
     server = sd.ThreadingHTTPServer(("127.0.0.1", 0), sd.Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -71,8 +75,7 @@ def test_serves_index_and_assets(web_server):
     with urllib.request.urlopen(f"{web_server}/") as r:
         assert r.status == 200
         assert b"<html" in r.read().lower()
-    asset = next((WEB_DIR / "dist" / "assets").glob("*.js"))
-    with urllib.request.urlopen(f"{web_server}/assets/{asset.name}") as r:
+    with urllib.request.urlopen(f"{web_server}/assets/app.js") as r:
         assert r.status == 200
 
 
