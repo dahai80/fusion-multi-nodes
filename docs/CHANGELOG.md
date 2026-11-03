@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.5] - 2026-11-03 — Resident web console server on :11472 (#95)
+
+### Fixed
+- **Menu module `backend_unavailable`** (issue #95 follow-up, PR #98) —
+  the gateway `/shell/fusion-multi-nodes/` proxy targets `:11472`, but
+  only the vite dev server ever listened there (dev tool, never
+  resident). New `web/serve_dist.py`: stdlib-only resident server that
+  serves `web/dist` (hash router, index fallback) and reverse-proxies
+  `/api/*` to the master, injecting the cluster token from
+  `~/.fusion/multi-node/.cluster_token` (env-overridable) — the bundle
+  keeps zero secrets and the gateway `modules` entry stays `api_key`-less.
+- `start.sh`: new `start-web` / `stop-web` subcommands (PID file
+  `.fusion-multi-node.web.pid`, health-checked launch,
+  `logs/stdout_web.log`).
+
+### Added
+- `tests/test_web_static_server.py` — 5 cases: index/asset serving,
+  index fallback, token injection (stub master), 502 on upstream down,
+  missing-dist startup rejection. CI runs against a fixture dist (no
+  bun build in CI).
+
 ## [0.20.4] - 2026-11-02 — Union web menu alignment for the cluster console (#95)
 
 ### Changed
