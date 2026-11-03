@@ -28,6 +28,7 @@ AGENT_PORT="${FUSION_AGENT_PORT:-11458}"
 MASTER_HOST="${FUSION_MASTER_HOST:-127.0.0.1}"
 MASTER_PORT="${FUSION_MASTER_PORT:-11452}"
 PID_FILE="${SCRIPT_DIR}/.fusion-multi-node.${ROLE}.pid"
+WEB_PID_FILE="${SCRIPT_DIR}/.fusion-multi-node.web.pid"
 LOG_DIR="${SCRIPT_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/stdout_${ROLE}.log"
 STDERR_LOG="${LOG_DIR}/stderr_${ROLE}.log"
@@ -192,6 +193,60 @@ restart() {
     start
 }
 
+# ── Web UI 常驻静态服务 (issue #95): 托管 web/dist + /api 反代 master ──
+# 嵌入模式 gateway /shell/fusion-multi-nodes/ 代理至此 (:11472); vite dev
+# 是开发工具非常驻, 生产用本服务。
+web_pid() {
+    [[ -f "$WEB_PID_FILE" ]] && cat "$WEB_PID_FILE" || echo ""
+}
+
+web_running() {
+    local pid
+    pid=$(web_pid)
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+start_web() {
+    if web_running; then
+        log_info "multi-node web already running (PID $(web_pid))"
+        return 0
+    fi
+    [[ ! -f "$SCRIPT_DIR/web/dist/index.html" ]] && {
+        log_error "web/dist/index.html 缺失 — 先 cd web && bun install && bun run build"
+        exit 1
+    }
+    mkdir -p "$LOG_DIR"
+    FUSION_MULTINODE_WEB_PORT="${FUSION_MULTINODE_WEB_PORT:-11472}" \
+    FUSION_MULTINODE_PORT="$MASTER_PORT" \
+    nohup python3 "$SCRIPT_DIR/web/serve_dist.py" \
+        >> "$LOG_DIR/stdout_web.log" 2>> "$STDERR_LOG" &
+    local pid=$!
+    echo "$pid" > "$WEB_PID_FILE"
+    local i
+    for i in $(seq 1 10); do
+        if curl -sf "http://127.0.0.1:${FUSION_MULTINODE_WEB_PORT:-11472}/" > /dev/null 2>&1; then
+            log_info "multi-node web running (PID ${pid}) at http://127.0.0.1:${FUSION_MULTINODE_WEB_PORT:-11472}"
+            return 0
+        fi
+        sleep 0.5
+    done
+    log_error "multi-node web 启动超时, recent stderr:"
+    tail -n 10 "$STDERR_LOG" 2>/dev/null || true
+    return 1
+}
+
+stop_web() {
+    local pid
+    pid=$(web_pid)
+    if [[ -z "$pid" ]]; then
+        log_info "multi-node web not running"
+        return 0
+    fi
+    kill "$pid" 2>/dev/null || true
+    rm -f "$WEB_PID_FILE"
+    log_info "multi-node web stopped"
+}
+
 # ── H2 launchd 进程守护: 崩溃自动重启 + H3 任务持久化恢复 = 不丢任务 ──
 # install-launchd: 渲染 deploy plist 占位符 → ~/Library/LaunchAgents → launchctl load
 # uninstall-launchd: launchctl unload + 删 plist
@@ -264,8 +319,10 @@ case "${1:-status}" in
     status)  status ;;
     install-launchd)   install_launchd ;;
     uninstall-launchd) uninstall_launchd ;;
+    start-web)         start_web ;;
+    stop-web)          stop_web ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|install-launchd|uninstall-launchd}"
+        echo "Usage: $0 {start|stop|restart|status|install-launchd|uninstall-launchd|start-web|stop-web}"
         exit 2
         ;;
 esac
