@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.20.5
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - start.sh
   - fusion_multi_node/utils/utils.py

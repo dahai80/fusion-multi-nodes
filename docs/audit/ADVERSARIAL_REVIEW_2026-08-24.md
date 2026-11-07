@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.20.5
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - docs/audit/ADVERSARIAL_REVIEW_2026-08-24.md
 ---

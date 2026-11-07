@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.20.5
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - docs/API.md
   - fusion_multi_node/server
