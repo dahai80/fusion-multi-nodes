@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/audit-2026-08-24
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: guide
+title: {zh: "fusion-multi-node 对抗审计报告 2026-08-24", en: "fusion-multi-node Adversarial Review Report 2026-08-24"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/audit/ADVERSARIAL_REVIEW_2026-08-24.md
+---
+
 # fusion-multi-node 对抗性代码审查报告
 
 - **审查日期**: 2026-08-24

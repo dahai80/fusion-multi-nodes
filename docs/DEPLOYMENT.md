@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/deployment
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: guide
+title: {zh: "fusion-multi-node 部署指南", en: "fusion-multi-node Deployment Guide"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/DEPLOYMENT.md
+---
+
 # 部署指南 (Deployment)
 
 > P2-19 (审计 §6.5): 本项目定位澄清 — local-first Apple Silicon MLX 集群, **非 K8s/云原生编排目标**。

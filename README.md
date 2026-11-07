@@ -1,7 +1,25 @@
+---
+doc_id: fusion-multi-node/readme
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: readme
+title: {zh: "fusion-multi-node — 分布式 Apple Silicon MLX 集群调度核心", en: "fusion-multi-node — Distributed Apple Silicon MLX Cluster Scheduling Core"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README.md
+---
+
 <div align="center">
-  <h1>🔗 Fusion-Multi-Node</h1>
-  <p><strong>Cluster scheduling core for distributed Apple Silicon MLX inference</strong></p>
-  <p><em>Pool multiple Macs into a unified AI cluster — pipeline parallelism, data parallelism, 100% local-first.</em></p>
+
+  # 🔗 Fusion-Multi-Node
+
+  <p><b>Cluster scheduling core for distributed Apple Silicon MLX inference</b></p>
+  <p><i>Pool multiple Macs into a unified AI cluster — pipeline parallelism, data parallelism, 100% local-first.</i></p>
 </div>
 
 <p align="center">
@@ -504,8 +522,8 @@ master = await mdns.find_master_async(timeout=5.0)
 client = ManualJoinClient()
 resp = await client.join(master_host="10.0.0.1", master_port=11452, node_id="node-1")
 
-mgr = ManualJoinManager(cluster_secret="my-secret", auto_approve=True)
-result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": "my-secret"})
+mgr = ManualJoinManager(cluster_secret=CLUSTER_TOKEN, auto_approve=True)
+result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": CLUSTER_TOKEN})
 ```
 
 ### 4. FMP Protocol (`fusion_multi_node.protocol`)
@@ -1307,8 +1325,8 @@ Contributions welcome! Please ensure:
 ---
 
 <p align="center">
-  <strong>Fusion-Multi-Node — Pool Macs, Unify Inference, Scale Locally.</strong>
+  <b>Fusion-Multi-Node — Pool Macs, Unify Inference, Scale Locally.</b>
 </p>
 <p align="center">
-  <sub>Built with ❤️ by Fusion-MLX Team</sub>
+  Built with ❤️ by Fusion-MLX Team
 </p>

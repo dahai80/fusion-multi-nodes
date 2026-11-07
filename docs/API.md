@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/http-api
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: api-reference
+title: {zh: "fusion-multi-node HTTP API 参考（完整版）", en: "fusion-multi-node HTTP API Reference (Full)"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/API.md
+---
+
 # HTTP API Reference — fusion-multi-node
 
 Master HTTP API on `127.0.0.1:11452` (default). All endpoints require `Authorization: Bearer <token>` except exempt paths (`/api/health`, `/docs`, `/openapi.json`, `/redoc`, `/`, `/favicon.ico`).

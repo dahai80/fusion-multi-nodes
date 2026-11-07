@@ -1,7 +1,25 @@
+---
+doc_id: fusion-multi-node/readme-cn
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: readme
+title: {zh: "fusion-multi-node — 分布式 Apple Silicon MLX 集群调度核心", en: "fusion-multi-node — Distributed Apple Silicon MLX Cluster Scheduling Core"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 <div align="center">
-  <h1>🔗 Fusion-Multi-Node</h1>
-  <p><strong>分布式 Apple Silicon MLX 推理的集群调度核心</strong></p>
-  <p><em>将多台 Mac 组成统一 AI 集群 — 流水线并行、数据并行、100% 本地优先。</em></p>
+
+  # 🔗 Fusion-Multi-Node
+
+  <p><b>分布式 Apple Silicon MLX 推理的集群调度核心</b></p>
+  <p><i>将多台 Mac 组成统一 AI 集群 — 流水线并行、数据并行、100% 本地优先。</i></p>
 </div>
 
 <p align="center">
@@ -515,8 +533,8 @@ master = await mdns.find_master_async(timeout=5.0)
 client = ManualJoinClient()
 resp = await client.join(master_host="10.0.0.1", master_port=11452, node_id="node-1")
 
-mgr = ManualJoinManager(cluster_secret="my-secret", auto_approve=True)
-result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": "my-secret"})
+mgr = ManualJoinManager(cluster_secret=CLUSTER_TOKEN, auto_approve=True)
+result = mgr.handle_join_request({"node_id": "node-1", "cluster_secret": CLUSTER_TOKEN})
 ```
 
 ### 4. FMP Protocol（`fusion_multi_node.protocol`）
@@ -1298,8 +1316,8 @@ Apache License 2.0。详见 [LICENSE](LICENSE)。
 ---
 
 <p align="center">
-  <strong>Fusion-Multi-Node — 汇聚 Mac，统一推理，本地扩展。</strong>
+  <b>Fusion-Multi-Node — 汇聚 Mac，统一推理，本地扩展。</b>
 </p>
 <p align="center">
-  <sub>由 Fusion-MLX 团队用 ❤️ 构建</sub>
+  由 Fusion-MLX 团队用 ❤️ 构建
 </p>

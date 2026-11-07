@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/sandbox-selection
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: guide
+title: {zh: "fusion-multi-node sandbox 节点选择说明", en: "fusion-multi-node Sandbox Node Selection Notes"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/sandbox-selection.md
+---
+
 # Sandbox Technology Selection
 
 ## Decision: sandbox-exec (macOS) + unshare (Linux) + python-resource fallback

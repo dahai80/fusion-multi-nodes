@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/python-api
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: api-reference
+title: {zh: "fusion-multi-node Python API 参考", en: "fusion-multi-node Python API Reference"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/PYTHON_API.md
+---
+
 # Python API Reference — fusion-multi-node
 
 Class-level API for programmatic use. For HTTP routes see [API.md](API.md).

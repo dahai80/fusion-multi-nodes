@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/operations
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: guide
+title: {zh: "fusion-multi-node 运维手册", en: "fusion-multi-node Operations Manual"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/OPERATIONS.md
+---
+
 # 运维 Runbook (Operations)
 
 > P2-21 (审计 §6.9): 处置流程覆盖常见故障与运维操作。每节含 症状/诊断/处置/恢复验证。
