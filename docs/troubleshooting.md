@@ -12,7 +12,7 @@ updated: 2026-11-07
 owner: @dahai
 source_of_truth:
   - start.sh
-  - logs
+  - fusion_multi_node/utils/utils.py
   - docs/HA-CRASH-RECOVERY.md
   - docs/OPERATIONS.md
   - fusion_multi_node/config/config.py
