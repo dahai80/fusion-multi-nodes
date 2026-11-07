@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.5
+version: 0.20.6
 updated: 2026-11-07
 owner: @dahai
 source_of_truth:
@@ -20,6 +20,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.6] - 2026-11-07 — Docs-system v1.1 contract adoption (#101)
+
+### Added
+- **fusion docs-system v1.1 contract** (PR #101) — six contract docs
+  under `docs/` (product-page, get-started, api-reference,
+  config-reference, architecture, troubleshooting), root `CHANGELOG.md`
+  index, 12-key frontmatter on all in-scope markdown files, hardened
+  validator copy at `ci/validate_docs.py`, and a PR-triggered `docs`
+  workflow (`.github/workflows/docs.yml`).
+- `AGENTS.md` and project `CLAUDE.md` following the docs-system guide
+  contract.
+
+### Fixed
+- `docs/architecture.md` was gitignored by the case-insensitive match
+  of the `ARCHITECTURE.md` rule (macOS `core.ignorecase`) — added an
+  explicit `!docs/architecture.md` negation and tracked the file
+  (validator INV-T1).
+- `docs/troubleshooting.md` listed runtime-only `logs` as
+  `source_of_truth`; replaced with
+  `fusion_multi_node/utils/utils.py` where the RotatingFileHandler
+  configuration lives (validator SOT-PATH).
 
 ## [0.20.5] - 2026-11-03 — Resident web console server on :11472 (#95)
 
