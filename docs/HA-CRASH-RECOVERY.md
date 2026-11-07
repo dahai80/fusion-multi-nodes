@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/ha-crash-recovery
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: guide
+title: {zh: "fusion-multi-node HA 崩溃恢复指南", en: "fusion-multi-node HA Crash Recovery Guide"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/HA-CRASH-RECOVERY.md
+---
+
 # HA 与崩溃恢复 (H2 + GAP-1)
 
 > fusion-multi-node **默认单 Master** 模式 (`_election is None`, `_is_leader=True`)。多 Master

@@ -1,3 +1,19 @@
+---
+doc_id: fusion-multi-node/full-changelog
+product: fusion-multi-node
+class: core
+entry: service
+doc_type: changelog
+title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
+audience: engineer
+status: draft
+version: 0.20.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/CHANGELOG.md
+---
+
 # Changelog — fusion-multi-node
 
 All notable changes to this project will be documented in this file.
