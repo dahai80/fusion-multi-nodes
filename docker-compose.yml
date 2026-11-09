@@ -127,6 +127,41 @@ services:
           cpus: "${FUSION_AGENT_CPUS:-4}"
     restart: unless-stopped
 
+  # Web console (#103 customer delivery): serves web/dist + same-origin /api proxy to master.
+  # Same image, ROLE=web. Publish 11472 for direct browser access from the host.
+  web:
+    build: .
+    image: fusion-multi-node:latest
+    container_name: fusion-multinode-web
+    environment:
+      FUSION_MULTINODE_ROLE: web
+      FUSION_MULTINODE_WEB_HOST: "0.0.0.0"
+      FUSION_MULTINODE_WEB_PORT: "11472"
+      FUSION_MULTINODE_HOST: "master"
+      FUSION_MULTINODE_PORT: "11452"
+      FUSION_CLUSTER_TOKEN: "${FUSION_CLUSTER_TOKEN:?必须设置 FUSION_CLUSTER_TOKEN — 复制 .env.example 为 .env 并填强随机值}"
+    ports:
+      - "${FUSION_WEB_PORT:-11472}:11472"
+    networks:
+      - fusion-cluster
+    depends_on:
+      master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:11472/',timeout=4); sys.exit(0 if r.status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: "${FUSION_WEB_MEM_LIMIT:-512m}"
+    cpus: "${FUSION_WEB_CPUS:-1}"
+    restart: unless-stopped
+
 networks:
   fusion-cluster:
     driver: bridge

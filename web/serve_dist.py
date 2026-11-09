@@ -28,12 +28,17 @@ logger = logging.getLogger("mn-web")
 
 DIST_DIR = Path(__file__).resolve().parent / "dist"
 WEB_PORT = int(os.environ.get("FUSION_MULTINODE_WEB_PORT", "11472"))
+# Bind host: loopback default (local, safe). Container delivery (#103) sets 0.0.0.0
+# so docker port publish / sidecar proxies can reach the console.
+WEB_HOST = os.environ.get("FUSION_MULTINODE_WEB_HOST", "127.0.0.1")
 MASTER_PORT = os.environ.get("FUSION_MULTINODE_PORT", "11452")
 MASTER_HOST = os.environ.get("FUSION_MULTINODE_HOST", "127.0.0.1")
-TOKEN_FILE = Path(os.environ.get(
-    "FUSION_MULTINODE_TOKEN_FILE",
-    str(Path.home() / ".fusion" / "multi-node" / ".cluster_token"),
-))
+TOKEN_FILE = Path(
+    os.environ.get(
+        "FUSION_MULTINODE_TOKEN_FILE",
+        str(Path.home() / ".fusion" / "multi-node" / ".cluster_token"),
+    )
+)
 # master 健康端点豁免鉴权; 其余 /api/* 均需 Bearer。
 MASTER_HEALTH_PATHS = {"/api/health"}
 
@@ -134,9 +139,9 @@ def main() -> int:
         logger.error(f"dist 缺 index.html: {DIST_DIR} — 先 bun run build")
         return 1
     Handler.cluster_token = load_cluster_token()
-    server = ThreadingHTTPServer(("127.0.0.1", WEB_PORT), Handler)
+    server = ThreadingHTTPServer((WEB_HOST, WEB_PORT), Handler)
     logger.info(
-        f"mn-web 静态服务启动 :{WEB_PORT} dist={DIST_DIR} "
+        f"mn-web 静态服务启动 {WEB_HOST}:{WEB_PORT} dist={DIST_DIR} "
         f"master={MASTER_HOST}:{MASTER_PORT} token={'已加载' if Handler.cluster_token else '缺失'}"
     )
     try:

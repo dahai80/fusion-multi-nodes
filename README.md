@@ -289,6 +289,12 @@ source_of_truth:
 
 ## 🚀 Quick Start
 
+> **Customer-experience delivery (issue #103)**: one-command packages for
+> evaluation environments — macOS guest VM bootstrap
+> (`deliver/macos/bootstrap-guest.sh`) and Ubuntu docker compose
+> (`deliver/ubuntu/bring-up.sh`, master + agent + web console in one
+> stack). See [deliver/README.md](deliver/README.md).
+
 ### Installation
 
 ```bash
