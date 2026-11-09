@@ -300,6 +300,11 @@ source_of_truth:
 
 ## 🚀 快速开始
 
+> **客户体验交付 (issue #103)**：评估环境一条命令交付包 —— macOS 客户机
+> VM bootstrap（`deliver/macos/bootstrap-guest.sh`）与 Ubuntu docker
+> compose（`deliver/ubuntu/bring-up.sh`，master + agent + web 控制台
+> 一栈起）。详见 [deliver/README_CN.md](deliver/README_CN.md)。
+
 ### 安装
 
 ```bash
