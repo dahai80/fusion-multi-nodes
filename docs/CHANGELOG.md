@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.6
+version: 0.20.7
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
@@ -20,6 +20,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.7] - 2026-11-09 — Customer-experience delivery packages (#103)
+
+### Added
+- **Path 1 — macOS guest VM** (PR #105): `deliver/macos/bootstrap-guest.sh`
+  — idempotent in-guest bootstrap: shared venv, master (:11452) + agent
+  (:11458) + web console (:11472), optional `--with-mlx` (fusion-mlx
+  :11434, models via hf-mirror); a second Mac joins via
+  `FUSION_MASTER_HOST`. terminal-mac RC gaps (reset/clone/file-import)
+  documented with the rebuild-from-script workaround.
+- **Path 2 — Ubuntu docker compose** (PR #105): `deliver/ubuntu/bring-up.sh`
+  — single command: prepares `.env`, replaces placeholder/weak
+  `FUSION_CLUSTER_TOKEN` with a generated strong token, `docker compose up
+  --build --wait` (master + agent + web), health verification. Prebuilt
+  image flow (`docker save`/`load`) documented for air-gapped guests.
+- `docker-compose.yml`: `web` service (same image, `ROLE=web`, publishes
+  :11472, healthchecked, resource-capped, bounded logs).
+- `Dockerfile`: multi-stage — bun stage builds `web/dist` into the image;
+  guest needs no bun/node.
+- `deliver/README.md` + `deliver/README_CN.md` — bilingual delivery docs
+  with acceptance mapping.
+
+### Changed
+- `web/serve_dist.py`: `FUSION_MULTINODE_WEB_HOST` bind env (loopback
+  default unchanged; container sets `0.0.0.0`).
+- `docker-entrypoint.sh`: new `ROLE=web` branch execs `serve_dist.py`.
 
 ## [0.20.6] - 2026-11-07 — Docs-system v1.1 contract adoption (#101)
 
