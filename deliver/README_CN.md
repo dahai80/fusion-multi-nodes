@@ -86,6 +86,11 @@ build context 进入镜像构建。`bring-up.sh` 自动解析：优先 `$FUSION_
 （先 `docker compose build`，再 `docker save` / `docker load` 到无网
 客户机），模型走 hf-mirror。
 
+## 自动化预览栈 (issue #108)
+
+见 [preview/README_CN.md](preview/README_CN.md) —— 一条命令拉起隔离演示栈
+（仅合成数据、健康门、TTL 自动拆除、cowork cow#404 通知钩子）。
+
 ## 验收对照
 
 | issue #103 验收项 | 覆盖方式 |
