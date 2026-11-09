@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.7
+version: 0.20.8
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
@@ -20,6 +20,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.8] - 2026-11-09 — Delivery build fixes, live bring-up verified (#103)
+
+### Fixed
+- **Container build: fusion-core unresolvable** (issue #103 reopen, PR #109) —
+  `fusion-core` (in-tree shared base library, not on PyPI) failed to install
+  in the image. Now delivered as an extra build context
+  (`additional_contexts: fusion-core=${FUSION_CORE_DIR:-../fusion-core}`);
+  the Dockerfile installs it with `COPY --from=fusion-core`. No github HTTPS
+  dependency at build time (pip `git+` backend unreachable on restricted
+  networks); `bring-up.sh` resolves and clones the checkout automatically
+  (HTTPS, SSH fallback).
+- **bun build stage**: vendored `file:vendor/@fusion/*` dependencies were
+  copied after `bun install` — `COPY web/vendor/` moved before install.
+- **`deliver/README_CN.md`**: `title.en` field contained Chinese — replaced
+  with the English title (docs-system bilingual contract).
+- **`bootstrap-guest.sh`**: fails fast when guest `python3` < 3.11 (fresh
+  macOS Xcode CLT python3 can be 3.9) with pyenv / official-installer
+  guidance.
+- **`bring-up.sh`**: unsets shell-exported `FUSION_*` variables before
+  `docker compose up` — compose precedence made them silently override
+  `.env` (hit live during the acceptance run).
+
+### Verified live
+`docker compose build` green; `bring-up.sh` brings master + agent + web all
+healthy; agent deep health `fusion_mlx_ready=true` (real fusion-mlx on the
+host); agent node registered online at master; web console :11472 → 200.
 
 ## [0.20.7] - 2026-11-09 — Customer-experience delivery packages (#103)
 
