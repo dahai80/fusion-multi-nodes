@@ -91,6 +91,12 @@ results require a Mac node joined to the cluster. Offline-friendly:
 images are prebuilt (`docker compose build` once, then `docker save` /
 `docker load` on the air-gapped guest), models via hf-mirror.
 
+## Demo fleet — hidden compute Mac (issue #107)
+
+See [demo/README.md](demo/README.md) — customer enters through Mac A only;
+Mac B provides compute (agent + fusion-mlx) behind the cluster and is never
+exposed. `orchestrate-demo.sh status|verify` on Mac A.
+
 ## Automated preview stack (issue #108)
 
 See [preview/README.md](preview/README.md) — one-command isolated demo stack

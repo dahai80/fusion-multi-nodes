@@ -33,6 +33,7 @@ __all__ = [
     "NodeRole",
     "Permission",
     "PermissionManager",
+    "AgentSandbox",
     "SandboxConfig",
     "SandboxExecutor",
     "ScrubRule",

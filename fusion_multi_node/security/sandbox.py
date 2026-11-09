@@ -243,6 +243,39 @@ def _apply_rlimits_in_child(
         logger.warning(f"P2-9 子进程 rlimit 设置失败 (继续无 rlimit): {e}")
 
 
+class AgentSandbox:
+    """#107 编排用组合沙箱 — WorkerSandbox 入口 gate + SandboxExecutor 子进程执行。
+
+    NodeAgent._sandbox 需同时满足两类契约: 入口路径/网络过滤 (check_path_access/
+    check_network_access, WorkerSandbox) 与 test 任务子进程执行 (execute_in_sandbox,
+    SandboxExecutor)。env FUSION_NODE_SANDBOX=1 时由 NodeAgent 惰性组装, 生产默认关。
+    """
+
+    def __init__(self, config: SandboxConfig | None = None):
+        self.config = config or SandboxConfig()
+        self._gate = WorkerSandbox(self.config)
+        self._executor = SandboxExecutor(self.config)
+        logger.info("AgentSandbox: 组合 WorkerSandbox(gate) + SandboxExecutor(exec)")
+
+    def check_path_access(self, path: str, write: bool = False) -> bool:
+        return self._gate.check_path_access(path, write=write)
+
+    def check_network_access(self, host: str, port: int = 443) -> bool:
+        return self._gate.check_network_access(host, port)
+
+    async def execute_in_sandbox(
+        self,
+        task_id: str,
+        command: list,
+        timeout: int | None = None,
+        cwd: str | None = None,
+        env: dict | None = None,
+    ) -> dict[str, Any]:
+        return await self._executor.execute_in_sandbox(
+            task_id=task_id, command=command, timeout=timeout, cwd=cwd, env=env
+        )
+
+
 class SandboxExecutor:
     """M6-02 OS 级沙箱执行器 — macOS sandbox-exec / Linux unshare。"""
 
