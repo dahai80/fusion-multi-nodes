@@ -10,8 +10,27 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BASH_SCRIPTS = [
     "deliver/ubuntu/bring-up.sh",
     "deliver/macos/bootstrap-guest.sh",
+    "deliver/demo/orchestrate-demo.sh",
     "docker-entrypoint.sh",
 ]
+
+
+def test_orchestrate_docs_bilingual():
+    en = (REPO_ROOT / "deliver" / "demo" / "README.md").read_text()
+    cn = (REPO_ROOT / "deliver" / "demo" / "README_CN.md").read_text()
+    for token in ("orchestrate-demo.sh", "bootstrap-guest.sh", "/v1/chat/completions"):
+        assert token in en and token in cn
+    # Hidden-compute invariant: B never customer-facing.
+    assert "never exposed" in en
+    assert "绝不暴露" in cn
+
+
+def test_orchestrate_targets_master_f3_proxy():
+    text = (REPO_ROOT / "deliver" / "demo" / "orchestrate-demo.sh").read_text()
+    assert "/v1/chat/completions" in text
+    assert "FUSION_VERIFY_MODEL" in text
+    # No mlx / model download logic on the orchestrating side.
+    assert "HF_MIRROR" not in text
 
 
 @pytest.mark.parametrize("rel", BASH_SCRIPTS)

@@ -386,6 +386,19 @@ class NodeAgent:
         # 进程级 RLIMIT_AS/CPU 会整 agent 一起限制, 误杀在途任务。OS 级强隔离走
         # SandboxExecutor (subprocess 插件), 推理为 HTTP 调用无子进程, 不适用。
         self._sandbox = sandbox
+        # #107 演示机编排: env FUSION_NODE_TEST_EXEC=1 + FUSION_NODE_SANDBOX=1 时,
+        # 未显式注入 sandbox 则组装 AgentSandbox (gate + 子进程执行), test 任务才可跑。
+        # 默认关 — 保持既有安全姿态 (test 派发返 sandbox_unavailable)。
+        if self._sandbox is None and self.config.test_exec_enabled and os.environ.get("FUSION_NODE_SANDBOX") == "1":
+            from fusion_multi_node.security.sandbox import AgentSandbox, SandboxConfig
+
+            _paths = ["/tmp", "/var/tmp"]
+            _extra = os.environ.get("FUSION_NODE_SANDBOX_PATHS", "").strip()
+            if _extra:
+                _paths.extend(p for p in _extra.split(":") if p.strip())
+            # allowed_network_hosts 留空 = 不限 (gate 仅约束 model_sync 对端, 演示机场景放开)。
+            self._sandbox = AgentSandbox(SandboxConfig(allowed_paths=_paths))
+            logger.info("#79/#107: AgentSandbox assembled from env (FUSION_NODE_SANDBOX=1)")
         # #73: fusion-sv supervisor 桥接 — 本机 shell-out 调用 fusion-sv CLI。
         # 默认 None → 首次使用惰性建 SupervisorBridge (避免未装 fusion-sv 的部署 import 失败)。
         # 心跳周期 ping fusion-sv status 上报 supervisor_available; supervisor_rpc 任务类型经此调用。

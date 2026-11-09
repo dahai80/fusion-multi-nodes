@@ -86,6 +86,11 @@ build context 进入镜像构建。`bring-up.sh` 自动解析：优先 `$FUSION_
 （先 `docker compose build`，再 `docker save` / `docker load` 到无网
 客户机），模型走 hf-mirror。
 
+## 演示机编排 — 隐身算力 Mac (issue #107)
+
+见 [demo/README_CN.md](demo/README_CN.md) —— 客户只从 Mac A 进入；Mac B 在集群
+后面提供算力（agent + fusion-mlx），绝不暴露。Mac A 上 `orchestrate-demo.sh status|verify`。
+
 ## 自动化预览栈 (issue #108)
 
 见 [preview/README_CN.md](preview/README_CN.md) —— 一条命令拉起隔离演示栈

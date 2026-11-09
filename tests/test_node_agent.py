@@ -631,3 +631,37 @@ class TestNodeAgentLifecycle:
         ):
             result = await agent._discover_master()
         assert result is False
+
+
+class TestAgentSandboxAssembly:
+    # #107 demo-fleet: env opt-in sandbox assembly — default off keeps the
+    # existing fail-visible posture (test dispatch returns sandbox_unavailable).
+
+    def test_default_no_sandbox(self, monkeypatch):
+        monkeypatch.delenv("FUSION_NODE_SANDBOX", raising=False)
+        agent = NodeAgent(AgentConfig(test_exec_enabled=True))
+        assert agent._sandbox is None
+
+    def test_env_assembles_composite_sandbox(self, monkeypatch):
+        monkeypatch.setenv("FUSION_NODE_TEST_EXEC", "1")
+        monkeypatch.setenv("FUSION_NODE_SANDBOX", "1")
+        monkeypatch.setenv("FUSION_NODE_SANDBOX_PATHS", "/tmp:/srv/demo")
+        agent = NodeAgent(AgentConfig(test_exec_enabled=True))
+        assert agent._sandbox is not None
+        assert agent._sandbox.check_path_access("/tmp/x", write=False) is True
+        assert agent._sandbox.check_path_access("/etc/passwd", write=False) is False
+        # gate + exec contracts both satisfied on the composed object
+        assert hasattr(agent._sandbox, "execute_in_sandbox")
+
+    def test_env_ignored_when_test_exec_disabled(self, monkeypatch):
+        monkeypatch.setenv("FUSION_NODE_SANDBOX", "1")
+        agent = NodeAgent(AgentConfig(test_exec_enabled=False))
+        assert agent._sandbox is None
+
+    def test_explicit_sandbox_not_overridden(self, monkeypatch):
+        from fusion_multi_node.security.sandbox import SandboxConfig, WorkerSandbox
+
+        monkeypatch.setenv("FUSION_NODE_SANDBOX", "1")
+        injected = WorkerSandbox(SandboxConfig())
+        agent = NodeAgent(AgentConfig(test_exec_enabled=True), sandbox=injected)
+        assert agent._sandbox is injected
