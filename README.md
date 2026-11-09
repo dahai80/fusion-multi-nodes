@@ -7,8 +7,8 @@ doc_type: readme
 title: {zh: "fusion-multi-node — 分布式 Apple Silicon MLX 集群调度核心", en: "fusion-multi-node — Distributed Apple Silicon MLX Cluster Scheduling Core"}
 audience: engineer
 status: draft
-version: 0.20.9
-updated: 2026-11-07
+version: 0.20.10
+updated: 2026-11-09
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -23,7 +23,7 @@ source_of_truth:
 </div>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.20.9-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.20.10-blue" alt="Version">
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-brightgreen" alt="macOS">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License">
