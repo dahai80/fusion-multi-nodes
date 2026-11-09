@@ -4,10 +4,10 @@ product: fusion-multi-node
 class: core
 entry: service
 doc_type: guide
-title: {zh: "fusion-multi-node 交付包", en: "fusion-multi-node 交付包"}
+title: {zh: "fusion-multi-node 交付包", en: "fusion-multi-node Delivery Packages"}
 audience: engineer
 status: draft
-version: 0.20.6
+version: 0.20.7
 updated: 2026-11-09
 owner: @dahai
 source_of_truth:
@@ -73,6 +73,11 @@ Gateway / cowork / web-shell 联合栈由各自交付负责人部署；其交付
 
 扩容 agent：`docker compose up -d --scale agent=3`。
 拆除：`docker compose down`。
+
+**构建前置**：`fusion-core`（in-tree 共享底座库，不在 PyPI）作为额外
+build context 进入镜像构建。`bring-up.sh` 自动解析：优先 `$FUSION_CORE_DIR`
+（默认 `~/fusion/fusion-core`），缺失时自动 clone（HTTPS 失败回落 SSH）。
+脚本会 unset 冲突性 shell 导出的 `FUSION_*` 变量，`.env` 是唯一配置源。
 
 **Ubuntu 上的推理**：fusion-mlx 仅支持 Apple Silicon，保持 Mac 裸机
 部署。容器经 `host.docker.internal` 回连（见 `docker-compose.yml` 的

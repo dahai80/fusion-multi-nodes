@@ -20,13 +20,22 @@ log_info()  { printf "\033[0;32m[INFO]\033[0m  %s\n" "$*"; }
 log_warn()  { printf "\033[0;33m[WARN]\033[0m  %s\n" "$*"; }
 log_error() { printf "\033[0;31m[ERROR]\033[0m %s\n" "$*"; }
 
-# python3.12 required (repo .python-version). Xcode CLT provides python3.
+# python3 >= 3.11 required (repo .python-version declares 3.12).
 if ! command -v python3 >/dev/null 2>&1; then
     log_info "installing Xcode Command Line Tools (provides python3)..."
     xcode-select --install 2>/dev/null || true
     log_error "re-run this script after Xcode CLT install completes"
     exit 1
 fi
+
+py_major="$(python3 -c 'import sys; print(sys.version_info[0])')"
+py_minor="$(python3 -c 'import sys; print(sys.version_info[1])')"
+if [[ "$py_major" -lt 3 || ( "$py_major" -eq 3 && "$py_minor" -lt 11 ) ]]; then
+    log_error "python3 ${py_major}.${py_minor} found, but >= 3.11 is required (repo targets 3.12)."
+    log_error "Install python3.12 via pyenv (brew install pyenv && pyenv install 3.12) or the python.org installer, then re-run."
+    exit 1
+fi
+log_info "python3 ${py_major}.${py_minor} detected"
 
 # Git is required to clone repos.
 if ! command -v git >/dev/null 2>&1; then

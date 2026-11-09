@@ -7,7 +7,7 @@ doc_type: guide
 title: {zh: "fusion-multi-node 交付包", en: "fusion-multi-node Delivery Packages"}
 audience: engineer
 status: draft
-version: 0.20.6
+version: 0.20.7
 updated: 2026-11-09
 owner: @dahai
 source_of_truth:
@@ -75,6 +75,13 @@ What it does:
 
 Scale agents: `docker compose up -d --scale agent=3`.
 Tear down: `docker compose down`.
+
+**Build prerequisites**: `fusion-core` (the shared in-tree base library,
+not on PyPI) enters the image as an extra build context. `bring-up.sh`
+resolves it automatically: uses `$FUSION_CORE_DIR` (default
+`~/fusion/fusion-core`), clones it on first run (HTTPS, SSH fallback).
+Shell-exported `FUSION_*` variables are unset by the script so `.env`
+is the single source of truth.
 
 **Inference on Ubuntu**: fusion-mlx is Apple-Silicon-only and stays
 bare-metal on a Mac. Containers reach it via `host.docker.internal`

@@ -32,6 +32,26 @@ def test_compose_has_web_service():
     assert ":11472" in text  # published port (literal or via FUSION_WEB_PORT env default)
 
 
+def test_compose_provides_fusion_core_build_context():
+    # fusion-core is not on PyPI — every build must declare the extra context.
+    text = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert text.count("additional_contexts:") == 3
+    assert "FUSION_CORE_DIR" in text
+
+
+def test_dockerfile_installs_fusion_core_from_context():
+    # No github HTTPS at build time (pip git+ unreachable on restricted networks).
+    text = (REPO_ROOT / "Dockerfile").read_text()
+    assert "COPY --from=fusion-core" in text
+    assert "git+https" not in text
+
+
+def test_bring_up_resolves_fusion_core_and_env_conflicts():
+    text = (REPO_ROOT / "deliver" / "ubuntu" / "bring-up.sh").read_text()
+    assert "FUSION_CORE_DIR" in text
+    assert "unset FUSION_CLIENT_KEY" in text
+
+
 def test_entrypoint_web_role_serves_dist():
     text = (REPO_ROOT / "docker-entrypoint.sh").read_text()
     assert 'ROLE = "web"' in text or '[ "$ROLE" = "web" ]' in text
