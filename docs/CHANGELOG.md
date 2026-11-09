@@ -7,8 +7,8 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.9
-updated: 2026-11-07
+version: 0.20.10
+updated: 2026-11-09
 owner: "@dahai"
 source_of_truth:
   - docs/CHANGELOG.md
@@ -20,6 +20,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.10] - 2026-11-09 — Demo fleet orchestration (#107)
+
+### Added
+- **`deliver/demo/orchestrate-demo.sh`** (PR #113) — Mac A side orchestration
+  for the revised #107 demo topology: customer enters through Mac A only;
+  Mac B provides compute (agent + fusion-mlx) behind the cluster and is
+  never exposed. `status` (master/gateway health + joined compute nodes),
+  `verify` (E2E chat completion routed through the master F3 proxy
+  `POST /v1/chat/completions` to the worker node, loud failure when no
+  compute node is reachable).
+- **`deliver/demo/README.md` + `README_CN.md`** — topology, setup (Mac B
+  reuses `bootstrap-guest.sh` agent role, `FUSION_MLX_URL` note), hidden
+  compute invariant, sandbox opt-in; `deliver/README*.md` link added.
+- **`AgentSandbox`** (`security/sandbox.py`) — composite satisfying the
+  NodeAgent sandbox contract: WorkerSandbox entry gate
+  (`check_path_access`/`check_network_access`) + SandboxExecutor subprocess
+  execution (`execute_in_sandbox`), used by `#79` test dispatch.
+- **NodeAgent env opt-in sandbox assembly** — `FUSION_NODE_TEST_EXEC=1` +
+  `FUSION_NODE_SANDBOX=1` (+ optional `FUSION_NODE_SANDBOX_PATHS`,
+  colon-separated) builds `AgentSandbox` when no sandbox is injected.
+  Default unchanged/off: test dispatch still returns `sandbox_unavailable`
+  (fail visible).
+
+### Notes
+- Thin demo-guest / ai-* app sandbox provisioning itself is re-dispatched
+  to fusion-executor (dahai80/fusion-executor#64); this release covers the
+  multi-node part only.
 
 ## [0.20.9] - 2026-11-09 — Automated customer preview stack (#108)
 
