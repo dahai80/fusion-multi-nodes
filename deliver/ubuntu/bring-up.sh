@@ -48,6 +48,23 @@ if [[ -z "$current_token" || "$current_token" == change-me* || ${#current_token}
     log_info "generated strong FUSION_CLUSTER_TOKEN into .env"
 fi
 
+# fusion-core (shared base lib, not on PyPI) must be available as a local
+# git checkout — it enters the image build as an extra build context.
+# GitHub HTTPS is unreachable on many target networks; clone via SSH fallback.
+FUSION_CORE_DIR="${FUSION_CORE_DIR:-$HOME/fusion/fusion-core}"
+if [[ ! -f "$FUSION_CORE_DIR/pyproject.toml" ]]; then
+    log_info "fusion-core not found at $FUSION_CORE_DIR — cloning..."
+    mkdir -p "$(dirname "$FUSION_CORE_DIR")"
+    git clone "https://github.com/dahai80/fusion-core.git" "$FUSION_CORE_DIR" 2>/dev/null         || git clone "git@github.com:dahai80/fusion-core.git" "$FUSION_CORE_DIR"
+fi
+export FUSION_CORE_DIR
+log_info "using fusion-core checkout: $FUSION_CORE_DIR"
+
+# Shell-exported FUSION_* vars silently override .env values (compose
+# precedence: environment > env_file). Unset the conflict-prone ones so the
+# customer's .env is the single source of truth (#103 acceptance re-run).
+unset FUSION_CLIENT_KEY FUSION_MLX_API_KEY MLX_API_KEY FUSION_CLUSTER_TOKEN       FUSION_MULTINODE_PORT FUSION_AGENT_PORT FUSION_MASTER_HOST FUSION_MASTER_PORT       FUSION_MLX_URL FUSION_MULTINODE_WEB_PORT
+
 log_info "building + starting stack (master + agent + web)..."
 docker compose up -d --build --wait
 

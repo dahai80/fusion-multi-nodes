@@ -5,7 +5,12 @@
 #   仅 master:11452 暴露给宿主机 (CLI / 压测客户端经此提交任务)。
 services:
   master:
-    build: .
+    build:
+      context: .
+      # fusion-core (in-tree shared base lib, not on PyPI) comes in as an extra
+      # build context; path resolved by deliver/ubuntu/bring-up.sh (#103).
+      additional_contexts:
+        - "fusion-core=${FUSION_CORE_DIR:-../fusion-core}"
     image: fusion-multi-node:latest
     container_name: fusion-multinode-master
     environment:
@@ -65,7 +70,12 @@ services:
     restart: unless-stopped
 
   agent:
-    build: .
+    build:
+      context: .
+      # fusion-core (in-tree shared base lib, not on PyPI) comes in as an extra
+      # build context; path resolved by deliver/ubuntu/bring-up.sh (#103).
+      additional_contexts:
+        - "fusion-core=${FUSION_CORE_DIR:-../fusion-core}"
     image: fusion-multi-node:latest
     environment:
       FUSION_MULTINODE_ROLE: agent
@@ -130,7 +140,12 @@ services:
   # Web console (#103 customer delivery): serves web/dist + same-origin /api proxy to master.
   # Same image, ROLE=web. Publish 11472 for direct browser access from the host.
   web:
-    build: .
+    build:
+      context: .
+      # fusion-core (in-tree shared base lib, not on PyPI) comes in as an extra
+      # build context; path resolved by deliver/ubuntu/bring-up.sh (#103).
+      additional_contexts:
+        - "fusion-core=${FUSION_CORE_DIR:-../fusion-core}"
     image: fusion-multi-node:latest
     container_name: fusion-multinode-web
     environment:

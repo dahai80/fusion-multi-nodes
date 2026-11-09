@@ -8,6 +8,8 @@ FROM oven/bun:1 AS web-builder
 
 WORKDIR /web
 COPY web/package.json web/bun.lock ./
+# vendored @fusion/* packages are file: deps — they must exist before install.
+COPY web/vendor/ ./vendor/
 RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run build
@@ -26,6 +28,14 @@ WORKDIR /app
 # Copy dependency manifest first (layer cache); no separate requirements file.
 COPY pyproject.toml ./
 COPY fusion_multi_node/ ./fusion_multi_node/
+
+# fusion-core is the in-tree shared base library (not on PyPI) — provided as an
+# extra build context named "fusion-core" (see docker-compose.yml additional_contexts
+# and deliver/ubuntu/bring-up.sh, #103). Installing locally avoids any github
+# HTTPS dependency at build time (pip git+ backend unreachable on restricted
+# networks); its only runtime dep (httpx) resolves from the configured mirror.
+COPY --from=fusion-core . /fusion-core-src
+RUN pip install --no-cache-dir /fusion-core-src
 
 # [web] extra (fastapi/uvicorn) — required by Master/Agent servers.
 RUN pip install --no-cache-dir -e ".[web]"
