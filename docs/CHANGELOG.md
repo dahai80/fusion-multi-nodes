@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.8
+version: 0.20.9
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
@@ -20,6 +20,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.9] - 2026-11-09 — Automated customer preview stack (#108)
+
+### Added
+- **`deliver/preview/preview-stack.sh`** (PR #111, companion to
+  fusion-cowork#422) — one command, zero human steps: compose preview
+  stack (isolated project `fusion-preview`, host ports 21452/21472),
+  health gate on master `/api/health` before URL issuance (failure
+  auto-tears down), synthetic data injection, preview URL +
+  `FUSION_PREVIEW_NOTIFY_CMD` hook (cow#404 email channel integration
+  point), TTL auto-teardown watcher (`FUSION_PREVIEW_TTL_MINUTES`,
+  default 120; 0 disables), plus `teardown`/`status` subcommands.
+- **`deliver/preview/docker-compose.preview.yml`** — host-port-remap-only
+  overlay (in-container ports unchanged so base healthchecks stay valid);
+  agent healthcheck downgraded to liveness — preview runs **without
+  fusion-mlx**.
+- **`deliver/preview/synthetic_seed.py`** — deterministic `[SYNTHETIC
+  DEMO]` fixtures seeded into the cluster session store; never real
+  customer data (rule 6 red line), no inference dependency.
+- Bilingual `deliver/preview/README.md` + `README_CN.md`; cross-linked
+  from `deliver/README*`.
+- `tests/test_preview_stack.py` — 8 cases (overlay contract, liveness
+  healthcheck, deterministic fixtures, TTL state dir, bilingual docs).
+
+### Verified live
+With fusion-mlx stopped: `preview-stack.sh up` → 3/3 containers healthy,
+3/3 synthetic sessions seeded, TTL watcher armed; sessions served via
+`/api/v1/session-store`; web :21472 → 200; teardown leaves no containers.
 
 ## [0.20.8] - 2026-11-09 — Delivery build fixes, live bring-up verified (#103)
 
