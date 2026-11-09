@@ -29,7 +29,7 @@ def test_compose_has_web_service():
     for name in ("master:", "agent:", "web:"):
         assert f"\n  {name}" in text, f"compose missing service: {name.rstrip(':')}"
     assert "FUSION_MULTINODE_ROLE: web" in text
-    assert "11472:11472" in text
+    assert ":11472" in text  # published port (literal or via FUSION_WEB_PORT env default)
 
 
 def test_entrypoint_web_role_serves_dist():
