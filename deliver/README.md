@@ -91,6 +91,12 @@ results require a Mac node joined to the cluster. Offline-friendly:
 images are prebuilt (`docker compose build` once, then `docker save` /
 `docker load` on the air-gapped guest), models via hf-mirror.
 
+## Automated preview stack (issue #108)
+
+See [preview/README.md](preview/README.md) — one-command isolated demo stack
+(synthetic data only, health gate, TTL auto-teardown, notification hook for
+fusion-cowork cow#404).
+
 ## Acceptance mapping
 
 | Issue #103 acceptance | Covered by |

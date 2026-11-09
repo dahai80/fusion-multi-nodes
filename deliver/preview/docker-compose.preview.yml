@@ -1,0 +1,21 @@
+# Preview overlay (#108) — compose base + this file with --profile preview.
+# Isolated from the delivery stack: distinct project name (-p fusion-preview),
+# distinct container names, host ports 21452/21458/21472 so preview and
+# delivery stacks can coexist on one machine. In-container ports are
+# unchanged (base healthchecks probe fixed in-container ports).
+services:
+  master:
+    container_name: fusion-preview-master
+    ports:
+      - "${FUSION_PREVIEW_MASTER_PORT:-21452}:11452"
+  agent:
+    container_name: fusion-preview-agent
+    # Preview must run without fusion-mlx: override the base deep healthcheck
+    # (which requires the inference backend) with plain liveness — degraded
+    # status still serves the session-store demo data (#108).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:11458/api/health',timeout=4); sys.exit(0 if r.status==200 else 1)"]
+  web:
+    container_name: fusion-preview-web
+    ports:
+      - "${FUSION_PREVIEW_WEB_PORT:-21472}:11472"

@@ -47,3 +47,4 @@ audit_multi_node_report.md
 logs/
 
 .fusion-multi-node.*.pid
+.preview-stack/
