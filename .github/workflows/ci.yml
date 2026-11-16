@@ -3,8 +3,23 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+
+# fusion#2 CI efficiency: one run per ref, superseded runs cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -20,6 +35,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # fusion#2: per-stack dependency cache (pip), keyed on pyproject.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install fusion-core (in-tree shared dependency)
         run: |
