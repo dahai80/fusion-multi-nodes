@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.10
+version: 0.20.11
 updated: 2026-11-09
 owner: "@dahai"
 source_of_truth:
@@ -20,6 +20,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.11] - 2026-11-16 — CI efficiency retrofit (#115)
+
+### Changed
+- **`.github/workflows/ci.yml`** (PR #116, fusion#2 checklist) — on the
+  existing CI workflow (present on main since 2026-11-07):
+  - `concurrency: ci-<ref>` + `cancel-in-progress: true` — superseded runs
+    on the same branch/PR are cancelled instead of queued
+  - pip dependency cache via `setup-python` (keyed on `pyproject.toml`)
+  - `paths-ignore` for docs-only changes on push and pull_request
+    (`**.md`, `docs/**`, `LICENSE`, `.gitignore`)
+- Tiered fast/full gate not added: baseline suite ~3 min (< 5 min
+  threshold); first post-change run 2m47s.
 
 ## [0.20.10] - 2026-11-09 — Demo fleet orchestration (#107)
 
