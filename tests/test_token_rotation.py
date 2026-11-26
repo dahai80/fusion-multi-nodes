@@ -1,11 +1,10 @@
-"""F5 (GAP-8 Phase F5): 令牌轮换 — 用户多活 + 集群 previous-active 重叠窗。
-
-覆盖:
-- 用户轮换: rotate 签新令牌旧令牌保留 (多活), 两者均通过鉴权; revoke 旧令牌 → 旧令牌 401 新令牌 200。
-- 集群令牌滚动重启: FUSION_CLUSTER_TOKEN_PREVIOUS 设旧令牌 → current + previous 均接受 (200);
-  未设 → previous 令牌 401 (单令牌行为不变)。
-- 出站派发用 current 令牌 (非 previous) — 滚动重启期全节点先接受旧值, 再轮换 current。
-"""
+# F5 (GAP-8 Phase F5): 令牌轮换 — 用户多活 + 集群 previous-active 重叠窗。
+#
+# 覆盖:
+# - 用户轮换: rotate 签新令牌旧令牌保留 (多活), 两者均通过鉴权; revoke 旧令牌 → 旧令牌 401 新令牌 200。
+# - 集群令牌滚动重启: FUSION_CLUSTER_TOKEN_PREVIOUS 设旧令牌 → current + previous 均接受 (200);
+# 未设 → previous 令牌 401 (单令牌行为不变)。
+# - 出站派发用 current 令牌 (非 previous) — 滚动重启期全节点先接受旧值, 再轮换 current。
 
 from __future__ import annotations
 

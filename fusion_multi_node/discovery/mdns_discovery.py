@@ -1,10 +1,9 @@
-"""mDNS/Bonjour 零配置节点发现。
-
-基于 zeroconf 实现：
-- Master: 注册 mDNS 服务，局域网可发现
-- Agent: 浏览 mDNS 服务，自动发现 Master
-- 支持共享密钥验证，防止未授权节点加入
-"""
+# mDNS/Bonjour 零配置节点发现。
+#
+# 基于 zeroconf 实现：
+# - Master: 注册 mDNS 服务，局域网可发现
+# - Agent: 浏览 mDNS 服务，自动发现 Master
+# - 支持共享密钥验证，防止未授权节点加入
 
 from __future__ import annotations
 
@@ -31,10 +30,9 @@ def _hash_cluster_secret(secret: str, node_id: str = "") -> str:
     return hashlib.sha256(material).hexdigest()[:32]
 
 
+# 发现的节点信息。
 @dataclass
 class DiscoveryInfo:
-    """发现的节点信息。"""
-
     name: str
     host: str
     port: int
@@ -46,9 +44,8 @@ class DiscoveryInfo:
         return f"{self.name}.{SERVICE_TYPE}"
 
 
+# mDNS 节点发现管理器。
 class MDNSDiscovery:
-    """mDNS 节点发现管理器。"""
-
     def __init__(
         self,
         node_id: str = "",
@@ -74,12 +71,12 @@ class MDNSDiscovery:
 
     # ── 服务注册（Master 用） ──
 
+    # 注册 mDNS 服务，使局域网内其他节点可发现。
     def register(
         self,
         port: int = 11452,
         properties: dict[str, str] | None = None,
     ) -> bool:
-        """注册 mDNS 服务，使局域网内其他节点可发现。"""
         try:
             from zeroconf import IPVersion, ServiceInfo, Zeroconf
         except ImportError:
@@ -116,8 +113,8 @@ class MDNSDiscovery:
             logger.error(f"mDNS 注册失败: {e}")
             return False
 
+    # 注销 mDNS 服务。
     def unregister(self) -> None:
-        """注销 mDNS 服务。"""
         if self._zeroconf and self._registered:
             try:
                 if self._registry:
@@ -133,18 +130,18 @@ class MDNSDiscovery:
 
     # ── 服务浏览（Agent 用） ──
 
+    # 浏览局域网内 mDNS 服务，返回发现的节点列表。
+    #
+    # 注意: 此方法是同步的，会阻塞调用线程 (time.sleep)。仅限 CLI/同步上下文使用;
+    # Agent 运行时路径用 browse_async/find_master_async, 不可在事件循环线程调本方法
+    # (会冻结心跳/推理协程)。_discovered 跨线程访问经 _discovered_lock 保护。
+    #
     def browse(
         self,
         timeout: float = 5.0,
         on_discover: Callable[[DiscoveryInfo], None] | None = None,
         on_remove: Callable[[str], None] | None = None,
     ) -> list[DiscoveryInfo]:
-        """浏览局域网内 mDNS 服务，返回发现的节点列表。
-
-        注意: 此方法是同步的，会阻塞调用线程 (time.sleep)。仅限 CLI/同步上下文使用;
-        Agent 运行时路径用 browse_async/find_master_async, 不可在事件循环线程调本方法
-        (会冻结心跳/推理协程)。_discovered 跨线程访问经 _discovered_lock 保护。
-        """
         try:
             from zeroconf import ServiceBrowser, Zeroconf
         except ImportError:
@@ -202,13 +199,13 @@ class MDNSDiscovery:
             logger.error(f"mDNS 浏览失败: {e}")
             return []
 
+    # 异步浏览 mDNS 服务 — 非阻塞版本。
     async def browse_async(
         self,
         timeout: float = 5.0,
         on_discover: Callable[[DiscoveryInfo], None] | None = None,
         on_remove: Callable[[str], None] | None = None,
     ) -> list[DiscoveryInfo]:
-        """异步浏览 mDNS 服务 — 非阻塞版本。"""
         import asyncio
 
         try:
@@ -268,13 +265,13 @@ class MDNSDiscovery:
             logger.error(f"mDNS 异步浏览失败: {e}")
             return []
 
+    # 获取已发现的节点列表。
     def get_discovered(self) -> list[DiscoveryInfo]:
-        """获取已发现的节点列表。"""
         with self._discovered_lock:
             return list(self._discovered.values())
 
+    # 校验单个 master 候选: 角色 + node_id + 绑定密钥 + sticky 锁定。
     def _verify_master_candidate(self, node: DiscoveryInfo) -> bool:
-        """校验单个 master 候选: 角色 + node_id + 绑定密钥 + sticky 锁定。"""
         if node.properties.get("role") != "master":
             return False
         node_id = node.properties.get("node_id", "")
@@ -293,14 +290,14 @@ class MDNSDiscovery:
             return False
         return True
 
+    # 锁定合法 master node_id — 首次确认合法 master 后调用, 后续拒绝其他 id。
     def lock_master_id(self, master_id: str) -> None:
-        """锁定合法 master node_id — 首次确认合法 master 后调用, 后续拒绝其他 id。"""
         if master_id and self._locked_master_id is None:
             self._locked_master_id = master_id
             logger.info(f"mDNS sticky master 已锁定: {master_id}")
 
+    # 浏览并找到 Master 节点。
     def find_master(self, timeout: float = 5.0) -> DiscoveryInfo | None:
-        """浏览并找到 Master 节点。"""
         nodes = self.browse(timeout)
         for node in nodes:
             if not self._verify_master_candidate(node):
@@ -309,8 +306,8 @@ class MDNSDiscovery:
             return node
         return None
 
+    # 异步查找 Master 节点 — 非阻塞版本。
     async def find_master_async(self, timeout: float = 5.0) -> DiscoveryInfo | None:
-        """异步查找 Master 节点 — 非阻塞版本。"""
         nodes = await self.browse_async(timeout)
         for node in nodes:
             if not self._verify_master_candidate(node):
@@ -338,8 +335,8 @@ class MDNSDiscovery:
         return {"interval": interval, "timeout": timeout}
 
 
+# 将 zeroconf ServiceInfo 转为 DiscoveryInfo。
 def _service_info_to_discovery(name: str, info: Any) -> DiscoveryInfo:
-    """将 zeroconf ServiceInfo 转为 DiscoveryInfo。"""
     addresses = info.parsed_addresses()
     host = addresses[0] if addresses else "127.0.0.1"
     props = {}

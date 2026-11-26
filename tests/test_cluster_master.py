@@ -1,10 +1,9 @@
-"""Cluster Master 测试。
-
-测试 ClusterMaster、NodeInfo、ClusterTask、KVCacheEntry 等。
-用户指令：要求测试覆盖率90%+。
-No external API callers — these are internal unit tests.
-Data schemas: NodeInfo, ClusterTask, KVCacheEntry dataclasses from cluster_master module.
-"""
+# Cluster Master 测试。
+#
+# 测试 ClusterMaster、NodeInfo、ClusterTask、KVCacheEntry 等。
+# 用户指令：要求测试覆盖率90%+。
+# No external API callers — these are internal unit tests.
+# Data schemas: NodeInfo, ClusterTask, KVCacheEntry dataclasses from cluster_master module.
 
 import asyncio
 import time
@@ -226,12 +225,12 @@ class TestClusterMaster:
         assert task.status == TaskStatus.PENDING
         assert task.task_id in {t.task_id for t in master._pending_queue}
 
+    # select_nodes 锁外执行 → 并发抢占首选节点满载 → 锁内补选其它空闲节点。
+    # 模拟: 首选 n1 被并发抢满 (active_tasks=max_tasks), n2/n3 仍空闲,
+    # assign_task 不应 503, 而补选到空闲节点。
+    #
     @pytest.mark.asyncio
     async def test_assign_task_toctou_backfill(self):
-        """select_nodes 锁外执行 → 并发抢占首选节点满载 → 锁内补选其它空闲节点。
-        模拟: 首选 n1 被并发抢满 (active_tasks=max_tasks), n2/n3 仍空闲,
-        assign_task 不应 503, 而补选到空闲节点。
-        """
         master = ClusterMaster()
         # n1 满载 (模拟并发抢占后), n2/n3 空闲且评分相近
         for nid, active in (("n1", 4), ("n2", 0), ("n3", 0)):
@@ -943,9 +942,8 @@ class TestClusterMaster:
         assert mem >= 0
 
 
+# P0-1: 背景循环逐次异常隔离 — 单轮抛非 CancelledError 不杀整个循环。
 class TestP01LoopFaultTolerance:
-    """P0-1: 背景循环逐次异常隔离 — 单轮抛非 CancelledError 不杀整个循环。"""
-
     @pytest.mark.asyncio
     async def test_persist_loop_survives_persist_failure(self):
         import fusion_multi_node.master.cluster_master as cm
@@ -1064,9 +1062,8 @@ class TestP01LoopFaultTolerance:
             await master.stop()
 
 
+# 审计 0826 Batch2 P1 容错/调度组 — cluster_master 9 项修复验证。
 class TestP1FaultToleranceScheduling:
-    """审计 0826 Batch2 P1 容错/调度组 — cluster_master 9 项修复验证。"""
-
     def _online_node(self, node_id: str = "n1", port: int = 30001) -> NodeInfo:
         return NodeInfo(
             node_id=node_id,
@@ -1496,15 +1493,14 @@ class TestP1FaultToleranceScheduling:
         assert found, "连接拒 (瞬时) 应记 transient metric"
 
 
+# P2-10 (审计 §5.9): PARTIAL 终态崩溃补全 (env FUSION_PARTIAL_RECOVERY=1)。
+#
+# PARTIAL = DATA 并行部分节点成功。旧: PARTIAL 终态不落盘 → 崩溃即失已成功节点工作。
+# 修复: env 开 → PARTIAL 落盘; _restore_tasks 转 PENDING + 已成功节点 exclude + 旧 outputs
+# 存 _partial_prev_outputs; _dispatch_data 补全重派后合并 outputs (非覆盖)。
+# env 关 → 维持 P3-29 旧行为 (PARTIAL 不存, 不重派)。
+#
 class TestP2_10PartialRecovery:
-    """P2-10 (审计 §5.9): PARTIAL 终态崩溃补全 (env FUSION_PARTIAL_RECOVERY=1)。
-
-    PARTIAL = DATA 并行部分节点成功。旧: PARTIAL 终态不落盘 → 崩溃即失已成功节点工作。
-    修复: env 开 → PARTIAL 落盘; _restore_tasks 转 PENDING + 已成功节点 exclude + 旧 outputs
-    存 _partial_prev_outputs; _dispatch_data 补全重派后合并 outputs (非覆盖)。
-    env 关 → 维持 P3-29 旧行为 (PARTIAL 不存, 不重派)。
-    """
-
     def _partial_dict(self, succeeded_nodes: list[str]) -> dict:
         return {
             "task_id": "t-partial",
@@ -1604,13 +1600,12 @@ class TestP2_10PartialRecovery:
         assert node_ids == {"n1", "n2"}, f"应合并旧+新 outputs, 实际 {node_ids}"
 
 
+# P2-11 (审计 §6.7): PIPELINE 段级检查点 (env FUSION_PIPELINE_CHECKPOINT=1)。
+#
+# 各段 hidden_states 落 task.params["_pipeline_ckpt"]; 段失败 retryable=True 重派后
+# 从最近完成段续 (跳过已成功段), 避重跑昂贵层前向。语义不变: 任一段失败仍整体失败。
+#
 class TestP2_11PipelineCheckpoint:
-    """P2-11 (审计 §6.7): PIPELINE 段级检查点 (env FUSION_PIPELINE_CHECKPOINT=1)。
-
-    各段 hidden_states 落 task.params["_pipeline_ckpt"]; 段失败 retryable=True 重派后
-    从最近完成段续 (跳过已成功段), 避重跑昂贵层前向。语义不变: 任一段失败仍整体失败。
-    """
-
     def _pipeline_task(self, n_steps: int = 3, ckpt: dict | None = None) -> ClusterTask:
         task = ClusterTask(
             task_id="t-pipe",
@@ -1725,14 +1720,13 @@ class TestP2_11PipelineCheckpoint:
         assert "_pipeline_ckpt" not in task.params
 
 
+# 审计 0826 Batch3 P2-5 — ban 期满主动健康探测 (cluster_master.py)。
+#
+# 旧实现 ban 到期仅被动解封 (下次 select_nodes 调 _is_node_banned 才惰性清),
+# 持续 ban 的坏节点错过恢复窗。修复: _health_check_loop 调 _probe_banned_nodes
+# 对到期 ban 节点 GET /api/health 探测, OK 解封, 失败续 ban。
+#
 class TestP2_5BanExpiryProactiveProbe:
-    """审计 0826 Batch3 P2-5 — ban 期满主动健康探测 (cluster_master.py)。
-
-    旧实现 ban 到期仅被动解封 (下次 select_nodes 调 _is_node_banned 才惰性清),
-    持续 ban 的坏节点错过恢复窗。修复: _health_check_loop 调 _probe_banned_nodes
-    对到期 ban 节点 GET /api/health 探测, OK 解封, 失败续 ban。
-    """
-
     def _online_node(self, node_id: str = "n1", port: int = 30050) -> NodeInfo:
         return NodeInfo(
             node_id=node_id,

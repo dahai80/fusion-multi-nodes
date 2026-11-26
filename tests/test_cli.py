@@ -1,7 +1,6 @@
-"""CLI 测试 — 覆盖所有命令和异步函数。
-
-用户指令：要求测试覆盖率90%+。
-"""
+# CLI 测试 — 覆盖所有命令和异步函数。
+#
+# 用户指令：要求测试覆盖率90%+。
 
 import time
 from unittest.mock import AsyncMock, MagicMock, patch

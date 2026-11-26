@@ -1,18 +1,17 @@
-"""GAP-8 Phase F3 — /v1/chat/completions 轻量代理 + 租户在途配额。
-
-覆盖:
-- USER 令牌非流式 → 200 原生 OpenAI 格式, 经 select_nodes 路由到选中节点 agent。
-- 集群令牌亦放行 (内部调用, 无租户配额 gate)。
-- VIEWER 令牌 → 403 (无 chat:complete 权限)。
-- 租户在途配额满 (tenant_max_concurrent=1) → 第二并发 429 + 审计 chat_quota_exceeded。
-- 无可用节点 → 503。
-- 审计 actor=已认证 user_id, action=chat, node_id=选中节点。
-- 流式 stream=true → SSE 透传 (text/event-stream)。
-- 非法 model (路径穿越) → 400。
-
-真实栈: master + agent 真 FastAPI app, master 派发经 PortRoutingTransport 按端口路由到
-agent ASGITransport (真 FastAPI 栈, 免真 TCP)。agent 注入 FakeInferenceBackend (免真模型)。
-"""
+# GAP-8 Phase F3 — /v1/chat/completions 轻量代理 + 租户在途配额。
+#
+# 覆盖:
+# - USER 令牌非流式 → 200 原生 OpenAI 格式, 经 select_nodes 路由到选中节点 agent。
+# - 集群令牌亦放行 (内部调用, 无租户配额 gate)。
+# - VIEWER 令牌 → 403 (无 chat:complete 权限)。
+# - 租户在途配额满 (tenant_max_concurrent=1) → 第二并发 429 + 审计 chat_quota_exceeded。
+# - 无可用节点 → 503。
+# - 审计 actor=已认证 user_id, action=chat, node_id=选中节点。
+# - 流式 stream=true → SSE 透传 (text/event-stream)。
+# - 非法 model (路径穿越) → 400。
+#
+# 真实栈: master + agent 真 FastAPI app, master 派发经 PortRoutingTransport 按端口路由到
+# agent ASGITransport (真 FastAPI 栈, 免真 TCP)。agent 注入 FakeInferenceBackend (免真模型)。
 
 from __future__ import annotations
 
@@ -40,13 +39,12 @@ CLUSTER_AUTH = {"Authorization": f"Bearer {TEST_TOKEN}"}
 AGENT_PORT_A = 22445
 
 
+# 假推理后端 — 继承 FusionMLXBackend 过 isinstance 关, 重写 chat 返固定 OpenAI 格式。
+#
+# 非流式: 重写 chat (免真 HTTP)。
+# 流式: route 走 _get_client + _base_url (测试注入 FakeMLX transport)。
+#
 class FakeInferenceBackend(FusionMLXBackend):
-    """假推理后端 — 继承 FusionMLXBackend 过 isinstance 关, 重写 chat 返固定 OpenAI 格式。
-
-    非流式: 重写 chat (免真 HTTP)。
-    流式: route 走 _get_client + _base_url (测试注入 FakeMLX transport)。
-    """
-
     def __init__(self, node_id: str):
         super().__init__(base_url="http://fake-mlx", api_key="")
         self._node_id = node_id
@@ -73,9 +71,8 @@ class FakeInferenceBackend(FusionMLXBackend):
         return True
 
 
+# 按 URL 端口路由到对应 agent ASGI app (真 FastAPI 栈, 免真 TCP)。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app (真 FastAPI 栈, 免真 TCP)。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -121,9 +118,8 @@ def _register_node(client: AsyncClient, node_id: str, port: int) -> Any:
     return client.post("/api/nodes/register", json=payload, headers=CLUSTER_AUTH)
 
 
+# /v1/chat/completions 代理集成测试。
 class TestChatProxy:
-    """/v1/chat/completions 代理集成测试。"""
-
     @pytest.fixture
     async def cluster(self, tmp_path, monkeypatch):
         # user store + 审计隔离 (F2 同款)
@@ -207,9 +203,9 @@ class TestChatProxy:
             pass
         return entries
 
+    # USER 令牌非流式 → 200 OpenAI 格式, 路由到 agent-a, content 嵌 node_id。
     @pytest.mark.asyncio
     async def test_user_nonstream_routed(self, cluster):
-        """USER 令牌非流式 → 200 OpenAI 格式, 路由到 agent-a, content 嵌 node_id。"""
         async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
@@ -227,9 +223,9 @@ class TestChatProxy:
         assert cluster["backend_a"].chat_calls, "agent chat 未被调用"
         assert cluster["backend_a"].chat_calls[0]["model"] == "test-model"
 
+    # 集群令牌亦放行 (内部调用, 无租户 gate) → 200。
     @pytest.mark.asyncio
     async def test_cluster_token_routed(self, cluster):
-        """集群令牌亦放行 (内部调用, 无租户 gate) → 200。"""
         async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
@@ -243,9 +239,9 @@ class TestChatProxy:
         assert resp.status_code == 200, resp.text
         assert "echo@agent-a:hi" in resp.json()["choices"][0]["message"]["content"]
 
+    # VIEWER 令牌无 chat:complete 权限 → 403。
     @pytest.mark.asyncio
     async def test_viewer_forbidden(self, cluster):
-        """VIEWER 令牌无 chat:complete 权限 → 403。"""
         async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
@@ -258,9 +254,9 @@ class TestChatProxy:
             )
         assert resp.status_code == 403, resp.text
 
+    # 无可用节点 (未注册) → 503。
     @pytest.mark.asyncio
     async def test_no_nodes_503(self, cluster):
-        """无可用节点 (未注册) → 503。"""
         async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             resp = await client.post(
                 "/v1/chat/completions",
@@ -273,9 +269,9 @@ class TestChatProxy:
         assert resp.status_code == 503, resp.text
         assert "无可用推理节点" in resp.text
 
+    # 租户在途配额满 (tenant_max_concurrent=1) → 第二并发 429 + 审计 chat_quota_exceeded。
     @pytest.mark.asyncio
     async def test_quota_429(self, cluster):
-        """租户在途配额满 (tenant_max_concurrent=1) → 第二并发 429 + 审计 chat_quota_exceeded。"""
         master = cluster["master"]
         master.configure_scheduling(tenant_max_concurrent=1)
 
@@ -317,9 +313,9 @@ class TestChatProxy:
         assert quota_denies, "缺 chat_quota_exceeded 审计"
         assert quota_denies[0]["actor"] == "alice"
 
+    # 审计 actor=已认证 user_id, action=chat, node_id=选中节点。
     @pytest.mark.asyncio
     async def test_audit_actor_chat(self, cluster):
-        """审计 actor=已认证 user_id, action=chat, node_id=选中节点。"""
         async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:
             await self._register(client)
             resp = await client.post(
@@ -336,9 +332,9 @@ class TestChatProxy:
         assert chat["node_id"] == "agent-a"
         assert chat["result"] == "ok"
 
+    # 流式 stream=true → SSE 透传 (text/event-stream), 透传 agent SSE 字节。
     @pytest.mark.asyncio
     async def test_stream_sse(self, cluster):
-        """流式 stream=true → SSE 透传 (text/event-stream), 透传 agent SSE 字节。"""
         # agent FakeInferenceBackend.chat 非流式; 流式走 backend._get_client 直连 fusion-mlx。
         # 测试内注入 FakeMLX transport 到 agent backend client, 返固定 SSE。
         backend = cluster["backend_a"]
@@ -383,9 +379,9 @@ class TestChatProxy:
         finally:
             await fake_client.aclose()
 
+    # 请求完成后槽释放 (非流式) → 后续请求不因前请求占槽 429。
     @pytest.mark.asyncio
     async def test_slot_released_after_request(self, cluster):
-        """请求完成后槽释放 (非流式) → 后续请求不因前请求占槽 429。"""
         master = cluster["master"]
         master.configure_scheduling(tenant_max_concurrent=1)
         async with AsyncClient(transport=ASGITransport(app=cluster["master_app"]), base_url="http://test") as client:

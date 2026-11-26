@@ -1,23 +1,22 @@
-"""集群 mTLS — 私有 CA + 节点叶证书, 集群内 HTTP 双向认证。
-
-env 开关 (默认关, 不破坏现有 http + ASGITransport 测试):
-  FUSION_MTLS_ENABLED=1            开启 mTLS (server 要求客户端证书, client 带证书)
-  FUSION_MTLS_CA_CERT=<path>       集群 CA 证书 PEM (节点共享同一 CA)
-  FUSION_MTLS_NODE_CERT=<path>     本节点叶证书 PEM
-  FUSION_MTLS_NODE_KEY=<path>      本节点叶私钥 PEM
-  FUSION_MTLS_NODE_ID=<id>         本节点 id (写入证书 CN)
-  FUSION_MTLS_NODE_ROLE=<role>     本节点角色 master|worker (写入证书 O)
-
-设计:
-- 私有 CA 自签 (provision_cluster 一次性生成 ca.crt/ca.key)。
-- 每节点叶证书由 CA 签发, CN=node_id, O=role。
-- server ssl_context: 加载本节点叶证书, verify_mode=CERT_REQUIRED, 信任 CA →
-  无证书客户端 TLS 握手失败 (uvicorn 层拒绝, 到不了 ASGI)。
-- client ssl_context: 加载本节点叶证书, 校验对端证书链到 CA。
-- 角色绑定: uvicorn 不把对端证书暴露进 ASGI scope (仅 client host:port),
-  故运行时角色校验经 X-Node-Id header + PermissionManager 注册角色, 非证书 O 直读。
-  传输层仍只放行 CA 签名节点 (非集群节点连不上)。
-"""
+# 集群 mTLS — 私有 CA + 节点叶证书, 集群内 HTTP 双向认证。
+#
+# env 开关 (默认关, 不破坏现有 http + ASGITransport 测试):
+# FUSION_MTLS_ENABLED=1            开启 mTLS (server 要求客户端证书, client 带证书)
+# FUSION_MTLS_CA_CERT=<path>       集群 CA 证书 PEM (节点共享同一 CA)
+# FUSION_MTLS_NODE_CERT=<path>     本节点叶证书 PEM
+# FUSION_MTLS_NODE_KEY=<path>      本节点叶私钥 PEM
+# FUSION_MTLS_NODE_ID=<id>         本节点 id (写入证书 CN)
+# FUSION_MTLS_NODE_ROLE=<role>     本节点角色 master|worker (写入证书 O)
+#
+# 设计:
+# - 私有 CA 自签 (provision_cluster 一次性生成 ca.crt/ca.key)。
+# - 每节点叶证书由 CA 签发, CN=node_id, O=role。
+# - server ssl_context: 加载本节点叶证书, verify_mode=CERT_REQUIRED, 信任 CA →
+# 无证书客户端 TLS 握手失败 (uvicorn 层拒绝, 到不了 ASGI)。
+# - client ssl_context: 加载本节点叶证书, 校验对端证书链到 CA。
+# - 角色绑定: uvicorn 不把对端证书暴露进 ASGI scope (仅 client host:port),
+# 故运行时角色校验经 X-Node-Id header + PermissionManager 注册角色, 非证书 O 直读。
+# 传输层仍只放行 CA 签名节点 (非集群节点连不上)。
 
 from __future__ import annotations
 
@@ -37,18 +36,18 @@ _DEFAULT_DIR = Path.home() / ".fusion" / "multi-node" / "tls"
 _TRUTHY = ("1", "true", "yes")
 
 
+# mTLS 是否开启 — lazy 读 env FUSION_MTLS_ENABLED (config 桥经 configure_from_config 写 env)。
 def is_enabled() -> bool:
-    """mTLS 是否开启 — lazy 读 env FUSION_MTLS_ENABLED (config 桥经 configure_from_config 写 env)。"""
     return os.environ.get("FUSION_MTLS_ENABLED", "").lower() in _TRUTHY
 
 
+# v0.14.0 item 4: config 段 → env 桥。CLI/服务器启动时 (config 加载后, uvicorn 前) 调。
+#
+# 把 security.mtls 配置段写回 env (env 优先: 已设的非空 env 不覆盖, 兼容旧 env-only 部署)。
+# 写入后 is_enabled() 即时反映 (lazy, 无 import-time 缓存问题)。fail-closed 不变: enabled=True
+# 但证书路径不全 → server_ssl_kwargs/client_kwargs raise (不回退明文)。
+#
 def configure_from_config(cfg: Any) -> None:
-    """v0.14.0 item 4: config 段 → env 桥。CLI/服务器启动时 (config 加载后, uvicorn 前) 调。
-
-    把 security.mtls 配置段写回 env (env 优先: 已设的非空 env 不覆盖, 兼容旧 env-only 部署)。
-    写入后 is_enabled() 即时反映 (lazy, 无 import-time 缓存问题)。fail-closed 不变: enabled=True
-    但证书路径不全 → server_ssl_kwargs/client_kwargs raise (不回退明文)。
-    """
     mtls = cfg.get_mtls_config() if hasattr(cfg, "get_mtls_config") else {}
     if not mtls:
         return
@@ -75,12 +74,12 @@ def _env_path(name: str) -> str | None:
     return v if v else None
 
 
+# mTLS 开启时三证书路径是否齐全 (CA + 本节点 cert + key)。
+#
+# GAP-2 修复 (复审计 2026-08-26): 旧实现证书不全时静默回退明文 (fail-open),
+# 默认部署零节点身份校验。现改 fail-closed — 开启但证书不全直接 raise, 不回退明文。
+#
 def certs_available() -> bool:
-    """mTLS 开启时三证书路径是否齐全 (CA + 本节点 cert + key)。
-
-    GAP-2 修复 (复审计 2026-08-26): 旧实现证书不全时静默回退明文 (fail-open),
-    默认部署零节点身份校验。现改 fail-closed — 开启但证书不全直接 raise, 不回退明文。
-    """
     if not is_enabled():
         return True
     ca = _env_path("FUSION_MTLS_CA_CERT")
@@ -89,8 +88,8 @@ def certs_available() -> bool:
     return bool(ca and cert and key)
 
 
+# mTLS 开启时取证书路径, 不全则 raise (fail-closed, 不回退明文)。
 def _require_certs() -> tuple[str, str, str]:
-    """mTLS 开启时取证书路径, 不全则 raise (fail-closed, 不回退明文)。"""
     ca = _env_path("FUSION_MTLS_CA_CERT")
     cert = _env_path("FUSION_MTLS_NODE_CERT")
     key = _env_path("FUSION_MTLS_NODE_KEY")
@@ -143,25 +142,25 @@ def client_ssl_context() -> ssl.SSLContext | None:
     return ctx
 
 
+# httpx.AsyncClient mTLS 参数 — 关时返回空 dict (调用方 **展开, 不改默认行为)。
+#
+# httpx verify 接受 ssl.SSLContext: 既校验对端证书链, 又用本 ctx 内 loaded cert_chain
+# 作客户端证书。故 verify=ctx 一参数同时满足双向认证。开启但证书不全 → raise (fail-closed)。
+#
 def client_kwargs() -> dict:
-    """httpx.AsyncClient mTLS 参数 — 关时返回空 dict (调用方 **展开, 不改默认行为)。
-
-    httpx verify 接受 ssl.SSLContext: 既校验对端证书链, 又用本 ctx 内 loaded cert_chain
-    作客户端证书。故 verify=ctx 一参数同时满足双向认证。开启但证书不全 → raise (fail-closed)。
-    """
     ctx = client_ssl_context()
     if ctx is None:
         return {}
     return {"verify": ctx}
 
 
+# uvicorn.Config mTLS 参数 — 关时返回空 dict。
+#
+# uvicorn.Config 不接受 ssl_context 对象, 取个体化 ssl_* 参数:
+# ssl_certfile/ssl_keyfile (本节点叶证书), ssl_ca_certs (集群 CA),
+# ssl_cert_reqs=CERT_REQUIRED (要求客户端证书)。开启但证书不全 → raise (fail-closed)。
+#
 def server_ssl_kwargs() -> dict:
-    """uvicorn.Config mTLS 参数 — 关时返回空 dict。
-
-    uvicorn.Config 不接受 ssl_context 对象, 取个体化 ssl_* 参数:
-    ssl_certfile/ssl_keyfile (本节点叶证书), ssl_ca_certs (集群 CA),
-    ssl_cert_reqs=CERT_REQUIRED (要求客户端证书)。开启但证书不全 → raise (fail-closed)。
-    """
     if not is_enabled():
         return {}
     ca, cert, key = _require_certs()
@@ -174,16 +173,16 @@ def server_ssl_kwargs() -> dict:
     }
 
 
+# 集群内 URL 协议 — mTLS 开时 https, 否则 http。
 def scheme() -> str:
-    """集群内 URL 协议 — mTLS 开时 https, 否则 http。"""
     return "https" if is_enabled() else "http"
 
 
 # ── 证书供给 (provision_cluster / provision_node) ──
 
 
+# 生成集群私有 CA (ca.crt + ca.key)。一次性, 各节点共享 ca.crt。
 def provision_cluster(ca_dir: str | None = None) -> tuple[str, str]:
-    """生成集群私有 CA (ca.crt + ca.key)。一次性, 各节点共享 ca.crt。"""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -230,6 +229,12 @@ def provision_cluster(ca_dir: str | None = None) -> tuple[str, str]:
     return str(ca_crt), str(ca_key)
 
 
+# 用集群 CA 签发节点叶证书 (CN=node_id, O=role)。返回 (cert_path, key_path)。
+#
+# P2-1 (审计 §3.4): ip 非空时叶证书加 SubjectAlternativeName — DNSName(node_id) +
+# IPAddress(ip), 使 client_ssl_context 可开 check_hostname=True (校验对端身份, 防 MITM)。
+# 旧叶证书无 SAN → check_hostname 被迫关 → 对端身份零校验。CA (provision_cluster) 无需 SAN。
+#
 def provision_node(
     node_id: str,
     role: str,
@@ -238,12 +243,6 @@ def provision_node(
     out_dir: str | None = None,
     ip: str | None = None,
 ) -> tuple[str, str]:
-    """用集群 CA 签发节点叶证书 (CN=node_id, O=role)。返回 (cert_path, key_path)。
-
-    P2-1 (审计 §3.4): ip 非空时叶证书加 SubjectAlternativeName — DNSName(node_id) +
-    IPAddress(ip), 使 client_ssl_context 可开 check_hostname=True (校验对端身份, 防 MITM)。
-    旧叶证书无 SAN → check_hostname 被迫关 → 对端身份零校验。CA (provision_cluster) 无需 SAN。
-    """
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa

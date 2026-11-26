@@ -1,20 +1,19 @@
-"""#82 常驻节点调度宿主 — resident node 上托管定时任务, 关机工作不断。
-
-动机 (insight/fusion-cowork-vs-anthropic-1021.md §7.2 #6): Cowork 云端常驻执行
-("合盖继续跑") vs 本地 APScheduler 依赖本机开机。本模块让常驻节点 agent 自带
-调度宿主: cowork/用户经 AgentServer /api/schedules 注册 ScheduleSpec, agent 事件循环
-到点触发本地执行 (复用 execute_task 全链路: dedup/sandbox gate/并发 gate), 运行记录
-落盘持久化, 笔记本离线期间任务照跑, 回来后查 /api/schedules/{id} 取结果。
-
-设计约束:
-- 仅常驻节点 (config.resident) 承接 — 非 resident 节点 /api/schedules 一律 403。
-- 可调度任务类型仅 inference/embedding (模型服务类; plugin/test 不开放定时触发,
-  避免 operator 命令被定时重放)。
-- 持久化: schedules.json 原子写 (tmp+replace+fsync), schedules + 运行记录都存;
-  agent 重启恢复。interval 型重启后从 now+every 重排 (错过的 tick 不补跑, 防风暴);
-  daily/weekly 取下一匹配时刻自然续跑。
-- 全单事件循环内操作, 无锁; 文件 IO 经 asyncio.to_thread 移出事件循环。
-"""
+# #82 常驻节点调度宿主 — resident node 上托管定时任务, 关机工作不断。
+#
+# 动机 (insight/fusion-cowork-vs-anthropic-1021.md §7.2 #6): Cowork 云端常驻执行
+# ("合盖继续跑") vs 本地 APScheduler 依赖本机开机。本模块让常驻节点 agent 自带
+# 调度宿主: cowork/用户经 AgentServer /api/schedules 注册 ScheduleSpec, agent 事件循环
+# 到点触发本地执行 (复用 execute_task 全链路: dedup/sandbox gate/并发 gate), 运行记录
+# 落盘持久化, 笔记本离线期间任务照跑, 回来后查 /api/schedules/{id} 取结果。
+#
+# 设计约束:
+# - 仅常驻节点 (config.resident) 承接 — 非 resident 节点 /api/schedules 一律 403。
+# - 可调度任务类型仅 inference/embedding (模型服务类; plugin/test 不开放定时触发,
+# 避免 operator 命令被定时重放)。
+# - 持久化: schedules.json 原子写 (tmp+replace+fsync), schedules + 运行记录都存;
+# agent 重启恢复。interval 型重启后从 now+every 重排 (错过的 tick 不补跑, 防风暴);
+# daily/weekly 取下一匹配时刻自然续跑。
+# - 全单事件循环内操作, 无锁; 文件 IO 经 asyncio.to_thread 移出事件循环。
 
 from __future__ import annotations
 
@@ -44,10 +43,9 @@ _MAX_RUNS_PER_SCHEDULE = 50
 _MIN_INTERVAL_SECONDS = 60
 
 
+# 定时任务规格 — kind 三态: interval (every_seconds) / daily (at) / weekly (weekday+at)。
 @dataclass
 class ScheduleSpec:
-    """定时任务规格 — kind 三态: interval (every_seconds) / daily (at) / weekly (weekday+at)。"""
-
     schedule_id: str
     kind: str
     every_seconds: int = 0
@@ -59,8 +57,8 @@ class ScheduleSpec:
     timeout_seconds: float = 300.0
     enabled: bool = True
 
+    # 校验字段, 非法抛 ValueError (server 层转 400)。
     def validate(self) -> None:
-        """校验字段, 非法抛 ValueError (server 层转 400)。"""
         if self.kind not in _SCHEDULE_KINDS:
             raise ValueError(f"kind 须为 {_SCHEDULE_KINDS} 之一, 得到 {self.kind!r}")
         if self.task_type not in SCHEDULABLE_TASK_TYPES:
@@ -86,8 +84,8 @@ class ScheduleSpec:
         except (ValueError, AttributeError):
             return None
 
+    # 计算下一触发时刻 (epoch 秒, 与 now 同源)。确定性与 now 直接相关。
     def next_run_at(self, now: float | None = None) -> float:
-        """计算下一触发时刻 (epoch 秒, 与 now 同源)。确定性与 now 直接相关。"""
         now = now if now is not None else time.time()
         if self.kind == "interval":
             return now + self.every_seconds
@@ -150,10 +148,9 @@ class ScheduleSpec:
         )
 
 
+# 单次触发记录 — 任务结果全存 (含 inference 输出), 环上限防无界。
 @dataclass
 class ScheduleRun:
-    """单次触发记录 — 任务结果全存 (含 inference 输出), 环上限防无界。"""
-
     seq: int
     task_id: str
     status: str
@@ -186,13 +183,12 @@ class ScheduleRun:
         )
 
 
+# 常驻节点调度宿主 — 注册/触发/记录/持久化, 事件循环内单线程无锁。
+#
+# executor 契约: async (task: dict) -> dict — 直接传 NodeAgent.execute_task。
+# 任务体对齐 execute_task 消费契约 {task_id, type, model, params}。
+#
 class ScheduleHost:
-    """常驻节点调度宿主 — 注册/触发/记录/持久化, 事件循环内单线程无锁。
-
-    executor 契约: async (task: dict) -> dict — 直接传 NodeAgent.execute_task。
-    任务体对齐 execute_task 消费契约 {task_id, type, model, params}。
-    """
-
     def __init__(
         self,
         resident: bool,
@@ -213,8 +209,8 @@ class ScheduleHost:
 
     # ── 注册/查询 (同步内存操作) ──
 
+    # 注册或覆盖 (同 id = PATCH)。校验失败抛 ValueError。
     def register(self, spec: ScheduleSpec) -> dict[str, Any]:
-        """注册或覆盖 (同 id = PATCH)。校验失败抛 ValueError。"""
         if not self._resident:
             raise PermissionError("not_resident")
         spec.validate()
@@ -257,8 +253,8 @@ class ScheduleHost:
             "runs": [r.to_dict() for r in self._runs.get(schedule_id, [])],
         }
 
+    # 启停 — disabled 不触发但保留注册 (cowork 暂停语义)。
     def set_enabled(self, schedule_id: str, enabled: bool) -> dict[str, Any] | None:
-        """启停 — disabled 不触发但保留注册 (cowork 暂停语义)。"""
         spec = self._schedules.get(schedule_id)
         if spec is None:
             return None
@@ -269,10 +265,10 @@ class ScheduleHost:
 
     # ── 持久化 ──
 
+    # 原子落盘 (tmp+replace+fsync)。文件 IO 同步执行 — 触发路径外调用 (注册/移除时),
+    # 触发循环内不落盘 (仅内存追加, stop/load 时落盘), 不阻塞事件循环。
+    #
     def save(self) -> None:
-        """原子落盘 (tmp+replace+fsync)。文件 IO 同步执行 — 触发路径外调用 (注册/移除时),
-        触发循环内不落盘 (仅内存追加, stop/load 时落盘), 不阻塞事件循环。
-        """
         try:
             self._store_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._store_path.with_suffix(self._store_path.suffix + ".tmp")
@@ -290,12 +286,12 @@ class ScheduleHost:
         except Exception as e:
             logger.error(f"#82 定时任务落盘失败: {e}")
 
+    # 启动恢复。损坏文件 warn 后从空开始。返回恢复数。
+    #
+    # interval 型: next_run = now + every_seconds (重启错过的 tick 不补跑)。
+    # daily/weekly: 取下一匹配时刻。disabled 保持 disabled。
+    #
     def load(self) -> int:
-        """启动恢复。损坏文件 warn 后从空开始。返回恢复数。
-
-        interval 型: next_run = now + every_seconds (重启错过的 tick 不补跑)。
-        daily/weekly: 取下一匹配时刻。disabled 保持 disabled。
-        """
         if not self._store_path.exists():
             return 0
         try:
@@ -349,8 +345,8 @@ class ScheduleHost:
         self.save()
         logger.info("#82 调度宿主停止")
 
+    # 到点触发 — 单线程事件循环, fire 内 await executor (execute_task) 并发 gate 兜底。
     async def _loop(self) -> None:
-        """到点触发 — 单线程事件循环, fire 内 await executor (execute_task) 并发 gate 兜底。"""
         while self._running:
             try:
                 now = time.time()
@@ -367,8 +363,8 @@ class ScheduleHost:
                 logger.error(f"#82 调度循环异常: {e}")
             await asyncio.sleep(self._tick_seconds)
 
+    # 触发一次 — 构建任务体 → executor (execute_task) → 记录运行结果 → 重排下一轮。
     async def _fire(self, schedule_id: str, now: float) -> None:
-        """触发一次 — 构建任务体 → executor (execute_task) → 记录运行结果 → 重排下一轮。"""
         spec = self._schedules.get(schedule_id)
         if spec is None:
             self._next_run.pop(schedule_id, None)

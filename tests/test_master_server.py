@@ -1,4 +1,4 @@
-"""Master Server FastAPI coverage tests."""
+# Master Server FastAPI coverage tests.
 
 import asyncio
 import time
@@ -86,9 +86,8 @@ class TestMasterServerHealth:
         assert data["status"] == "ok"
 
 
+# P0-8: Observability 接线后 /api/v1/observability/* 不再 503。
 class TestMasterServerObservability:
-    """P0-8: Observability 接线后 /api/v1/observability/* 不再 503。"""
-
     @pytest.mark.asyncio
     async def test_routes_503_when_not_wired(self):
         # 未接线 (master 未 start) → 503/empty (旧行为, 验 guard 仍在)
@@ -689,9 +688,8 @@ class TestNodeApprovalAPI:
         assert resp.status_code == 401
 
 
+# S2 /api/v1/metrics — Prometheus exposition 集群聚合指标。
 class TestPrometheusMetrics:
-    """S2 /api/v1/metrics — Prometheus exposition 集群聚合指标。"""
-
     @pytest.mark.asyncio
     async def test_metrics_requires_auth(self, client):
         resp = await client.get("/api/v1/metrics")
@@ -750,9 +748,9 @@ class TestPrometheusMetrics:
         assert "fusion_cluster_dispatch_latency_seconds_count 0" in body
         assert 'fusion_cluster_dispatch_latency_seconds{quantile="0.5"} 0.0000' in body
 
+    # P1-24: Prometheus 补熔断/限流/节点级指标 — banned/rate_limited/per-node gauges。
     @pytest.mark.asyncio
     async def test_p1_24_node_level_metrics(self, master_server, client):
-        """P1-24: Prometheus 补熔断/限流/节点级指标 — banned/rate_limited/per-node gauges。"""
         await _register_node(client, node_id="n1")
         await _register_node(client, node_id="n2")
         master = master_server.master
@@ -777,9 +775,8 @@ class TestPrometheusMetrics:
         assert "# TYPE fusion_node_banned gauge" in body
 
 
+# issue #25: Master 端口被占用 → OSError 带冲突端口提示。
 class TestMasterServerStartPortConflict:
-    """issue #25: Master 端口被占用 → OSError 带冲突端口提示。"""
-
     @pytest.mark.asyncio
     async def test_start_port_conflict_raises_with_hint(self, master_server):
         mock_uvicorn = MagicMock()
@@ -793,9 +790,8 @@ class TestMasterServerStartPortConflict:
                 await master_server.start(host="127.0.0.1", port=11452)
 
 
+# P1-18 (审计 §5.5): 任务状态 SSE 推送 — 事件总线 + /api/tasks/events 端点。
 class TestTaskEventBus:
-    """P1-18 (审计 §5.5): 任务状态 SSE 推送 — 事件总线 + /api/tasks/events 端点。"""
-
     @pytest.mark.asyncio
     async def test_finalize_failed_emits_event(self, master_server):
         master = master_server.master
@@ -1001,9 +997,8 @@ class TestTaskEventBus:
             master.unsubscribe_task_events(q)
 
 
+# P2-22 (审计 §3.8): Master 限流 — 超阈值返 429, 健康检查豁免。
 class TestMasterRateLimit:
-    """P2-22 (审计 §3.8): Master 限流 — 超阈值返 429, 健康检查豁免。"""
-
     @pytest.mark.asyncio
     async def test_burst_returns_429(self):
         # 阈值 120/60s → 第 121 个非豁免请求返 429。
@@ -1088,9 +1083,8 @@ class TestConfigReload:
             assert r.status_code == 401
 
 
+# #73 master /api/nodes/{id}/supervisor/{op} 转发到对端 agent。
 class TestSupervisorForward:
-    """#73 master /api/nodes/{id}/supervisor/{op} 转发到对端 agent。"""
-
     @pytest.mark.asyncio
     async def test_supervisor_forward_ok(self, client, master_server):
         await _register_node(client, node_id="n1")
@@ -1133,9 +1127,8 @@ class TestSupervisorForward:
         assert body["available"] is False
 
 
+# #82 常驻节点会话登记/交接 — HTTP 契约 + 持久化恢复。
 class TestSessionRegistry:
-    """#82 常驻节点会话登记/交接 — HTTP 契约 + 持久化恢复。"""
-
     async def test_register_list_get(self, client):
         resp = await client.post(
             "/api/sessions",

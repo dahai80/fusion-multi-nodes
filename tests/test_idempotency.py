@@ -1,7 +1,6 @@
-"""#71 幂等键: X-Idempotency-Key 在 /api/tasks/submit 与 /api/v1/tasks/submit。
-
-同键重复提交 (客户端重试) → 复用已存在任务, 不产生重复任务。
-"""
+# #71 幂等键: X-Idempotency-Key 在 /api/tasks/submit 与 /api/v1/tasks/submit。
+#
+# 同键重复提交 (客户端重试) → 复用已存在任务, 不产生重复任务。
 
 import pytest
 from httpx import ASGITransport, AsyncClient

@@ -1,15 +1,14 @@
-"""Test isolation — redirect HOME so no test touches real ~/.fusion.
-
-ClusterMaster/ClusterConfig/AgentConfig resolve persistence paths via
-Path.home() / ".fusion" / "multi-node" (tasks.json, election_state.json,
-config.json, .cluster_token). Without isolation, a test that leaves a
-non-terminal task (e.g. test_cancel_running_drains_queue → next-1 RUNNING)
-persists it to the real store; the next test that starts a master restores
-it, polluting active_tasks and breaking state-empty assertions (Rule 9:
-test passing for wrong reason). This autouse fixture gives every test a
-fresh throwaway HOME under tmp_path_factory, so the full suite is order-
-independent and leaves the operator's ~/.fusion untouched.
-"""
+# Test isolation — redirect HOME so no test touches real ~/.fusion.
+#
+# ClusterMaster/ClusterConfig/AgentConfig resolve persistence paths via
+# Path.home() / ".fusion" / "multi-node" (tasks.json, election_state.json,
+# config.json, .cluster_token). Without isolation, a test that leaves a
+# non-terminal task (e.g. test_cancel_running_drains_queue → next-1 RUNNING)
+# persists it to the real store; the next test that starts a master restores
+# it, polluting active_tasks and breaking state-empty assertions (Rule 9:
+# test passing for wrong reason). This autouse fixture gives every test a
+# fresh throwaway HOME under tmp_path_factory, so the full suite is order-
+# independent and leaves the operator's ~/.fusion untouched.
 
 from __future__ import annotations
 

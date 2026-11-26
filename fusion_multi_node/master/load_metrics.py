@@ -1,9 +1,8 @@
-"""LoadMetrics + LoadRouter — 结构化负载采集与感知路由。
-
-P0 核心调度模块：
-- LoadMetrics: 五维负载指标 (uma_used_ratio, cpu_percent, metal_util, task_queue_len, net_rtt_ms)
-- LoadRouter: 结构化负载感知路由，替代 NodeInfo.score 简单评分
-"""
+# LoadMetrics + LoadRouter — 结构化负载采集与感知路由。
+#
+# P0 核心调度模块：
+# - LoadMetrics: 五维负载指标 (uma_used_ratio, cpu_percent, metal_util, task_queue_len, net_rtt_ms)
+# - LoadRouter: 结构化负载感知路由，替代 NodeInfo.score 简单评分
 
 from __future__ import annotations
 
@@ -16,10 +15,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# 节点负载五维指标。
 @dataclass
 class LoadMetrics:
-    """节点负载五维指标。"""
-
     uma_used_ratio: float = 0.0
     cpu_percent: float = 0.0
     metal_util: float = 0.0
@@ -71,10 +69,9 @@ class RoutingStrategy(Enum):
     LOW_LATENCY = "low_latency"
 
 
+# 路由权重配置。
 @dataclass
 class RoutingWeights:
-    """路由权重配置。"""
-
     uma_weight: float = 0.3
     cpu_weight: float = 0.2
     metal_weight: float = 0.15
@@ -112,10 +109,9 @@ STRATEGY_WEIGHTS: dict[RoutingStrategy, RoutingWeights] = {
 }
 
 
+# 路由决策结果。
 @dataclass
 class RoutingResult:
-    """路由决策结果。"""
-
     node_id: str
     score: float
     strategy: RoutingStrategy
@@ -123,13 +119,12 @@ class RoutingResult:
     breakdown: dict[str, float] = field(default_factory=dict)
 
 
+# 结构化负载感知路由器。
+#
+# 基于 LoadMetrics 五维指标计算节点评分，替代 NodeInfo.score 简单公式。
+# 支持多种路由策略（均衡/VRAM优先/本地优先/低延迟）。
+#
 class LoadRouter:
-    """结构化负载感知路由器。
-
-    基于 LoadMetrics 五维指标计算节点评分，替代 NodeInfo.score 简单公式。
-    支持多种路由策略（均衡/VRAM优先/本地优先/低延迟）。
-    """
-
     def __init__(
         self,
         strategy: RoutingStrategy = RoutingStrategy.BALANCED,
@@ -164,8 +159,8 @@ class LoadRouter:
     def get_metrics(self, node_id: str) -> LoadMetrics | None:
         return self._metrics.get(node_id)
 
+    # 计算节点综合评分 (0~1, 越高越优先)。
     def compute_score(self, metrics: LoadMetrics, weights: RoutingWeights | None = None) -> float:
-        """计算节点综合评分 (0~1, 越高越优先)。"""
         w = weights or self._weights
 
         uma_score = max(0.0, 1.0 - metrics.uma_used_ratio)
@@ -183,8 +178,8 @@ class LoadRouter:
         )
         return max(0.0, min(1.0, score))
 
+    # 返回各维度评分明细。
     def score_breakdown(self, metrics: LoadMetrics, weights: RoutingWeights | None = None) -> dict[str, float]:
-        """返回各维度评分明细。"""
         w = weights or self._weights
         uma_score = max(0.0, 1.0 - metrics.uma_used_ratio)
         cpu_score = max(0.0, 1.0 - metrics.cpu_percent / 100.0)
@@ -200,6 +195,10 @@ class LoadRouter:
             "total": self.compute_score(metrics, w),
         }
 
+    # 从候选节点中选择最优节点。
+    #
+    # #63: task_tier=="heavy" 时 heavy 角色节点 +0.15 软亲和 (镜像 preferred +0.10)。
+    #
     def select_best(
         self,
         candidate_ids: list[str],
@@ -208,10 +207,6 @@ class LoadRouter:
         task_tier: str = "general",
         node_roles: dict[str, str] | None = None,
     ) -> RoutingResult | None:
-        """从候选节点中选择最优节点。
-
-        #63: task_tier=="heavy" 时 heavy 角色节点 +0.15 软亲和 (镜像 preferred +0.10)。
-        """
         now = time.time()
         snapshot = dict(self._metrics)
         current_weights = self._weights
@@ -264,6 +259,10 @@ class LoadRouter:
         )
         return best
 
+    # 选择 top-N 个最优节点。
+    #
+    # #63: task_tier=="heavy" 时 heavy 角色节点 +0.15 软亲和。
+    #
     def select_n(
         self,
         candidate_ids: list[str],
@@ -273,10 +272,6 @@ class LoadRouter:
         task_tier: str = "general",
         node_roles: dict[str, str] | None = None,
     ) -> list[RoutingResult]:
-        """选择 top-N 个最优节点。
-
-        #63: task_tier=="heavy" 时 heavy 角色节点 +0.15 软亲和。
-        """
         now = time.time()
         snapshot = dict(self._metrics)
         current_weights = self._weights
@@ -316,8 +311,8 @@ class LoadRouter:
         candidates.sort(key=lambda r: r.score, reverse=True)
         return candidates[:count]
 
+    # 获取集群负载摘要。
     def get_cluster_load_summary(self) -> dict[str, Any]:
-        """获取集群负载摘要。"""
         if not self._metrics:
             return {"node_count": 0, "avg_score": 0.0}
         metrics_snapshot = list(self._metrics.values())

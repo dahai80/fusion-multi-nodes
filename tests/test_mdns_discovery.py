@@ -1,8 +1,7 @@
-"""mDNS Discovery 测试。
-
-测试 MDNSDiscovery、DiscoveryInfo 等。
-用户指令：要求测试覆盖率90%+。
-"""
+# mDNS Discovery 测试。
+#
+# 测试 MDNSDiscovery、DiscoveryInfo 等。
+# 用户指令：要求测试覆盖率90%+。
 
 import time
 from unittest.mock import AsyncMock, MagicMock, patch

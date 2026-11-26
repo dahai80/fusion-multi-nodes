@@ -1,11 +1,10 @@
-"""issue #52 原语 3 — confirm 中继 + MAC + RBAC 测试。
-
-3 类:
-- TestConfirmRelayMac — POST 存 / 坏 MAC 401 / 缺 MAC 401 / 幂等覆盖 / GET 聚合 /
-  GET 按 epoch 过滤 / GET 空。
-- TestConfirmRelayRbac — 用户令牌拒 POST / 拒 GET / 集群令牌 ok。
-- TestConfirmRelayHelper — post_confirm 往返 / 坏 MAC 401。
-"""
+# issue #52 原语 3 — confirm 中继 + MAC + RBAC 测试。
+#
+# 3 类:
+# - TestConfirmRelayMac — POST 存 / 坏 MAC 401 / 缺 MAC 401 / 幂等覆盖 / GET 聚合 /
+# GET 按 epoch 过滤 / GET 空。
+# - TestConfirmRelayRbac — 用户令牌拒 POST / 拒 GET / 集群令牌 ok。
+# - TestConfirmRelayHelper — post_confirm 往返 / 坏 MAC 401。
 
 from __future__ import annotations
 
@@ -54,8 +53,8 @@ def _client(server):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test")
 
 
+# 用同 cluster_token 派生密钥构合法 MAC (与 master.receive_confirm 同源)。
 def _good_mac(confirm_id, node_id, action, epoch, ts):
-    """用同 cluster_token 派生密钥构合法 MAC (与 master.receive_confirm 同源)。"""
     key = derive_confirm_relay_key(TEST_TOKEN)
     payload = {"confirm_id": confirm_id, "node_id": node_id, "action": action, "epoch": epoch, "ts": ts}
     return mac_payload(key, canonical_json(payload))

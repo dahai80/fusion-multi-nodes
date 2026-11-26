@@ -1,4 +1,4 @@
-"""Config module exports."""
+# Config module exports.
 
 from .config import ClusterConfig
 

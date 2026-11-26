@@ -1,18 +1,17 @@
-"""Distributed MLX 分布式算子桥 — 封装 mlx.distributed 底层 API。
-
-提供统一并行接口：
-- 流水线并行（Pipeline Parallelism）：大模型分层拆分到多节点
-- 数据并行（Data Parallelism）：多节点完整加载同款模型
-- 通信压缩（Caveman token compression）
-- MoE 模型分布式路由
-
-能力状态（2026-08-24 AR 审计 H1）：
-- 数据并行（DATA）：可用。走 fusion-mlx `/v1/chat/completions`（已存在）。
-- 流水线并行（PIPELINE）：未实现，依赖 fusion-mlx `/distributed/*` 端点，
-  该端点当前不存在（上游 issue: dahai80/fusion-mlx#621）。现网调用必 404。
-  本模块保留分片/步进代码骨架待上游就绪;调用方应先校验端点可用性或捕获
-  RuntimeError。激活张量传输层亦缺失（现仅转发明文 prompt,非真实激活）。
-"""
+# Distributed MLX 分布式算子桥 — 封装 mlx.distributed 底层 API。
+#
+# 提供统一并行接口：
+# - 流水线并行（Pipeline Parallelism）：大模型分层拆分到多节点
+# - 数据并行（Data Parallelism）：多节点完整加载同款模型
+# - 通信压缩（Caveman token compression）
+# - MoE 模型分布式路由
+#
+# 能力状态（2026-08-24 AR 审计 H1）：
+# - 数据并行（DATA）：可用。走 fusion-mlx `/v1/chat/completions`（已存在）。
+# - 流水线并行（PIPELINE）：未实现，依赖 fusion-mlx `/distributed/*` 端点，
+# 该端点当前不存在（上游 issue: dahai80/fusion-mlx#621）。现网调用必 404。
+# 本模块保留分片/步进代码骨架待上游就绪;调用方应先校验端点可用性或捕获
+# RuntimeError。激活张量传输层亦缺失（现仅转发明文 prompt,非真实激活）。
 
 from __future__ import annotations
 
@@ -31,18 +30,16 @@ from fusion_multi_node.utils.auth import sanitize_node_url_part
 logger = logging.getLogger(__name__)
 
 
+# 分布式模式。
 class DistMode(Enum):
-    """分布式模式。"""
-
     PIPELINE = "pipeline"
     DATA = "data"
     TENSOR = "tensor"
 
 
+# 模型分片定义。
 @dataclass
 class ModelShard:
-    """模型分片定义。"""
-
     shard_id: int
     total_shards: int
     layers: list[int]
@@ -51,10 +48,9 @@ class ModelShard:
     status: str = "pending"
 
 
+# 分布式推理配置。
 @dataclass
 class DistConfig:
-    """分布式推理配置。"""
-
     mode: DistMode = DistMode.PIPELINE
     model_name: str = ""
     num_nodes: int = 1
@@ -64,12 +60,11 @@ class DistConfig:
     timeout: float = 300.0
 
 
+# 分布式 MLX 算子桥 — 封装 mlx.distributed 通信原语。
+#
+# 当前实现为调度层，底层通过 HTTP 调用 fusion-mlx 的分布式 API。
+#
 class DistributedMLXBridge:
-    """分布式 MLX 算子桥 — 封装 mlx.distributed 通信原语。
-
-    当前实现为调度层，底层通过 HTTP 调用 fusion-mlx 的分布式 API。
-    """
-
     def __init__(self):
         self._shards: dict[str, list[ModelShard]] = {}
         self._active_pipelines: dict[str, dict[str, Any]] = {}
@@ -95,13 +90,13 @@ class DistributedMLXBridge:
             oldest = next(iter(self._active_pipelines))
             del self._active_pipelines[oldest]
 
+    # 将模型切分为分片。
     async def shard_model(
         self,
         model_name: str,
         num_shards: int,
         strategy: str = "auto",
     ) -> list[ModelShard]:
-        """将模型切分为分片。"""
         logger.info(f"模型分片: {model_name} → {num_shards} 片 (策略: {strategy})")
 
         # 获取模型配置
@@ -132,6 +127,7 @@ class DistributedMLXBridge:
         logger.info(f"分片完成: {total_layers} 层 → {num_shards} 片 ({layers_per_shard} 层/片)")
         return shards
 
+    # 在指定节点加载模型分片。
     async def load_shard(
         self,
         model_name: str,
@@ -139,7 +135,6 @@ class DistributedMLXBridge:
         node_id: str,
         fusion_mlx_port: int = 11432,
     ) -> bool:
-        """在指定节点加载模型分片。"""
         shards = self._shards.get(model_name, [])
         if shard_id >= len(shards):
             logger.error(f"分片索引越界: {shard_id}/{len(shards)}")
@@ -175,6 +170,7 @@ class DistributedMLXBridge:
             shard.status = "failed"
             return False
 
+    # 流水线并行推理。
     async def pipeline_inference(
         self,
         model_name: str,
@@ -182,7 +178,6 @@ class DistributedMLXBridge:
         node_chain: list[str],
         fusion_mlx_port: int = 11432,
     ) -> dict[str, Any]:
-        """流水线并行推理。"""
         pipeline_id = f"pipe_{model_name}_{len(self._active_pipelines)}"
         self._active_pipelines[pipeline_id] = {
             "model": model_name,
@@ -249,6 +244,10 @@ class DistributedMLXBridge:
             "nodes": len(node_chain),
         }
 
+    # 数据并行推理 — 负载感知分配。
+    #
+    # 优先分配给活跃任务数最少的节点，而非简单轮询。
+    #
     async def data_parallel_inference(
         self,
         model_name: str,
@@ -256,10 +255,6 @@ class DistributedMLXBridge:
         nodes: list[str],
         fusion_mlx_port: int = 11432,
     ) -> list[dict[str, Any]]:
-        """数据并行推理 — 负载感知分配。
-
-        优先分配给活跃任务数最少的节点，而非简单轮询。
-        """
         load: dict[str, int] = dict.fromkeys(nodes, 0)
         tasks: list[asyncio.Task] = []
         assigned: list[str] = []
@@ -284,6 +279,7 @@ class DistributedMLXBridge:
         logger.info(f"数据并行推理完成: {len(prompts)} 请求 → {len(nodes)} 节点, 成功={ok_count}, 分配: {load}")
         return processed
 
+    # 单节点推理。
     async def _single_inference(
         self,
         node_id: str,
@@ -291,7 +287,6 @@ class DistributedMLXBridge:
         prompt: str,
         port: int,
     ) -> dict[str, Any]:
-        """单节点推理。"""
         payload = {
             "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -318,11 +313,11 @@ class DistributedMLXBridge:
             "usage": data.get("usage", {}),
         }
 
+    # 获取模型配置（通过 fusion-mlx API）。
+    #
+    # 失败直接抛错, 不静默回退默认值 — 否则按错误层数切分, 产线静默损坏。
+    #
     async def _get_model_config(self, model_name: str) -> dict[str, Any]:
-        """获取模型配置（通过 fusion-mlx API）。
-
-        失败直接抛错, 不静默回退默认值 — 否则按错误层数切分, 产线静默损坏。
-        """
         client = await self._get_http_client(10.0)
         _mlx_base = os.environ.get("FUSION_MLX_URL") or "http://localhost:11432"
         try:
@@ -333,6 +328,7 @@ class DistributedMLXBridge:
             raise RuntimeError(f"获取模型配置失败({model_name}): fusion-mlx 返回 {resp.status_code}: {resp.text[:200]}")
         return resp.json()
 
+    # 跨节点同步模型权重。
     async def sync_weights(
         self,
         model_name: str,
@@ -340,7 +336,6 @@ class DistributedMLXBridge:
         target_nodes: list[str],
         port: int = 11432,
     ) -> bool:
-        """跨节点同步模型权重。"""
         success = True
         client = await self._get_http_client(600.0)
         for target in target_nodes:

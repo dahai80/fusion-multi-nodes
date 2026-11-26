@@ -1,4 +1,4 @@
-"""Distributed MLX module exports."""
+# Distributed MLX module exports.
 
 from .caveman_compress import CavemanCompressor, CavemanManager, CompressStats
 from .distributed_bridge import DistConfig, DistMode, DistributedMLXBridge, ModelShard

@@ -1,11 +1,10 @@
-"""F4 (#32): /api/v1 集群控制契约单测 — typed response_model 覆盖 9 操作。
-
-校验:
-- 响应 schema 与 V1* Pydantic 模型对齐 (字段存在/类型)。
-- 9 操作 (list_nodes/register/remove/submit/migrate/degrade/progress/
-  cluster_stats/observability_suggestions) 全覆盖。
-- v1 与旧 /api/* 同源行为一致 (注册/列表)。
-"""
+# F4 (#32): /api/v1 集群控制契约单测 — typed response_model 覆盖 9 操作。
+#
+# 校验:
+# - 响应 schema 与 V1* Pydantic 模型对齐 (字段存在/类型)。
+# - 9 操作 (list_nodes/register/remove/submit/migrate/degrade/progress/
+# cluster_stats/observability_suggestions) 全覆盖。
+# - v1 与旧 /api/* 同源行为一致 (注册/列表)。
 
 from __future__ import annotations
 
@@ -90,9 +89,8 @@ _TASK_FIELDS = {
 }
 
 
+# 操作 1-3: list_nodes / register / remove。
 class TestV1ContractNodes:
-    """操作 1-3: list_nodes / register / remove。"""
-
     @pytest.mark.asyncio
     async def test_list_nodes_schema(self, client):
         await client.post("/api/v1/nodes/register", json=_register_payload(), headers=AUTH_HEADERS)
@@ -140,9 +138,8 @@ class TestV1ContractNodes:
         assert resp.json()["status"] == "ok"
 
 
+# 操作 4-7: submit / migrate / degrade / progress。
 class TestV1ContractTasks:
-    """操作 4-7: submit / migrate / degrade / progress。"""
-
     @pytest.mark.asyncio
     async def test_submit_task_schema(self, client):
         await client.post("/api/v1/nodes/register", json=_register_payload("nt1"), headers=AUTH_HEADERS)
@@ -240,9 +237,8 @@ class TestV1ContractTasks:
         assert resp.json()["status"] == "ok"
 
 
+# 操作 8-9: cluster_stats / observability_suggestions。
 class TestV1ContractStatsAndOps:
-    """操作 8-9: cluster_stats / observability_suggestions。"""
-
     @pytest.mark.asyncio
     async def test_cluster_stats_schema(self, client):
         await client.post("/api/v1/nodes/register", json=_register_payload("nc1"), headers=AUTH_HEADERS)

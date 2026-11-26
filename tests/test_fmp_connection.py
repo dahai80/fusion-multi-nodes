@@ -1,4 +1,4 @@
-"""FMP 连接管理测试 — 完整覆盖。"""
+# FMP 连接管理测试 — 完整覆盖。
 
 import asyncio
 import struct

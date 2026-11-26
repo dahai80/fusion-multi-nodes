@@ -1,11 +1,10 @@
-"""P2-6 (审计 §5.10): 选举 _lock 持锁内 await HTTP + fsync 移锁外 单元测试。
-
-验证锁内快照 + 锁外 I/O 范式:
-- _start_election: send_vote_request (HTTP) + _persist_state_async (fsync) 不持 _lock
-- handle_vote_request: _persist_state_async 不持 _lock
-- receive_heartbeat: _persist_state_async 不持 _lock
-- _broadcast_heartbeat: send_heartbeat (HTTP) 不持 _lock
-"""
+# P2-6 (审计 §5.10): 选举 _lock 持锁内 await HTTP + fsync 移锁外 单元测试。
+#
+# 验证锁内快照 + 锁外 I/O 范式:
+# - _start_election: send_vote_request (HTTP) + _persist_state_async (fsync) 不持 _lock
+# - handle_vote_request: _persist_state_async 不持 _lock
+# - receive_heartbeat: _persist_state_async 不持 _lock
+# - _broadcast_heartbeat: send_heartbeat (HTTP) 不持 _lock
 
 from __future__ import annotations
 
@@ -31,9 +30,8 @@ def _make_election(tmp_path: Path, send_vote=None, send_heartbeat=None) -> Maste
     return e
 
 
+# P2-6: HTTP/fsync 移锁外 — I/O 执行期间 _lock.locked() 须为 False。
 class TestP2_6ElectionLockOutsideIO:
-    """P2-6: HTTP/fsync 移锁外 — I/O 执行期间 _lock.locked() 须为 False。"""
-
     async def test_p2_6_start_election_http_and_fsync_outside_lock(self, tmp_path):
         # send_vote 回调 + persist 期间 _lock 不应持锁。
         persist_locked: list[bool] = []

@@ -1,8 +1,7 @@
-"""Config 测试。
-
-测试 ClusterConfig 的所有方法。
-用户指令：要求测试覆盖率90%+。
-"""
+# Config 测试。
+#
+# 测试 ClusterConfig 的所有方法。
+# 用户指令：要求测试覆盖率90%+。
 
 import os
 import tempfile

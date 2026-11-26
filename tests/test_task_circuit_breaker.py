@@ -1,4 +1,4 @@
-"""S1 任务级熔断器测试 — 派发失败累计报告故障达阈值自动 ban, select_nodes 跳过 ban 节点。"""
+# S1 任务级熔断器测试 — 派发失败累计报告故障达阈值自动 ban, select_nodes 跳过 ban 节点。
 
 from __future__ import annotations
 
@@ -41,16 +41,15 @@ def _task(node_id: str = "n1", task_id: str = "t1") -> ClusterTask:
     )
 
 
+# 直接植入 master.tasks 为 RUNNING — _finalize_task 只回填 RUNNING 任务。
 def _plant(master: ClusterMaster, task: ClusterTask) -> ClusterTask:
-    """直接植入 master.tasks 为 RUNNING — _finalize_task 只回填 RUNNING 任务。"""
     task.status = TaskStatus.RUNNING
     master.tasks[task.task_id] = task
     return task
 
 
+# 假 httpx 响应 — 构造非 200 触发派发失败路径。
 class _Resp:
-    """假 httpx 响应 — 构造非 200 触发派发失败路径。"""
-
     def __init__(self, status_code: int, payload: dict):
         self.status_code = status_code
         self._payload = payload
@@ -60,9 +59,8 @@ class _Resp:
         return self._payload
 
 
+# 总是返回 503 的假 AsyncClient — _dispatch_to_node 应报 fault 并 raise。
 class _FailClient:
-    """总是返回 503 的假 AsyncClient — _dispatch_to_node 应报 fault 并 raise。"""
-
     is_closed = False
 
     async def post(self, url, json=None, headers=None, timeout=None):
@@ -76,22 +74,20 @@ class _OkClient:
         return _Resp(200, {"status": "ok", "result": {"output": "ok"}})
 
 
+# C9: agent 内部错误 — 200+ok, 但 result 含 error 键 (OOM/坏模型)。
+#
+# _dispatch_to_node 不 raise (status ok), _dispatch_data 识别 logic_fail
+# → report_fault("agent_internal_error") + 不可重试 (FAILED 非 PENDING)。
+#
 class _ErrClient:
-    """C9: agent 内部错误 — 200+ok, 但 result 含 error 键 (OOM/坏模型)。
-
-    _dispatch_to_node 不 raise (status ok), _dispatch_data 识别 logic_fail
-    → report_fault("agent_internal_error") + 不可重试 (FAILED 非 PENDING)。
-    """
-
     is_closed = False
 
     async def post(self, url, json=None, headers=None, timeout=None):
         return _Resp(200, {"status": "ok", "result": {"error": "OOM: 内存不足"}})
 
 
+# S1 gap1: _dispatch_to_node 失败 → report_fault(node_id) 累计。
 class TestDispatchFaultReports:
-    """S1 gap1: _dispatch_to_node 失败 → report_fault(node_id) 累计。"""
-
     @pytest.mark.asyncio
     async def test_dispatch_failure_reports_fault(self):
         master = ClusterMaster()
@@ -137,32 +133,29 @@ class TestDispatchFaultReports:
         assert not master._fault_counts.get("n1"), "成功派发不应累计故障"
 
 
+# P0-2: agent 去重拦截 — 200+ok, result 含 dedup_blocked=True (master 重派同 task_id)。
 class _DedupClient:
-    """P0-2: agent 去重拦截 — 200+ok, result 含 dedup_blocked=True (master 重派同 task_id)。"""
-
     is_closed = False
 
     async def post(self, url, json=None, headers=None, timeout=None):
         return _Resp(200, {"status": "ok", "result": {"dedup_blocked": True, "error": "重复派发, 任务已在运行"}})
 
 
+# P0-2: agent 沙箱拒绝 — 200+ok, result 含 sandbox_blocked=True (任务携带禁路径)。
 class _SandboxClient:
-    """P0-2: agent 沙箱拒绝 — 200+ok, result 含 sandbox_blocked=True (任务携带禁路径)。"""
-
     is_closed = False
 
     async def post(self, url, json=None, headers=None, timeout=None):
         return _Resp(200, {"status": "ok", "result": {"sandbox_blocked": True, "error": "路径访问被拒: /etc"}})
 
 
+# P0-2: dedup_blocked/sandbox_blocked 误归 logic_fail + report_fault 修复。
+#
+# 修复前: 二者走 'error' in r → logic_fail + report_fault → 健康节点累计 3 fault/60s → ban 300s。
+# 修复后: 独立分类 — 不 report_fault (节点健康), 不进 transient/logic (不重试回同节点),
+# 任务直接 FAILED (master 自身重派/配置问题, 重试同节点同任务大概率复现)。
+#
 class TestP02DedupSandboxNoFault:
-    """P0-2: dedup_blocked/sandbox_blocked 误归 logic_fail + report_fault 修复。
-
-    修复前: 二者走 'error' in r → logic_fail + report_fault → 健康节点累计 3 fault/60s → ban 300s。
-    修复后: 独立分类 — 不 report_fault (节点健康), 不进 transient/logic (不重试回同节点),
-    任务直接 FAILED (master 自身重派/配置问题, 重试同节点同任务大概率复现)。
-    """
-
     @pytest.mark.asyncio
     async def test_dedup_blocked_no_fault_no_ban(self):
         master = ClusterMaster()
@@ -193,9 +186,9 @@ class TestP02DedupSandboxNoFault:
         assert task.status == TaskStatus.FAILED, "沙箱阻塞应 FAILED (配置问题, 不重试)"
         assert task not in master._pending_retry, "沙箱阻塞不应入重试队列"
 
+    # 对照 test_repeated_dispatch_failure_bans_node: 重复去重达阈值仍不 ban (非故障)。
     @pytest.mark.asyncio
     async def test_repeated_dedup_never_bans(self):
-        """对照 test_repeated_dispatch_failure_bans_node: 重复去重达阈值仍不 ban (非故障)。"""
         master = ClusterMaster()
         await master.register_node(_node("n1"))
         master._dispatch_token = "test-token"
@@ -209,9 +202,8 @@ class TestP02DedupSandboxNoFault:
         assert not master._fault_counts.get("n1"), "反复去重零故障计数"
 
 
+# S1 gap2: select_nodes 跳过 ban 期内节点。
 class TestSelectNodesSkipsBanned:
-    """S1 gap2: select_nodes 跳过 ban 期内节点。"""
-
     @pytest.mark.asyncio
     async def test_select_nodes_excludes_banned(self):
         master = ClusterMaster()
@@ -254,9 +246,8 @@ class TestSelectNodesSkipsBanned:
         assert any(n.node_id == "n1" for n in selected), "解封后应重新可选"
 
 
+# C9: agent 内部错误 (200+ok+result.error) 对熔断器可见, 且不可重试。
 class TestAgentInternalErrorCircuit:
-    """C9: agent 内部错误 (200+ok+result.error) 对熔断器可见, 且不可重试。"""
-
     @pytest.mark.asyncio
     async def test_agent_internal_error_reports_fault(self):
         master = ClusterMaster()
@@ -288,9 +279,9 @@ class TestAgentInternalErrorCircuit:
 
         assert master.is_node_banned("n1"), "反复 agent 内部错误达阈值应 ban"
 
+    # C8 重试耗尽: 瞬时失败重试 _max_retry_attempts 次后 → FAILED (非无限重试)。
     @pytest.mark.asyncio
     async def test_retry_exhaustion_marks_failed(self):
-        """C8 重试耗尽: 瞬时失败重试 _max_retry_attempts 次后 → FAILED (非无限重试)。"""
         master = ClusterMaster()
         await master.register_node(_node("n1"))
         master._dispatch_token = "test-token"

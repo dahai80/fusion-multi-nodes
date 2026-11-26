@@ -1,4 +1,4 @@
-"""Fusion-Multi-Node 工具函数。"""
+# Fusion-Multi-Node 工具函数。
 
 from __future__ import annotations
 
@@ -11,17 +11,17 @@ from pathlib import Path
 from urllib.parse import quote
 
 
+# 配置日志系统。
+#
+# P1-16 (审计 §6.4): 默认仅控制台 (StreamHandler, 兼容测试 1 handler 断言)。
+# 设环境变量 FUSION_MULTINODE_LOG_FILE 时追加 RotatingFileHandler (10MB×5 上限),
+# 落盘应用日志有界, 崩溃重启循环下不再无界填盘。start.sh / launchd plist 设此 env。
+#
 def setup_logger(
     name: str = "fusion_multi_node",
     level: int = logging.INFO,
     verbose: bool = False,
 ) -> logging.Logger:
-    """配置日志系统。
-
-    P1-16 (审计 §6.4): 默认仅控制台 (StreamHandler, 兼容测试 1 handler 断言)。
-    设环境变量 FUSION_MULTINODE_LOG_FILE 时追加 RotatingFileHandler (10MB×5 上限),
-    落盘应用日志有界, 崩溃重启循环下不再无界填盘。start.sh / launchd plist 设此 env。
-    """
     if verbose:
         level = logging.DEBUG
 
@@ -69,15 +69,15 @@ def setup_logger(
     return logger
 
 
+# 获取数据目录。
 def get_data_dir() -> Path:
-    """获取数据目录。"""
     data_dir = Path.home() / ".fusion" / "multi-node"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
 
+# 获取日志目录。
 def get_log_dir() -> Path:
-    """获取日志目录。"""
     log_dir = get_data_dir() / "logs"
     log_dir.mkdir(exist_ok=True)
     return log_dir
@@ -86,13 +86,13 @@ def get_log_dir() -> Path:
 _HOST_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
+# 构建 HTTP URL — 统一校验 host/port/path，防止拼接注入。
+#
+# - host 仅允许字母/数字/._-
+# - port 范围 1-65535
+# - path 必须以 / 开头，自动 URL-encode 路径段
+#
 def build_url(host: str, port: int, path: str, scheme: str = "http") -> str:
-    """构建 HTTP URL — 统一校验 host/port/path，防止拼接注入。
-
-    - host 仅允许字母/数字/._-
-    - port 范围 1-65535
-    - path 必须以 / 开头，自动 URL-encode 路径段
-    """
     if not _HOST_RE.match(host):
         raise ValueError(f"非法 host: {host!r}")
     if not (1 <= port <= 65535):

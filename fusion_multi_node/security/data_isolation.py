@@ -1,10 +1,9 @@
-"""M6-01 Master 数据隔离 — 阻止 Master 专有数据同步到 Worker 节点。
-
-受保护路径/模式:
-- *.db, *.sqlite (SQLite 数据库)
-- soul.md, memory.md (Agent 持久记忆)
-- .fusion/master/ (Master 专有目录)
-"""
+# M6-01 Master 数据隔离 — 阻止 Master 专有数据同步到 Worker 节点。
+#
+# 受保护路径/模式:
+# - *.db, *.sqlite (SQLite 数据库)
+# - soul.md, memory.md (Agent 持久记忆)
+# - .fusion/master/ (Master 专有目录)
 
 from __future__ import annotations
 
@@ -67,9 +66,9 @@ class DataIsolationPolicy:
 
         return False
 
+    # 安全 realpath — 路径不存在不抛异常, 返回 normpath 兜底。
     @staticmethod
     def _safe_realpath(path: str) -> str:
-        """安全 realpath — 路径不存在不抛异常, 返回 normpath 兜底。"""
         try:
             return os.path.realpath(path)
         except (OSError, ValueError) as e:

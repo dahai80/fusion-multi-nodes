@@ -1,4 +1,4 @@
-"""M3-05 TaskSpec — 任务规格数据类，分离任务定义与运行时状态。"""
+# M3-05 TaskSpec — 任务规格数据类，分离任务定义与运行时状态。
 
 from __future__ import annotations
 
@@ -17,10 +17,9 @@ class TaskPriority(Enum):
     CRITICAL = 3
 
 
+# 任务规格 — 定义"做什么"，与运行时状态无关。
 @dataclass
 class TaskSpec:
-    """任务规格 — 定义"做什么"，与运行时状态无关。"""
-
     name: str
     model_name: str = ""
     mode: str = "data"

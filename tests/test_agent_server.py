@@ -1,4 +1,4 @@
-"""Agent Server FastAPI 测试。"""
+# Agent Server FastAPI 测试。
 
 import asyncio
 import time
@@ -477,9 +477,9 @@ class TestAgentServerStart:
         assert agent_server._uvicorn_server is mock_server
         mock_server.serve.assert_called_once()
 
+    # issue #25: 端口被占用 → OSError 带冲突端口提示, 非通用 bind 错误。
     @pytest.mark.asyncio
     async def test_start_port_conflict_raises_with_hint(self, agent_server):
-        """issue #25: 端口被占用 → OSError 带冲突端口提示, 非通用 bind 错误。"""
         mock_uvicorn = MagicMock()
         mock_config = MagicMock()
         mock_server = MagicMock()
@@ -491,9 +491,9 @@ class TestAgentServerStart:
             with pytest.raises(OSError, match="11445.*fusion-comfyui"):
                 await agent_server.start(host="127.0.0.1", port=11445)
 
+    # 未知冲突端口 → OSError 仍抛 (无 hint 但含端口号)。
     @pytest.mark.asyncio
     async def test_start_port_conflict_no_known_conflict(self, agent_server):
-        """未知冲突端口 → OSError 仍抛 (无 hint 但含端口号)。"""
         mock_uvicorn = MagicMock()
         mock_config = MagicMock()
         mock_server = MagicMock()
@@ -600,10 +600,10 @@ class TestAgentServerKVPersistenceLifecycle:
         assert persist.exists()
         assert json.loads(persist.read_text(encoding="utf-8"))["entry_count"] == 0
 
+    # P2-3 (审计 §6.3): AgentServer.stop 调 kv_manager.close() 关 httpx + 张量后端,
+    # 修资源泄漏 (旧 stop 仅 save 不 close)。用真 KVSharingManager + 注入未关 httpx 客户端验 close 生效。
     @pytest.mark.asyncio
     async def test_p2_3_stop_calls_kv_manager_close(self, mock_agent, tmp_path):
-        """P2-3 (审计 §6.3): AgentServer.stop 调 kv_manager.close() 关 httpx + 张量后端,
-        修资源泄漏 (旧 stop 仅 save 不 close)。用真 KVSharingManager + 注入未关 httpx 客户端验 close 生效。"""
         from fusion_multi_node.distributed_mlx.kv_cache_sharing import KVSharingManager
 
         mgr = KVSharingManager(enable_compression=False, persist_path=str(tmp_path / "kv.json"))
@@ -615,9 +615,9 @@ class TestAgentServerKVPersistenceLifecycle:
         # close() 后 httpx 客户端已关 (句柄释放, 非泄漏)。
         assert client.is_closed
 
+    # P2-3: kv_manager.close() 抛异常 → stop 不传播 (catch + warning, 不拖垮停服)。
     @pytest.mark.asyncio
     async def test_p2_3_stop_close_failure_does_not_raise(self, mock_agent, tmp_path):
-        """P2-3: kv_manager.close() 抛异常 → stop 不传播 (catch + warning, 不拖垮停服)。"""
         mgr = MagicMock()
         mgr.save.side_effect = RuntimeError("盘满")
         mgr.close = AsyncMock(side_effect=RuntimeError("关连接失败"))
@@ -628,9 +628,8 @@ class TestAgentServerKVPersistenceLifecycle:
         mgr.close.assert_awaited_once()
 
 
+# P3-2 (审计 §6.11): AgentServer.stop KV 落盘失败升 critical + 上报 master 故障。
 class TestP3_2KVSaveAlert:
-    """P3-2 (审计 §6.11): AgentServer.stop KV 落盘失败升 critical + 上报 master 故障。"""
-
     @pytest.mark.asyncio
     async def test_save_failure_reports_fault(self, tmp_path):
         # save() 抛异常 → critical 日志 + report_fault 上报 master (best-effort)。
@@ -687,9 +686,8 @@ class TestP3_2KVSaveAlert:
         mgr.close.assert_awaited_once()
 
 
+# #73 agent /api/supervisor/{op} 路由 — 本机 shell-out fusion-sv CLI。
 class TestSupervisorRoutes:
-    """#73 agent /api/supervisor/{op} 路由 — 本机 shell-out fusion-sv CLI。"""
-
     @pytest.mark.asyncio
     async def test_supervisor_status_route(self, mock_agent, mock_kv_manager):
         from fusion_multi_node.agent.supervisor_bridge import SupervisorBridge
@@ -734,9 +732,8 @@ class TestSupervisorRoutes:
         assert body["svc"] == "mlx"
 
 
+# #82 常驻节点定时任务路由 — 注册/列表/详情/启停/删除, 非 resident 一律 403。
 class TestScheduleRoutes:
-    """#82 常驻节点定时任务路由 — 注册/列表/详情/启停/删除, 非 resident 一律 403。"""
-
     async def test_register_denied_when_not_resident(self, mock_agent, agent_server, client, tmp_path):
         from fusion_multi_node.agent.scheduling import ScheduleHost
 

@@ -1,11 +1,10 @@
-"""M9 存储卷 — 统一存储抽象层。
-
-- StorageVolume: 逻辑存储卷（本地/分布式）
-- VolumeSpec: 卷规格定义
-- 支持多种后端: 本地文件系统、共享目录、分布式
-- M9-03: 容量监控 + LRU 自动驱逐
-- M9-05: 模型分片分发到 Worker 存储卷
-"""
+# M9 存储卷 — 统一存储抽象层。
+#
+# - StorageVolume: 逻辑存储卷（本地/分布式）
+# - VolumeSpec: 卷规格定义
+# - 支持多种后端: 本地文件系统、共享目录、分布式
+# - M9-03: 容量监控 + LRU 自动驱逐
+# - M9-05: 模型分片分发到 Worker 存储卷
 
 from __future__ import annotations
 
@@ -27,10 +26,9 @@ class VolumeType(Enum):
     DISTRIBUTED = "distributed"
 
 
+# 卷规格。
 @dataclass
 class VolumeSpec:
-    """卷规格。"""
-
     name: str
     volume_type: VolumeType = VolumeType.LOCAL
     path: str = ""
@@ -41,10 +39,9 @@ class VolumeSpec:
     labels: dict[str, str] = field(default_factory=dict)
 
 
+# 卷运行时信息。
 @dataclass
 class VolumeInfo:
-    """卷运行时信息。"""
-
     name: str
     spec: VolumeSpec
     used_bytes: int = 0
@@ -54,10 +51,9 @@ class VolumeInfo:
     status: str = "active"
 
 
+# 文件条目，用于 LRU 追踪。
 @dataclass
 class FileEntry:
-    """文件条目，用于 LRU 追踪。"""
-
     path: str
     volume_name: str
     size_bytes: int
@@ -65,10 +61,9 @@ class FileEntry:
     created_at: float = 0.0
 
 
+# 容量报告。
 @dataclass
 class CapacityReport:
-    """容量报告。"""
-
     volume_name: str
     total_mb: float
     used_mb: float
@@ -78,17 +73,16 @@ class CapacityReport:
     needs_eviction: bool
 
 
+# 存储卷管理器。
+#
+# 提供统一的存储操作接口:
+# - create_volume / delete_volume
+# - write_file / read_file / delete_file
+# - list_files / get_info
+# - M9-03: 容量监控 + LRU 自动驱逐
+# - M9-05: 模型分片分发
+#
 class StorageVolume:
-    """存储卷管理器。
-
-    提供统一的存储操作接口:
-    - create_volume / delete_volume
-    - write_file / read_file / delete_file
-    - list_files / get_info
-    - M9-03: 容量监控 + LRU 自动驱逐
-    - M9-05: 模型分片分发
-    """
-
     EVICTION_HIGH_WATERMARK = 0.9
     EVICTION_LOW_WATERMARK = 0.7
 
@@ -225,8 +219,8 @@ class StorageVolume:
 
     # ── M9-03 容量监控 ──
 
+    # 获取卷容量报告。
     def get_capacity_report(self, volume_name: str) -> CapacityReport | None:
-        """获取卷容量报告。"""
         info = self._volumes.get(volume_name)
         if not info:
             return None
@@ -250,8 +244,8 @@ class StorageVolume:
             needs_eviction=needs_eviction,
         )
 
+    # 检查所有卷容量。
     def check_all_capacities(self) -> list[CapacityReport]:
-        """检查所有卷容量。"""
         reports = []
         for name in self._volumes:
             report = self.get_capacity_report(name)
@@ -259,8 +253,8 @@ class StorageVolume:
                 reports.append(report)
         return reports
 
+    # M9-03 LRU 自动驱逐。
     def _evict_lru(self, volume_name: str, needed_bytes: int = 0) -> bool:
-        """M9-03 LRU 自动驱逐。"""
         info = self._volumes.get(volume_name)
         if not info:
             return False
@@ -286,6 +280,7 @@ class StorageVolume:
 
     # ── M9-05 模型分片分发 ──
 
+    # M9-05 分发模型分片到 Worker 存储卷。
     def distribute_shard(
         self,
         shard_id: str,
@@ -294,7 +289,6 @@ class StorageVolume:
         shard_path: str,
         node_id: str,
     ) -> bool:
-        """M9-05 分发模型分片到 Worker 存储卷。"""
         ok = self.write_file(target_volume, shard_path, shard_data)
         if ok:
             dist = self._shard_distributions.setdefault(shard_id, [])
@@ -311,12 +305,12 @@ class StorageVolume:
             logger.info(f"分片分发: {shard_id} → {node_id}:{target_volume}/{shard_path}")
         return ok
 
+    # 获取分片分发记录。
     def get_shard_distribution(self, shard_id: str) -> list[dict[str, Any]]:
-        """获取分片分发记录。"""
         return self._shard_distributions.get(shard_id, [])
 
+    # 验证分片完整性。
     def verify_shard(self, volume_name: str, shard_path: str, expected_size: int) -> bool:
-        """验证分片完整性。"""
         data = self.read_file(volume_name, shard_path)
         if data is None:
             return False

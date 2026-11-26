@@ -1,16 +1,15 @@
+# #95 生产静态服务: 常驻托管 web/dist + 同源 /api 反代到 cluster master。
+#
+# 嵌入模式 (gateway /shell/fusion-multi-nodes/) 链路:
+# browser → :11432 gateway /shell proxy → 本服务 :11472
+# - 静态文件: dist 根 (base "./" + hash router, 无 SPA fallback 需求)
+# - /api/*: 反代 master (FUSION_MULTINODE_PORT, 默认 11452), 注入
+# Bearer cluster_token (~/.fusion/multi-node/.cluster_token) — modules
+# api_key 未配时 gateway 剥 Authorization, master BearerAuthMiddleware
+# 拒裸请求; 本服务统一补 token, bundle 无秘密。
+#
+# 仅 stdlib, 无依赖。启动: start.sh start-web (nohup 常驻)。
 #!/usr/bin/env python3
-"""#95 生产静态服务: 常驻托管 web/dist + 同源 /api 反代到 cluster master。
-
-嵌入模式 (gateway /shell/fusion-multi-nodes/) 链路:
-  browser → :11432 gateway /shell proxy → 本服务 :11472
-  - 静态文件: dist 根 (base "./" + hash router, 无 SPA fallback 需求)
-  - /api/*: 反代 master (FUSION_MULTINODE_PORT, 默认 11452), 注入
-    Bearer cluster_token (~/.fusion/multi-node/.cluster_token) — modules
-    api_key 未配时 gateway 剥 Authorization, master BearerAuthMiddleware
-    拒裸请求; 本服务统一补 token, bundle 无秘密。
-
-仅 stdlib, 无依赖。启动: start.sh start-web (nohup 常驻)。
-"""
 
 from __future__ import annotations
 

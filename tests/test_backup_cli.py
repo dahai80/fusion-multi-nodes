@@ -1,12 +1,11 @@
-"""v0.14.0 item 6 — CLI backup/restore 测试。
-
-覆盖:
-- create 生成 tar.gz + 含全部数据文件 + 0600 权限。
-- restore 解包回写。
-- --yes 跳确认。
-- 空目录容错 (无数据文件仍生成空 tar 不抛)。
-- 路径逃逸校验 (含 .. / 绝对路径的恶意 tar 拒解包)。
-"""
+# v0.14.0 item 6 — CLI backup/restore 测试。
+#
+# 覆盖:
+# - create 生成 tar.gz + 含全部数据文件 + 0600 权限。
+# - restore 解包回写。
+# - --yes 跳确认。
+# - 空目录容错 (无数据文件仍生成空 tar 不抛)。
+# - 路径逃逸校验 (含 .. / 绝对路径的恶意 tar 拒解包)。
 
 from __future__ import annotations
 
@@ -20,15 +19,15 @@ from click.testing import CliRunner
 from fusion_multi_node.cli import cli
 
 
+# 隔离 HOME → tmp, backup 命令读 Path.home() / .fusion/multi-node。
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    """隔离 HOME → tmp, backup 命令读 Path.home() / .fusion/multi-node。"""
     monkeypatch.setenv("HOME", str(tmp_path))
     return tmp_path
 
 
+# 在 ~/.fusion/multi-node/ 写入测试数据文件, 返回 {name: content}。
 def _seed_data(home: Path) -> dict[str, str]:
-    """在 ~/.fusion/multi-node/ 写入测试数据文件, 返回 {name: content}。"""
     mn = home / ".fusion" / "multi-node"
     mn.mkdir(parents=True, exist_ok=True)
     (mn / "tls").mkdir(exist_ok=True)

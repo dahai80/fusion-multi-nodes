@@ -1,4 +1,4 @@
-"""KV cache sharing coverage tests."""
+# KV cache sharing coverage tests.
 
 import asyncio
 import time
@@ -472,9 +472,8 @@ class TestKVCacheWarmScheduler:
         assert s._running is False
 
 
+# P1-22 (审计 §6.6): 跨节点 KV 调用异常分类 + 连续失败计数 + 阈值告警。
 class TestKVSharingManagerP122:
-    """P1-22 (审计 §6.6): 跨节点 KV 调用异常分类 + 连续失败计数 + 阈值告警。"""
-
     @pytest.mark.asyncio
     async def test_lookup_remote_500_increments_fail_count(self):
         m = KVSharingManager(enable_compression=False)

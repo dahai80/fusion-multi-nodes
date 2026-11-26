@@ -1,13 +1,12 @@
-"""M9-01 分布式 KV Store — 内存 + 磁盘持久化的键值存储。
-
-支持：
-- PUT/GET/DELETE 基本操作
-- 分区 (partition) 隔离
-- TTL 自动过期
-- 快照/恢复 (M9-03)
-- 与 ShardReplicator 集成实现多副本
-- M9-04 FMP 跨节点读写
-"""
+# M9-01 分布式 KV Store — 内存 + 磁盘持久化的键值存储。
+#
+# 支持：
+# - PUT/GET/DELETE 基本操作
+# - 分区 (partition) 隔离
+# - TTL 自动过期
+# - 快照/恢复 (M9-03)
+# - 与 ShardReplicator 集成实现多副本
+# - M9-04 FMP 跨节点读写
 
 from __future__ import annotations
 
@@ -23,10 +22,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# KV 条目。
 @dataclass
 class KVEntry:
-    """KV 条目。"""
-
     key: str
     value: Any
     partition: str = "default"
@@ -42,10 +40,9 @@ class KVEntry:
         return time.time() - self.updated_at > self.ttl_seconds
 
 
+# 快照条目。
 @dataclass
 class KVSnapEntry:
-    """快照条目。"""
-
     key: str
     value: Any
     partition: str
@@ -53,9 +50,8 @@ class KVSnapEntry:
     version: int
 
 
+# 分布式 KV Store — 内存 + 磁盘持久化。
 class DistributedKVStore:
-    """分布式 KV Store — 内存 + 磁盘持久化。"""
-
     def __init__(
         self,
         data_dir: str = "",
@@ -237,14 +233,14 @@ class DistributedKVStore:
 
     # ── M9-04 FMP 跨节点读写 ──
 
+    # 设置 FMPInterface，启用跨节点 KV 操作。
     def set_fmp_interface(self, fmp_interface: Any, local_node_id: str) -> None:
-        """设置 FMPInterface，启用跨节点 KV 操作。"""
         self._fmp_interface = fmp_interface
         self._local_node_id = local_node_id
         logger.info(f"DistributedKVStore FMP 已启用: local_node={local_node_id}")
 
+    # M9-04 通过 FMP 从远程节点读取 KV 值。
     async def get_remote(self, key: str, node_id: str, partition: str = "default", timeout: float = 5.0) -> Any:
-        """M9-04 通过 FMP 从远程节点读取 KV 值。"""
         if not self._fmp_interface:
             logger.error("FMP 未设置，无法远程读取")
             return None
@@ -276,6 +272,7 @@ class DistributedKVStore:
         finally:
             self._pending_requests.pop(request_id, None)
 
+    # M9-04 通过 FMP 向远程节点写入 KV 值。
     async def put_remote(
         self,
         key: str,
@@ -285,7 +282,6 @@ class DistributedKVStore:
         ttl_seconds: float = 0.0,
         timeout: float = 5.0,
     ) -> bool:
-        """M9-04 通过 FMP 向远程节点写入 KV 值。"""
         if not self._fmp_interface:
             logger.error("FMP 未设置，无法远程写入")
             return False
@@ -323,8 +319,8 @@ class DistributedKVStore:
         finally:
             self._pending_requests.pop(request_id, None)
 
+    # 处理 KV_GET_RESP / KV_PUT_ACK 响应 — 匹配 pending request 并 resolve future。
     def handle_kv_response(self, msg: Any) -> None:
-        """处理 KV_GET_RESP / KV_PUT_ACK 响应 — 匹配 pending request 并 resolve future。"""
         try:
             payload = msg.business.payload_as_json()
             request_id = payload.get("request_id", "")

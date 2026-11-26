@@ -1,4 +1,4 @@
-"""Distributed MLX Bridge 测试。"""
+# Distributed MLX Bridge 测试。
 
 from unittest.mock import AsyncMock, MagicMock, patch
 

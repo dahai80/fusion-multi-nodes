@@ -1,11 +1,10 @@
+# 容器集群运维小工具 — 审批/查询/重置节点。压测前用。
+#
+# 用法:
+# python scripts/cluster_ops.py approve-all --master 127.0.0.1:11452 --token <T>
+# python scripts/cluster_ops.py status --master 127.0.0.1:11452 --token <T>
+# python scripts/cluster_ops.py unban-all --master 127.0.0.1:11452 --token <T>
 #!/usr/bin/env python3
-"""容器集群运维小工具 — 审批/查询/重置节点。压测前用。
-
-用法:
-    python scripts/cluster_ops.py approve-all --master 127.0.0.1:11452 --token <T>
-    python scripts/cluster_ops.py status --master 127.0.0.1:11452 --token <T>
-    python scripts/cluster_ops.py unban-all --master 127.0.0.1:11452 --token <T>
-"""
 
 from __future__ import annotations
 

@@ -1,11 +1,10 @@
-"""#84 集群侧共享会话存储 + sandbox 委派头 — 单元 + HTTP API 覆盖。
-
-- ClusterSessionStore: put/get/list/delete/fork + id 路径段校验 + list 剥离 messages。
-- /api/v1/session-store/*: CRUD/fork + Bearer 鉴权 + 用户 RBAC (VIEWER 只读)。
-- X-Fusion-Target-Node: 硬绑定校验 (未注册 404 / 离线 409 / draining 409 / 非法段 400 /
-  pipeline 400 / exclude 冲突 400), 派发只落 pinned 节点。
-- X-Fusion-Run-Id: run→task 索引 + GET /api/v1/runs/{run_id} 查询。
-"""
+# #84 集群侧共享会话存储 + sandbox 委派头 — 单元 + HTTP API 覆盖。
+#
+# - ClusterSessionStore: put/get/list/delete/fork + id 路径段校验 + list 剥离 messages。
+# - /api/v1/session-store/*: CRUD/fork + Bearer 鉴权 + 用户 RBAC (VIEWER 只读)。
+# - X-Fusion-Target-Node: 硬绑定校验 (未注册 404 / 离线 409 / draining 409 / 非法段 400 /
+# pipeline 400 / exclude 冲突 400), 派发只落 pinned 节点。
+# - X-Fusion-Run-Id: run→task 索引 + GET /api/v1/runs/{run_id} 查询。
 
 from __future__ import annotations
 

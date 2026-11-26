@@ -1,4 +1,4 @@
-"""#65: pipeline 模式门控 — pipeline_enabled=False 早拒; shard 角色过滤; 404 → upstream_missing → FAILED。"""
+# #65: pipeline 模式门控 — pipeline_enabled=False 早拒; shard 角色过滤; 404 → upstream_missing → FAILED。
 
 from __future__ import annotations
 

@@ -1,15 +1,14 @@
-"""#76 epoch/leader_id 暴露测试。
-
-验证:
-(a) 单 Master: /api/nodes + /api/cluster/stats + /api/v1/nodes + /api/v1/cluster/stats
-    返回 epoch=0, leader_id="", is_leader=True。
-(b) HA standby leader: setup_election 后 epoch 来自 current_term, leader_id=已当选 leader。
-(c) 每节点条目带 epoch/leader_id 与集群级同值。
-(d) /api/leader/credentials 返回 epoch/leader_id/leader_token/is_leader/enforce。
-(e) current_leader_id 单 Master 返 "" (无 HA 节点 id)。
-
-走 ASGITransport (无真 TCP), Bearer 鉴权携带 TEST_TOKEN。
-"""
+# #76 epoch/leader_id 暴露测试。
+#
+# 验证:
+# (a) 单 Master: /api/nodes + /api/cluster/stats + /api/v1/nodes + /api/v1/cluster/stats
+# 返回 epoch=0, leader_id="", is_leader=True。
+# (b) HA standby leader: setup_election 后 epoch 来自 current_term, leader_id=已当选 leader。
+# (c) 每节点条目带 epoch/leader_id 与集群级同值。
+# (d) /api/leader/credentials 返回 epoch/leader_id/leader_token/is_leader/enforce。
+# (e) current_leader_id 单 Master 返 "" (无 HA 节点 id)。
+#
+# 走 ASGITransport (无真 TCP), Bearer 鉴权携带 TEST_TOKEN。
 
 from __future__ import annotations
 

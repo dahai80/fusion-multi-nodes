@@ -1,4 +1,4 @@
-"""Node Agent coverage tests."""
+# Node Agent coverage tests.
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -340,9 +340,8 @@ class TestNodeAgentExecuteTask:
         assert agent._anon_task_seq == 3
 
 
+# M6-02 WorkerSandbox 接 NodeAgent 执行路径 (AR审计 #24 硬伤5)。
 class TestNodeAgentSandboxGate:
-    """M6-02 WorkerSandbox 接 NodeAgent 执行路径 (AR审计 #24 硬伤5)。"""
-
     @pytest.mark.asyncio
     async def test_no_sandbox_passthrough(self):
         # 无沙箱 = 原行为, 不 gate

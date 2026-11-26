@@ -1,4 +1,4 @@
-"""#64: fetch_mlx_memory 显存采集测试 — mock httpx, 验解析 + 容错。"""
+# #64: fetch_mlx_memory 显存采集测试 — mock httpx, 验解析 + 容错。
 
 from __future__ import annotations
 

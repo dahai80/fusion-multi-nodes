@@ -1,4 +1,4 @@
-"""Agent FastAPI 服务层 — 节点任务执行与 KV 缓存 HTTP API。"""
+# Agent FastAPI 服务层 — 节点任务执行与 KV 缓存 HTTP API。
 
 from __future__ import annotations
 
@@ -45,9 +45,8 @@ PIPELINE_EXTRA_KEYS = {
 TEST_EXTRA_KEYS = {"command", "cwd", "env", "timeout"}
 
 
+# 简易内存速率限制器 — 按 IP 限制请求频率。
 class InMemoryRateLimiter:
-    """简易内存速率限制器 — 按 IP 限制请求频率。"""
-
     _MAX_IP_ENTRIES = 10000
     _CLEANUP_INTERVAL = 100
     _TIME_CLEANUP_INTERVAL = 60.0
@@ -89,9 +88,8 @@ class InMemoryRateLimiter:
                 del self._counts[k]
 
 
+# 全局限流中间件 — 所有 API 端点统一限流。
 class RateLimitMiddleware:
-    """全局限流中间件 — 所有 API 端点统一限流。"""
-
     EXEMPT_PATHS = {
         "/api/health",
         "/docs",
@@ -154,9 +152,8 @@ class ExecuteRequest(BaseModel):
     leader_id: str = ""
 
 
+# #82 常驻节点定时任务注册体 — 字段对齐 ScheduleSpec, 校验在 ScheduleHost.register。
 class ScheduleRegisterRequest(BaseModel):
-    """#82 常驻节点定时任务注册体 — 字段对齐 ScheduleSpec, 校验在 ScheduleHost.register。"""
-
     kind: str = "interval"
     every_seconds: int = 0
     at: str = ""
@@ -226,18 +223,16 @@ class HealthResponse(BaseModel):
 # agent 零 import master — master 反向 import 这两个模型不引入循环。
 
 
+# 原语 1 — 审计链段响应 (master + agent 同形)。guard 拉取后验链。
 class V1AuditChainResponse(BaseModel):
-    """原语 1 — 审计链段响应 (master + agent 同形)。guard 拉取后验链。"""
-
     node_id: str
     records: list[dict[str, Any]]
     fetched_at: str
     truncated: bool = False
 
 
+# 原语 2 — 纪元广播接收端 (master 接 standby 广播 / agent 接 master 广播)。
 class RuleEpochReceiveRequest(BaseModel):
-    """原语 2 — 纪元广播接收端 (master 接 standby 广播 / agent 接 master 广播)。"""
-
     epoch: int
     source: str = ""
 
@@ -245,9 +240,8 @@ class RuleEpochReceiveRequest(BaseModel):
 # ── Agent Server ──
 
 
+# 节点 Agent HTTP 服务。
 class AgentServer:
-    """节点 Agent HTTP 服务。"""
-
     def __init__(
         self,
         agent: NodeAgent | None = None,
@@ -303,13 +297,13 @@ class AgentServer:
     def _setup_routes(self):
         app = self.app
 
+        # 细粒度权限校验 — 从 X-Node-Id/X-Node-Role header 取调用方身份。
+        #
+        # 强制模式 (默认 / mTLS 开): 缺 X-Node-Id → 403; 角色无权 → 403。
+        # 兼容模式 (FUSION_PERMISSION_ENFORCE=0): 缺 header → 放行 (现有 http 测试/CLI 无 header);
+        # 有 header 则按角色校验 (master 派发带 X-Node-Id=master)。
+        #
         async def _check_permission(request: Request, path: str, method: str = "POST") -> None:
-            """细粒度权限校验 — 从 X-Node-Id/X-Node-Role header 取调用方身份。
-
-            强制模式 (默认 / mTLS 开): 缺 X-Node-Id → 403; 角色无权 → 403。
-            兼容模式 (FUSION_PERMISSION_ENFORCE=0): 缺 header → 放行 (现有 http 测试/CLI 无 header);
-              有 header 则按角色校验 (master 派发带 X-Node-Id=master)。
-            """
             if not self._permission_enforce:
                 node_id = request.headers.get("X-Node-Id", "")
                 if not node_id:

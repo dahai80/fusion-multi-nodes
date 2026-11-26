@@ -1,4 +1,4 @@
-"""FMP Router 测试。"""
+# FMP Router 测试。
 
 import time
 from unittest.mock import AsyncMock, MagicMock

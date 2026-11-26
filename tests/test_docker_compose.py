@@ -1,7 +1,6 @@
-"""P2-13 docker-compose 资源限制校验 — 解析 YAML 断言两服务含 mem_limit/cpus + deploy.resources.limits。
-
-不依赖 docker daemon (CI 无 docker); 纯 YAML 解析。yaml 为传递依赖, 缺则 skip。
-"""
+# P2-13 docker-compose 资源限制校验 — 解析 YAML 断言两服务含 mem_limit/cpus + deploy.resources.limits。
+#
+# 不依赖 docker daemon (CI 无 docker); 纯 YAML 解析。yaml 为传递依赖, 缺则 skip。
 
 from __future__ import annotations
 

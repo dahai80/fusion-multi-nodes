@@ -1,4 +1,4 @@
-"""共享密钥 Bearer Token 认证中间件 + SSRF 防护。"""
+# 共享密钥 Bearer Token 认证中间件 + SSRF 防护。
 
 from __future__ import annotations
 
@@ -62,11 +62,11 @@ def save_token(token: str, token_path: str = DEFAULT_TOKEN_PATH) -> None:
     logger.debug(f"集群密钥已保存: {token_path}")
 
 
+# 路径段安全校验 — 防 ../ 路径穿越与非法字符。
+#
+# 仅允许字母数字 _ - 点，禁分隔符与穿越序列。
+#
 def is_safe_path_segment(value: str) -> bool:
-    """路径段安全校验 — 防 ../ 路径穿越与非法字符。
-
-    仅允许字母数字 _ - 点，禁分隔符与穿越序列。
-    """
     if not value or len(value) > 128:
         return False
     if "/" in value or "\\" in value or "\x00" in value:
@@ -80,11 +80,11 @@ def is_safe_path_segment(value: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9_.\-]+$", value))
 
 
+# 出站对端主机 SSRF 防护 — 拒绝环回/链路本地/未指定/多播 + 元数据主机名。
+#
+# 注意: 允许私网 (RFC1918)，集群节点跑在局域网。
+#
 def is_safe_peer_host(host: str) -> bool:
-    """出站对端主机 SSRF 防护 — 拒绝环回/链路本地/未指定/多播 + 元数据主机名。
-
-    注意: 允许私网 (RFC1918)，集群节点跑在局域网。
-    """
     if not host or not isinstance(host, str):
         return False
     host = host.strip()
@@ -130,27 +130,27 @@ def is_safe_peer_host(host: str) -> bool:
     return True
 
 
+# node_id 路径段安全校验（防路径穿越）。
+#
+# 注: 本函数只做路径段过滤，不做 SSRF 主机校验。
+# SSRF 校验请用 is_safe_peer_host。保留旧名向后兼容。
+#
 def validate_node_id(node_id: str) -> bool:
-    """node_id 路径段安全校验（防路径穿越）。
-
-    注: 本函数只做路径段过滤，不做 SSRF 主机校验。
-    SSRF 校验请用 is_safe_peer_host。保留旧名向后兼容。
-    """
     if not is_safe_path_segment(node_id):
         logger.warning(f"node_id 不合法: {node_id!r}")
         return False
     return True
 
 
+# 节点注册期主机校验 — 比 is_safe_peer_host 宽松: 允许 loopback + 私网 (单机/可信 LAN 部署)。
+#
+# 拒绝: 元数据主机名、链路本地、未指定、多播、保留段、携带凭据/路径的 URL 片段。
+# register_node 调用; 出站派发/cancel/KV 仍用更严的 is_safe_peer_host (拒 loopback)。
+#
+# H1 (AR 审计 #24): 注册时不校验 ip 致恶意节点入库, 出站路径才拦 — 入口补一道,
+# 挡掉云元数据/链路本地等明显恶意, 同时不破坏单机 127.0.0.1 + ASGI 测试。
+#
 def is_registerable_host(host: str) -> bool:
-    """节点注册期主机校验 — 比 is_safe_peer_host 宽松: 允许 loopback + 私网 (单机/可信 LAN 部署)。
-
-    拒绝: 元数据主机名、链路本地、未指定、多播、保留段、携带凭据/路径的 URL 片段。
-    register_node 调用; 出站派发/cancel/KV 仍用更严的 is_safe_peer_host (拒 loopback)。
-
-    H1 (AR 审计 #24): 注册时不校验 ip 致恶意节点入库, 出站路径才拦 — 入口补一道,
-    挡掉云元数据/链路本地等明显恶意, 同时不破坏单机 127.0.0.1 + ASGI 测试。
-    """
     if not host or not isinstance(host, str):
         return False
     host = host.strip()
@@ -197,8 +197,8 @@ def sanitize_node_url_part(node_id: str) -> str:
     return node_id
 
 
+# 构建出站 URL — 对端主机走 SSRF 校验，path 走基础过滤。
 def build_safe_url(scheme: str, host: str, port: int, path: str) -> str:
-    """构建出站 URL — 对端主机走 SSRF 校验，path 走基础过滤。"""
     if not is_safe_peer_host(host):
         raise ValueError(f"不安全的对端主机: {host!r}")
     if not re.match(r"^/[a-zA-Z0-9._\-/]*$", path):
@@ -206,16 +206,16 @@ def build_safe_url(scheme: str, host: str, port: int, path: str) -> str:
     return f"{scheme}://{host}:{int(port)}{path}"
 
 
+# 轻量出站主机校验 — 不做 DNS 解析 (节点以 node_id 作 host 时不可解析, 仍合法)。
+#
+# 拒绝: 元数据主机名、链路本地、未指定、多播、携带凭据/路径的 URL 片段、内嵌 IP 表示受限段。
+# 允许: loopback、私网、合法域名/标识符 (含不可解析 node_id)。
+#
+# 用途: KV 跨节点路径 (lookup_remote/transfer/warm) — node_id 直接当 host,
+# is_safe_peer_host 会 DNS 解析拒不可解析名 → 误杀测试/节点标识。此函数只挡
+# 明确恶意 (H3 AR #24), 不要求可解析。
+#
 def is_safe_outbound_host(host: str) -> bool:
-    """轻量出站主机校验 — 不做 DNS 解析 (节点以 node_id 作 host 时不可解析, 仍合法)。
-
-    拒绝: 元数据主机名、链路本地、未指定、多播、携带凭据/路径的 URL 片段、内嵌 IP 表示受限段。
-    允许: loopback、私网、合法域名/标识符 (含不可解析 node_id)。
-
-    用途: KV 跨节点路径 (lookup_remote/transfer/warm) — node_id 直接当 host,
-    is_safe_peer_host 会 DNS 解析拒不可解析名 → 误杀测试/节点标识。此函数只挡
-    明确恶意 (H3 AR #24), 不要求可解析。
-    """
     if not host or not isinstance(host, str):
         return False
     host = host.strip()
@@ -243,20 +243,19 @@ def is_safe_outbound_host(host: str) -> bool:
     return bool(re.match(r"^[a-zA-Z0-9._\-]+$", host))
 
 
+# 粗判 JWT — 三段点分 (header.payload.signature), 非 fmu_ 前缀。签名校验交 jwt_verifier。
 def _looks_like_jwt(token: str) -> bool:
-    """粗判 JWT — 三段点分 (header.payload.signature), 非 fmu_ 前缀。签名校验交 jwt_verifier。"""
     return token.count(".") == 2 and not token.startswith("fmu_")
 
 
+# Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。
+#
+# GAP-8 (Phase F1): 双令牌分流。user_store 注入后:
+# - fmu_ 前缀 → 用户令牌路径: UserStore.validate → 注入 scope["user_id"]/["user_role"]。
+# - 其余 → cluster_token 路径 (secrets.compare_digest, O(1), 不变)。
+# user_store=None (单租户零配置) → 纯 cluster_token, 字节级等同旧行为。
+#
 class BearerAuthMiddleware:
-    """Bearer Token 认证中间件 — 纯 ASI 实现，避免 BaseHTTPMiddleware 问题。
-
-    GAP-8 (Phase F1): 双令牌分流。user_store 注入后:
-    - fmu_ 前缀 → 用户令牌路径: UserStore.validate → 注入 scope["user_id"]/["user_role"]。
-    - 其余 → cluster_token 路径 (secrets.compare_digest, O(1), 不变)。
-    user_store=None (单租户零配置) → 纯 cluster_token, 字节级等同旧行为。
-    """
-
     EXEMPT_PATHS = {
         "/api/health",
         "/api/health/deep",

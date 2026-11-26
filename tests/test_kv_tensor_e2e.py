@@ -1,11 +1,10 @@
-"""GAP-7 (#33) S3 — KV 张量跨节点传输 E2E (合成后端, 无真 fusion-mlx)。
-
-真链: master ClusterMaster.sync_kv_cache 编排 → 两 AgentServer 真 ASGI →
-源 /api/kv/export (含张量) → 目标 /api/kv/import (store_local 预算) → 返 True。
-验证张量字节经 HTTP 跨节点完整 round-trip (满足 #33 验收)。
-
-env-gated 真张量测试 (FUSION_E2E_KV_TENSOR=1) 待上游 fusion-mlx issue #650 落地激活。
-"""
+# GAP-7 (#33) S3 — KV 张量跨节点传输 E2E (合成后端, 无真 fusion-mlx)。
+#
+# 真链: master ClusterMaster.sync_kv_cache 编排 → 两 AgentServer 真 ASGI →
+# 源 /api/kv/export (含张量) → 目标 /api/kv/import (store_local 预算) → 返 True。
+# 验证张量字节经 HTTP 跨节点完整 round-trip (满足 #33 验收)。
+#
+# env-gated 真张量测试 (FUSION_E2E_KV_TENSOR=1) 待上游 fusion-mlx issue #650 落地激活。
 
 from __future__ import annotations
 

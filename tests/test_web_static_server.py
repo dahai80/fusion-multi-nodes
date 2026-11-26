@@ -1,7 +1,6 @@
-"""#95: web/serve_dist.py 静态服务语义回归。
-
-静态文件 + /api 反代 token 注入 + 502 上游不可达。stdlib Stub server 模拟 master。
-"""
+# #95: web/serve_dist.py 静态服务语义回归。
+#
+# 静态文件 + /api 反代 token 注入 + 502 上游不可达。stdlib Stub server 模拟 master。
 
 import http.server
 import importlib.util

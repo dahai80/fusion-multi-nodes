@@ -1,9 +1,8 @@
-"""Task Sharding — 任务分片类型、自动分片算法、结果合并。
-
-M5-01: ShardingType 枚举 (inference/ast/vectorize)
-M5-02: 自动分片算法 (by file/document/batch)
-M5-05: 分片结果合并/聚合
-"""
+# Task Sharding — 任务分片类型、自动分片算法、结果合并。
+#
+# M5-01: ShardingType 枚举 (inference/ast/vectorize)
+# M5-02: 自动分片算法 (by file/document/batch)
+# M5-05: 分片结果合并/聚合
 
 from __future__ import annotations
 
@@ -28,10 +27,9 @@ class ShardingStrategy(Enum):
     BY_BATCH = "by_batch"
 
 
+# 任务分片。
 @dataclass
 class TaskShard:
-    """任务分片。"""
-
     shard_id: str
     parent_task_id: str
     sharding_type: ShardingType
@@ -59,10 +57,9 @@ class TaskShard:
             self.created_at = time.time()
 
 
+# 分片执行结果。
 @dataclass
 class ShardResult:
-    """分片执行结果。"""
-
     shard_id: str
     success: bool
     data: dict[str, Any] = field(default_factory=dict)
@@ -70,10 +67,9 @@ class ShardResult:
     duration_ms: float = 0.0
 
 
+# 合并后的最终结果。
 @dataclass
 class MergedResult:
-    """合并后的最终结果。"""
-
     task_id: str
     sharding_type: ShardingType
     total_shards: int
@@ -98,12 +94,11 @@ class MergedResult:
         return self.success_count / self.total_shards
 
 
+# 任务分片管理器。
+#
+# 支持三种分片类型和三种分片策略，自动根据任务特征选择分片方式。
+#
 class TaskSharder:
-    """任务分片管理器。
-
-    支持三种分片类型和三种分片策略，自动根据任务特征选择分片方式。
-    """
-
     DEFAULT_STRATEGIES: dict[ShardingType, ShardingStrategy] = {
         ShardingType.INFERENCE: ShardingStrategy.BY_BATCH,
         ShardingType.AST: ShardingStrategy.BY_FILE,
@@ -126,6 +121,7 @@ class TaskSharder:
         self._shards: dict[str, list[TaskShard]] = {}
         logger.info(f"TaskSharder 初始化: shard_size={default_shard_size}, max={max_shards}")
 
+    # 根据策略创建分片。
     def create_shards(
         self,
         task_id: str,
@@ -134,7 +130,6 @@ class TaskSharder:
         strategy: ShardingStrategy | None = None,
         shard_size: int | None = None,
     ) -> list[TaskShard]:
-        """根据策略创建分片。"""
         if not items:
             logger.warning(f"分片输入为空: {task_id}")
             return []
@@ -168,13 +163,13 @@ class TaskSharder:
         logger.info(f"任务分片: {task_id} → {total} 分片 (type={sharding_type.value}, strategy={strat.value})")
         return shards
 
+    # 按策略分组。
     def _group_items(
         self,
         items: list[dict[str, Any]],
         strategy: ShardingStrategy,
         shard_size: int,
     ) -> list[list[dict[str, Any]]]:
-        """按策略分组。"""
         if strategy == ShardingStrategy.BY_FILE:
             return self._group_by_key(items, "file_path", shard_size)
         elif strategy == ShardingStrategy.BY_DOCUMENT:
@@ -182,13 +177,13 @@ class TaskSharder:
         else:
             return self._group_by_batch(items, shard_size)
 
+    # 按键值分组。
     def _group_by_key(
         self,
         items: list[dict[str, Any]],
         key: str,
         shard_size: int,
     ) -> list[list[dict[str, Any]]]:
-        """按键值分组。"""
         key_groups: dict[str, list[dict[str, Any]]] = {}
         for item in items:
             k = item.get(key, "__default__")
@@ -206,12 +201,12 @@ class TaskSharder:
             result.append(batch)
         return result
 
+    # 按固定大小分批。
     def _group_by_batch(
         self,
         items: list[dict[str, Any]],
         shard_size: int,
     ) -> list[list[dict[str, Any]]]:
-        """按固定大小分批。"""
         result = []
         for i in range(0, len(items), shard_size):
             result.append(items[i : i + shard_size])
@@ -227,8 +222,8 @@ class TaskSharder:
                     return s
         return None
 
+    # 更新分片状态。
     def update_shard_status(self, shard_id: str, status: str, result: dict[str, Any] | None = None) -> bool:
-        """更新分片状态。"""
         shard = self.get_shard(shard_id)
         if not shard:
             return False
@@ -241,17 +236,16 @@ class TaskSharder:
         return True
 
 
+# 分片结果合并器。
 class ShardMerger:
-    """分片结果合并器。"""
-
     MERGE_STRATEGIES: dict[ShardingType, str] = {
         ShardingType.INFERENCE: "concat_results",
         ShardingType.AST: "merge_trees",
         ShardingType.VECTORIZE: "merge_embeddings",
     }
 
+    # 合并分片结果。
     def merge(self, task_id: str, shards: list[TaskShard]) -> MergedResult:
-        """合并分片结果。"""
         if not shards:
             return MergedResult(
                 task_id=task_id,
@@ -293,8 +287,8 @@ class ShardMerger:
         )
         return result
 
+    # 应用合并策略。
     def _apply_merge(self, all_data: list[dict[str, Any]], strategy: str) -> dict[str, Any]:
-        """应用合并策略。"""
         if strategy == "merge_trees":
             return self._merge_ast_trees(all_data)
         elif strategy == "merge_embeddings":
@@ -302,8 +296,8 @@ class ShardMerger:
         else:
             return self._concat_results(all_data)
 
+    # 推理结果拼接。
     def _concat_results(self, all_data: list[dict[str, Any]]) -> dict[str, Any]:
-        """推理结果拼接。"""
         results = []
         for d in all_data:
             if "results" in d:
@@ -314,8 +308,8 @@ class ShardMerger:
                 results.append(d)
         return {"results": results, "count": len(results)}
 
+    # AST 树合并。
     def _merge_ast_trees(self, all_data: list[dict[str, Any]]) -> dict[str, Any]:
-        """AST 树合并。"""
         trees = []
         for d in all_data:
             if "tree" in d:
@@ -326,8 +320,8 @@ class ShardMerger:
                 trees.append(d["ast"])
         return {"trees": trees, "file_count": len(trees)}
 
+    # 向量化结果合并。
     def _merge_embeddings(self, all_data: list[dict[str, Any]]) -> dict[str, Any]:
-        """向量化结果合并。"""
         embeddings = []
         total_tokens = 0
         for d in all_data:

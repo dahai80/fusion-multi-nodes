@@ -1,4 +1,4 @@
-"""Fusion-Multi-Node 配置管理。"""
+# Fusion-Multi-Node 配置管理。
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from ..agent import AgentConfig
 logger = logging.getLogger(__name__)
 
 
+# 配置项类型/范围校验失败。
 class ConfigValidationError(ValueError):
-    """配置项类型/范围校验失败。"""
+    pass
 
 
 # 已知配置键 → 校验函数。set() 对已知键强制类型/范围, 对未知键保持宽松 (兼容测试/扩展)。
@@ -108,9 +109,8 @@ _FIELD_VALIDATORS: dict[str, Any] = {
 SCHEMA_VERSION = 1
 
 
+# 集群全局配置管理。
 class ClusterConfig:
-    """集群全局配置管理。"""
-
     DEFAULT_CONFIG = {
         "schema_version": SCHEMA_VERSION,
         "cluster": {
@@ -253,8 +253,8 @@ class ClusterConfig:
         "mlx.fusion_mlx_port": 11432,
     }
 
+    # 加载配置。
     def load(self) -> None:
-        """加载配置。"""
         path = Path(self.config_path)
         if path.exists():
             try:
@@ -277,8 +277,8 @@ class ClusterConfig:
             self.save()
             logger.warning("配置已自动迁移 v0.6.5 旧端口到当前默认（%s）", self.config_path)
 
+    # E4: 校验所有已知键, 脏值回退 DEFAULT_CONFIG 对应默认。返回是否发生修复。
     def _validate_and_repair(self) -> bool:
-        """E4: 校验所有已知键, 脏值回退 DEFAULT_CONFIG 对应默认。返回是否发生修复。"""
         repaired = False
         for key, validator in _FIELD_VALIDATORS.items():
             cur = self.get(key)
@@ -309,8 +309,8 @@ class ClusterConfig:
             data = data[part]
         data[parts[-1]] = value
 
+    # 检测并迁移旧端口；清理 cluster 下的测试残留字段。返回是否发生变更。
     def _migrate_stale_ports(self) -> bool:
-        """检测并迁移旧端口；清理 cluster 下的测试残留字段。返回是否发生变更。"""
         changed = False
         cluster = self._data.get("cluster")
         if isinstance(cluster, dict):
@@ -336,8 +336,8 @@ class ClusterConfig:
                     changed = True
         return changed
 
+    # 保存配置 — 原子写: temp + os.replace, 防崩溃中途截断。
     def save(self) -> None:
-        """保存配置 — 原子写: temp + os.replace, 防崩溃中途截断。"""
         path = Path(self.config_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -355,8 +355,8 @@ class ClusterConfig:
             pass
         os.replace(tmp, path)
 
+    # 获取配置项。
     def get(self, key: str, default: Any = None) -> Any:
-        """获取配置项。"""
         parts = key.split(".")
         data = self._data
         for part in parts:
@@ -366,19 +366,19 @@ class ClusterConfig:
                 return default
         return data if data is not None else default
 
+    # E4: 已知键强制类型/范围校验; 未知键宽松放行 (兼容扩展/测试)。返回校验后值。
     def _validate_field(self, key: str, value: Any) -> Any:
-        """E4: 已知键强制类型/范围校验; 未知键宽松放行 (兼容扩展/测试)。返回校验后值。"""
         validator = _FIELD_VALIDATORS.get(key)
         if validator is None:
             return value
         return validator(value)
 
+    # 设置配置项 (单键, 写后即落盘)。
+    #
+    # 已知键经 _FIELD_VALIDATORS 校验, 脏值抛 ConfigValidationError 不落盘;
+    # 未知键宽松放行。批量更新用 set_many (单次落盘, 避免写放大)。
+    #
     def set(self, key: str, value: Any) -> None:
-        """设置配置项 (单键, 写后即落盘)。
-
-        已知键经 _FIELD_VALIDATORS 校验, 脏值抛 ConfigValidationError 不落盘;
-        未知键宽松放行。批量更新用 set_many (单次落盘, 避免写放大)。
-        """
         value = self._validate_field(key, value)
         parts = key.split(".")
         data = self._data
@@ -389,8 +389,8 @@ class ClusterConfig:
         data[parts[-1]] = value
         self.save()
 
+    # E4: 批量设置 (校验全部键后单次落盘, 避免高频 set 的写放大 + tmp 文件竞争)。
     def set_many(self, items: dict[str, Any]) -> None:
-        """E4: 批量设置 (校验全部键后单次落盘, 避免高频 set 的写放大 + tmp 文件竞争)。"""
         validated: dict[str, Any] = {}
         for key, value in items.items():
             validated[key] = self._validate_field(key, value)
@@ -404,8 +404,8 @@ class ClusterConfig:
             data[parts[-1]] = value
         self.save()
 
+    # 递归合并字典（深拷贝 base，避免共享嵌套引用污染 DEFAULT_CONFIG）。
     def _merge(self, base: dict, override: dict) -> dict:
-        """递归合并字典（深拷贝 base，避免共享嵌套引用污染 DEFAULT_CONFIG）。"""
         result = copy.deepcopy(base)
         for key, value in override.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -414,8 +414,8 @@ class ClusterConfig:
                 result[key] = value
         return result
 
+    # 转换为 NodeAgent 配置。
     def to_node_agent_config(self) -> AgentConfig:
-        """转换为 NodeAgent 配置。"""
         return AgentConfig(
             master_host=self.get("cluster.master_host"),
             master_port=self.get("cluster.master_port"),
@@ -428,11 +428,11 @@ class ClusterConfig:
             node_role=self.get("node.role", "general"),
         )
 
+    # P4 HA 选举配置 — 供 ClusterMaster.start(ha_config=...) 消费。
+    #
+    # #63: ha.mode — "standby"(选举单 leader) | "active-active"(双主均派发, 无选举)。
+    #
     def get_ha_config(self) -> dict[str, Any]:
-        """P4 HA 选举配置 — 供 ClusterMaster.start(ha_config=...) 消费。
-
-        #63: ha.mode — "standby"(选举单 leader) | "active-active"(双主均派发, 无选举)。
-        """
         return {
             "enabled": bool(self.get("ha.enabled", False)),
             "node_id": self.get("ha.node_id", ""),
@@ -442,8 +442,8 @@ class ClusterConfig:
             "state_sync_interval": float(self.get("ha.state_sync_interval", 2.0)),
         }
 
+    # v0.14.0 item 4: mTLS 配置段 — 供 mtls.configure_from_config() 消费。
     def get_mtls_config(self) -> dict[str, Any]:
-        """v0.14.0 item 4: mTLS 配置段 — 供 mtls.configure_from_config() 消费。"""
         return {
             "enabled": bool(self.get("security.mtls.enabled", False)),
             "ca_cert": self.get("security.mtls.ca_cert", ""),
@@ -453,8 +453,8 @@ class ClusterConfig:
             "node_role": self.get("security.mtls.node_role", "master"),
         }
 
+    # v0.14.0 item 3: 告警 webhook 配置段 — 供 _register_alert_webhook 消费。
     def get_alert_webhook_config(self) -> dict[str, Any]:
-        """v0.14.0 item 3: 告警 webhook 配置段 — 供 _register_alert_webhook 消费。"""
         return {
             "webhook_url": self.get("observability.alerts.webhook_url", ""),
             "webhook_timeout": float(self.get("observability.alerts.webhook_timeout", 10.0)),

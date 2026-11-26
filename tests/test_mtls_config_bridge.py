@@ -1,12 +1,11 @@
-"""v0.14.0 item 4 — mTLS config 段 → env 桥 + lazy is_enabled 测试。
-
-覆盖:
-- configure_from_config 把 security.mtls 段写回 env (enabled + 证书路径)。
-- env 优先: 已设的非空 env 不被 config 覆盖 (兼容旧 env-only 部署)。
-- is_enabled lazy: config 写 env 后即时反映 (无 import-time 缓存问题)。
-- fail-closed: enabled=True 但证书路径不全 → server_ssl_kwargs raise (不回退明文)。
-- 空 config 段 / 无 get_mtls_config → no-op 不抛。
-"""
+# v0.14.0 item 4 — mTLS config 段 → env 桥 + lazy is_enabled 测试。
+#
+# 覆盖:
+# - configure_from_config 把 security.mtls 段写回 env (enabled + 证书路径)。
+# - env 优先: 已设的非空 env 不被 config 覆盖 (兼容旧 env-only 部署)。
+# - is_enabled lazy: config 写 env 后即时反映 (无 import-time 缓存问题)。
+# - fail-closed: enabled=True 但证书路径不全 → server_ssl_kwargs raise (不回退明文)。
+# - 空 config 段 / 无 get_mtls_config → no-op 不抛。
 
 from __future__ import annotations
 
@@ -46,8 +45,8 @@ def _snapshot_mtls_env():
                 os.environ[k] = v
 
 
+# 构造 ClusterConfig 带 security.mtls 覆盖 (写到 tmp config.json)。
 def _cfg(**mtls_overrides):
-    """构造 ClusterConfig 带 security.mtls 覆盖 (写到 tmp config.json)。"""
     cfg = ClusterConfig()
     for k, v in mtls_overrides.items():
         cfg.set(f"security.mtls.{k}", v)

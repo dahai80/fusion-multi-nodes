@@ -1,12 +1,11 @@
-"""v0.14.0 item 7 — 规则纪元/confirm 持久化测试。
-
-覆盖:
-- advance 后重启 (新 ClusterMaster 实例) 恢复纪元值。
-- confirm 存入重启恢复。
-- 坏盘容错 (缺文件 → 默认 0 / 坏 JSON → 默认 0 不抛)。
-- 节流脏标 (高频 advance 第二次 defer, _persist_loop 兜底)。
-- HA standby receive_synced_state 接收纪元/confirm。
-"""
+# v0.14.0 item 7 — 规则纪元/confirm 持久化测试。
+#
+# 覆盖:
+# - advance 后重启 (新 ClusterMaster 实例) 恢复纪元值。
+# - confirm 存入重启恢复。
+# - 坏盘容错 (缺文件 → 默认 0 / 坏 JSON → 默认 0 不抛)。
+# - 节流脏标 (高频 advance 第二次 defer, _persist_loop 兜底)。
+# - HA standby receive_synced_state 接收纪元/confirm。
 
 from __future__ import annotations
 

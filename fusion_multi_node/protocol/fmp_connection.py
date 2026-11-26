@@ -1,11 +1,10 @@
-"""FMP TCP 长连接管理。
-
-节点间维持 TCP 长连接:
-- 自动重连（3s 内完成）
-- 心跳保活
-- 连接池管理
-- 与 CircuitBreaker 集成
-"""
+# FMP TCP 长连接管理。
+#
+# 节点间维持 TCP 长连接:
+# - 自动重连（3s 内完成）
+# - 心跳保活
+# - 连接池管理
+# - 与 CircuitBreaker 集成
 
 from __future__ import annotations
 
@@ -30,8 +29,8 @@ HEARTBEAT_PAYLOAD = {"type": "heartbeat", "ts": 0}
 _tls_manager: Any | None = None
 
 
+# 全局共享 TLSCertManager 实例，避免每次连接重建。
 def _get_shared_tls_manager():
-    """全局共享 TLSCertManager 实例，避免每次连接重建。"""
     global _tls_manager
     if _tls_manager is None:
         try:
@@ -43,10 +42,9 @@ def _get_shared_tls_manager():
     return _tls_manager
 
 
+# 连接信息。
 @dataclass
 class ConnectionInfo:
-    """连接信息。"""
-
     node_id: str
     host: str
     port: int
@@ -61,9 +59,8 @@ class ConnectionInfo:
         return time.time() - self.connected_at
 
 
+# 单条 FMP TCP 连接。
 class FMPConnection:
-    """单条 FMP TCP 连接。"""
-
     def __init__(
         self,
         node_id: str,
@@ -92,8 +89,8 @@ class FMPConnection:
     def is_connected(self) -> bool:
         return self.info.is_alive and self._writer is not None and not self._writer.is_closing()
 
+    # 建立 TCP 连接（use_tls=True 时启用 TLS）。
     async def connect(self) -> bool:
-        """建立 TCP 连接（use_tls=True 时启用 TLS）。"""
         try:
             ssl_ctx = None
             if self._use_tls:
@@ -122,8 +119,8 @@ class FMPConnection:
             logger.error(f"FMP 连接失败: {self.info.host}:{self.info.port} - {e}")
             return False
 
+    # 带重试的连接。
     async def connect_with_retry(self, max_retries: int = 5) -> bool:
-        """带重试的连接。"""
         for i in range(max_retries):
             if await self.connect():
                 return True
@@ -131,8 +128,8 @@ class FMPConnection:
             await asyncio.sleep(self._reconnect_interval)
         return False
 
+    # 断开连接。
     async def disconnect(self) -> None:
-        """断开连接。"""
         await self.stop_heartbeat()
         self._running = False
         for task in (self._read_task, self._reconnect_task):
@@ -153,8 +150,8 @@ class FMPConnection:
         self._writer = None
         logger.info(f"FMP 连接断开: {self.info.host}:{self.info.port}")
 
+    # 发送 FMP 消息。
     async def send(self, msg: FMPMessage) -> bool:
-        """发送 FMP 消息。"""
         if not self.is_connected:
             logger.warning(f"FMP 发送失败: 连接未建立 ({self.info.node_id})")
             return False
@@ -179,8 +176,8 @@ class FMPConnection:
                 self.info.is_alive = False
                 return False
 
+    # 读取循环。
     async def _read_loop(self) -> None:
-        """读取循环。"""
         while self._running and self._reader:
             try:
                 len_bytes = await asyncio.wait_for(
@@ -226,23 +223,23 @@ class FMPConnection:
                 return
             self._reconnect_task = asyncio.create_task(self._auto_reconnect())
 
+    # 自动重连。
     async def _auto_reconnect(self) -> None:
-        """自动重连。"""
         while self._running:
             logger.info(f"FMP 自动重连: {self.info.host}:{self.info.port}")
             if await self.connect():
                 return
             await asyncio.sleep(self._reconnect_interval)
 
+    # M2-03 启动心跳发送。
     def start_heartbeat(self, interval: float = 0.0) -> None:
-        """M2-03 启动心跳发送。"""
         self._heartbeat_interval = interval or self._heartbeat_interval
         self.stop_heartbeat()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.debug(f"FMP 心跳启动: {self.info.node_id} interval={self._heartbeat_interval}s")
 
+    # 停止心跳发送。
     async def stop_heartbeat(self) -> None:
-        """停止心跳发送。"""
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             try:
@@ -251,8 +248,8 @@ class FMPConnection:
                 pass
         self._heartbeat_task = None
 
+    # M2-03 心跳循环。
     async def _heartbeat_loop(self) -> None:
-        """M2-03 心跳循环。"""
         while self._running and self.is_connected:
             try:
                 import copy
@@ -272,9 +269,8 @@ class FMPConnection:
             await asyncio.sleep(self._heartbeat_interval)
 
 
+# FMP 连接池管理器。
 class FMPConnectionManager:
-    """FMP 连接池管理器。"""
-
     def __init__(
         self,
         local_node_id: str = "",
@@ -287,8 +283,8 @@ class FMPConnectionManager:
         self._connections: dict[str, FMPConnection] = {}
         self._lock = asyncio.Lock()
 
+    # 添加并连接到远程节点。
     async def add_connection(self, node_id: str, host: str, port: int) -> FMPConnection:
-        """添加并连接到远程节点。"""
         async with self._lock:
             if node_id in self._connections:
                 conn = self._connections[node_id]
@@ -307,8 +303,8 @@ class FMPConnectionManager:
         await conn.connect_with_retry()
         return conn
 
+    # 移除连接。
     async def remove_connection(self, node_id: str) -> None:
-        """移除连接。"""
         async with self._lock:
             conn = self._connections.pop(node_id, None)
         if conn:
@@ -321,8 +317,8 @@ class FMPConnectionManager:
         async with self._lock:
             return self._connections.get(node_id)
 
+    # 向指定节点发送消息。
     async def send_to(self, node_id: str, msg: FMPMessage) -> bool:
-        """向指定节点发送消息。"""
         async with self._lock:
             conn = self._connections.get(node_id)
         if not conn or not conn.is_connected:
@@ -330,8 +326,8 @@ class FMPConnectionManager:
             return False
         return await conn.send(msg)
 
+    # 广播消息到所有连接。
     async def broadcast(self, msg: FMPMessage) -> dict[str, bool]:
-        """广播消息到所有连接。"""
         async with self._lock:
             targets = {nid: conn for nid, conn in self._connections.items() if conn.is_connected}
         results = {}
@@ -339,8 +335,8 @@ class FMPConnectionManager:
             results[node_id] = await conn.send(msg)
         return results
 
+    # 关闭所有连接。
     async def close_all(self) -> None:
-        """关闭所有连接。"""
         async with self._lock:
             conns = list(self._connections.values())
             self._connections.clear()
@@ -363,12 +359,11 @@ class FMPConnectionManager:
         }
 
 
+# M2-05 统一 FMP 接口 — 封装连接管理、消息构建、加密、心跳。
+#
+# 对外提供简洁 API，隐藏三层协议细节。
+#
 class FMPInterface:
-    """M2-05 统一 FMP 接口 — 封装连接管理、消息构建、加密、心跳。
-
-    对外提供简洁 API，隐藏三层协议细节。
-    """
-
     def __init__(
         self,
         node_id: str = "",

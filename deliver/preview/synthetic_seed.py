@@ -1,13 +1,12 @@
+# Synthetic demo-data seeder for preview stacks (#108).
+#
+# Seeds deterministic fake sessions into the cluster session store via the
+# master API — never real customer data (business/AGENTS.md rule 6 red line).
+# Session-store endpoints need no inference backend, so a preview stack is
+# fully demonstrable without fusion-mlx.
+#
+# Usage: synthetic_seed.py --master-url http://127.0.0.1:21452 --token TOKEN [--count 3]
 #!/usr/bin/env python3
-"""Synthetic demo-data seeder for preview stacks (#108).
-
-Seeds deterministic fake sessions into the cluster session store via the
-master API — never real customer data (business/AGENTS.md rule 6 red line).
-Session-store endpoints need no inference backend, so a preview stack is
-fully demonstrable without fusion-mlx.
-
-Usage: synthetic_seed.py --master-url http://127.0.0.1:21452 --token TOKEN [--count 3]
-"""
 
 from __future__ import annotations
 

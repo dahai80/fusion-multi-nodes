@@ -1,8 +1,7 @@
-"""UserStore 单元测试 — 多租户用户令牌存储 (GAP-8 Phase F1)。
-
-验: scrypt 哈希、令牌签发/校验/吊销/轮换、文件持久化 0600、原子写、
-非法 user_id 拒绝、空库回退、bootstrap_admin。
-"""
+# UserStore 单元测试 — 多租户用户令牌存储 (GAP-8 Phase F1)。
+#
+# 验: scrypt 哈希、令牌签发/校验/吊销/轮换、文件持久化 0600、原子写、
+# 非法 user_id 拒绝、空库回退、bootstrap_admin。
 
 from __future__ import annotations
 

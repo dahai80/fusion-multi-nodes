@@ -1,4 +1,4 @@
-"""Utils module exports."""
+# Utils module exports.
 
 from .auth import (
     BearerAuthMiddleware,

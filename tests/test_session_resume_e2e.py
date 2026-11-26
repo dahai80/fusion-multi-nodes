@@ -1,13 +1,12 @@
-"""#84 E2E — agent-studio 跨节点会话 resume 的集群侧链路 (验收场景)。
-
-真实链: MasterServer 真 FastAPI (session-store 路由 + sandbox 委派头) →
-ClusterMaster 真调度 → PortRoutingTransport → 两 AgentServer 真 FastAPI (FakeBackend
-离线推理, 会话存储为纯数据不依赖模型)。覆盖 issue #84 验收:
-- 会话在"节点 A"侧 checkpoint 到集群存储 → "节点 B"侧水化 (transcript 一致);
-- `sandbox: multi-node:<node>` 委派 (X-Fusion-Target-Node) 只在指定节点执行;
-- 执行状态按 run_id 可查 (X-Fusion-Run-Id → /api/v1/runs/{run_id});
-- B 侧回写后 A 侧可读到更新 (双向共享存储)。
-"""
+# #84 E2E — agent-studio 跨节点会话 resume 的集群侧链路 (验收场景)。
+#
+# 真实链: MasterServer 真 FastAPI (session-store 路由 + sandbox 委派头) →
+# ClusterMaster 真调度 → PortRoutingTransport → 两 AgentServer 真 FastAPI (FakeBackend
+# 离线推理, 会话存储为纯数据不依赖模型)。覆盖 issue #84 验收:
+# - 会话在"节点 A"侧 checkpoint 到集群存储 → "节点 B"侧水化 (transcript 一致);
+# - `sandbox: multi-node:<node>` 委派 (X-Fusion-Target-Node) 只在指定节点执行;
+# - 执行状态按 run_id 可查 (X-Fusion-Run-Id → /api/v1/runs/{run_id});
+# - B 侧回写后 A 侧可读到更新 (双向共享存储)。
 
 from __future__ import annotations
 
@@ -48,9 +47,8 @@ class FakeBackend(InferenceBackend):
         return True
 
 
+# 按 URL 端口路由到对应 agent ASGI app (复用数据并行 E2E 约定)。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app (复用数据并行 E2E 约定)。"""
-
     def __init__(self, port_to_app: dict[int, object]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -223,8 +221,8 @@ class TestSessionResumeE2E:
             reread = await c.get("/api/v1/session-store/sess-e2e", headers=AUTH_HEADERS)
             assert len(reread.json()["session"]["messages"]) == 3
 
+    # pinned 节点下线 → 提交 409, 绝不静默回落到其它节点 (sandbox 语义)。
     async def test_delegation_to_unavailable_node_fails_visibly(self, cluster):
-        """pinned 节点下线 → 提交 409, 绝不静默回落到其它节点 (sandbox 语义)。"""
         master_app = cluster["master_server"].app
         transport = ASGITransport(app=master_app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:

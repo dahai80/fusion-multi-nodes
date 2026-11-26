@@ -1,14 +1,13 @@
-"""GAP-6 客户端限流适配测试 — 429 退避重试。
-
-验证:
-(a) 非 429 响应直接返回 (不退避)。
-(b) 429 间歇后非 429 → 重试到成功。
-(c) 429 持续 → 耗尽预算抛 RateLimitExhausted。
-(d) Retry-After 头解析 (秒数 / HTTP-date / 缺失回落)。
-(e) PacerConfig 退避确定性 (指数, 上限, 无随机)。
-(f) FusionMLXBackend.chat 429 退避重试到成功。
-(g) FusionMLXBackend.chat 429 耗尽 → RateLimitExhausted (非 HTTPStatusError)。
-"""
+# GAP-6 客户端限流适配测试 — 429 退避重试。
+#
+# 验证:
+# (a) 非 429 响应直接返回 (不退避)。
+# (b) 429 间歇后非 429 → 重试到成功。
+# (c) 429 持续 → 耗尽预算抛 RateLimitExhausted。
+# (d) Retry-After 头解析 (秒数 / HTTP-date / 缺失回落)。
+# (e) PacerConfig 退避确定性 (指数, 上限, 无随机)。
+# (f) FusionMLXBackend.chat 429 退避重试到成功。
+# (g) FusionMLXBackend.chat 429 耗尽 → RateLimitExhausted (非 HTTPStatusError)。
 
 from __future__ import annotations
 

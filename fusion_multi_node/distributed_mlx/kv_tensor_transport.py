@@ -1,15 +1,14 @@
-"""GAP-7 (#33) — KV 张量跨节点传输后端。
-
-本仓自建跨节点张量传输通道: 序列化张量 + HTTP 传输 + 目标节点内存预算。
-两后端可插拔 (env FUSION_KV_TENSOR_BACKEND):
-
-- SyntheticKVTransport (默认, 无依赖): 确定性合成张量 (hashlib 种子), 证明通道端到端可用。
-  生产部署无上游 #650 时亦用此 (满足 #33 验收: 张量跨节点 round-trip)。
-- MLXKVTransport (env=mlx, 待上游 #650): 调本地 fusion-mlx /distributed/kv_cache/export|import
-  取/装真 mx.array 张量。端点未落地 (404) → 降级合成 + warn (Rule 12 fail visibly, 不静默)。
-
-上游 issue #650 (OPEN, 已提) 提案 b64-npy 格式 — 落地后 MLX 后端激活, 零翻译。
-"""
+# GAP-7 (#33) — KV 张量跨节点传输后端。
+#
+# 本仓自建跨节点张量传输通道: 序列化张量 + HTTP 传输 + 目标节点内存预算。
+# 两后端可插拔 (env FUSION_KV_TENSOR_BACKEND):
+#
+# - SyntheticKVTransport (默认, 无依赖): 确定性合成张量 (hashlib 种子), 证明通道端到端可用。
+# 生产部署无上游 #650 时亦用此 (满足 #33 验收: 张量跨节点 round-trip)。
+# - MLXKVTransport (env=mlx, 待上游 #650): 调本地 fusion-mlx /distributed/kv_cache/export|import
+# 取/装真 mx.array 张量。端点未落地 (404) → 降级合成 + warn (Rule 12 fail visibly, 不静默)。
+#
+# 上游 issue #650 (OPEN, 已提) 提案 b64-npy 格式 — 落地后 MLX 后端激活, 零翻译。
 
 from __future__ import annotations
 
@@ -32,14 +31,14 @@ _KV_EXPORT_PATH = "/distributed/kv_cache/export"
 _KV_IMPORT_PATH = "/distributed/kv_cache/import"
 
 
+# P2-2 (审计 §3.5): 出站 SSRF 守卫 — base_url host 经 is_safe_outbound_host 校验。
+#
+# MLXKVTransport 调本地 fusion-mlx (operator env FUSION_MLX_URL), 仍守一道防
+# 云元数据/链路本地主机名 (与 kv_cache_sharing 跨节点路径同守卫)。不安全 host
+# raise RuntimeError fail-closed (Rule 12), 不静默发请求。localhost/127.0.0.1
+# 合法 (单机/同节点部署), 11432 默认放行。
+#
 def _ssrf_guard(base_url: str) -> str:
-    """P2-2 (审计 §3.5): 出站 SSRF 守卫 — base_url host 经 is_safe_outbound_host 校验。
-
-    MLXKVTransport 调本地 fusion-mlx (operator env FUSION_MLX_URL), 仍守一道防
-    云元数据/链路本地主机名 (与 kv_cache_sharing 跨节点路径同守卫)。不安全 host
-    raise RuntimeError fail-closed (Rule 12), 不静默发请求。localhost/127.0.0.1
-    合法 (单机/同节点部署), 11432 默认放行。
-    """
     parsed = urlparse(base_url)
     host = parsed.hostname or ""
     if not is_safe_outbound_host(host):
@@ -50,37 +49,33 @@ def _ssrf_guard(base_url: str) -> str:
     return base_url
 
 
+# KV 张量传输后端协议 — 解耦张量来源 (合成 vs 真 MLX)。
 @runtime_checkable
 class KVTransportBackend(Protocol):
-    """KV 张量传输后端协议 — 解耦张量来源 (合成 vs 真 MLX)。"""
-
     name: str
 
-    async def export_tensor(self, cache_id: str, model_name: str, node_id: str) -> bytes | None:
-        """产出张量字节 — 导出侧 (源节点)。
+    # 产出张量字节 — 导出侧 (源节点)。
+    #
+    # 返回 None = 无法产出 (上游端点未落地), 调用方降级 (跳过该分片张量或合成兜底)。
+    #
+    async def export_tensor(self, cache_id: str, model_name: str, node_id: str) -> bytes | None: ...
 
-        返回 None = 无法产出 (上游端点未落地), 调用方降级 (跳过该分片张量或合成兜底)。
-        """
-        ...
-
-    async def import_tensor(self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str) -> bool:
-        """消费张量字节 — 导入侧 (目标节点)。
-
-        返回 True = 已接收 (合成=no-op 仅本地存; MLX=装进本地 fusion-mlx)。
-        返回 False = 装载失败 (上游端点不可达且无降级)。
-        """
-        ...
+    # 消费张量字节 — 导入侧 (目标节点)。
+    #
+    # 返回 True = 已接收 (合成=no-op 仅本地存; MLX=装进本地 fusion-mlx)。
+    # 返回 False = 装载失败 (上游端点不可达且无降级)。
+    #
+    async def import_tensor(self, cache_id: str, model_name: str, tensor_bytes: bytes, node_id: str) -> bool: ...
 
     async def close(self) -> None: ...
 
 
+# 合成张量后端 — 确定性生成, 无外部依赖。
+#
+# 张量 = hashlib.sha256(种子).digest() 复制成指定长度。同 cache_id+model+node
+# 恒产生同字节 → 可验 round-trip 完整性。默认后端, 满足 #33 验收不依赖上游。
+#
 class SyntheticKVTransport:
-    """合成张量后端 — 确定性生成, 无外部依赖。
-
-    张量 = hashlib.sha256(种子).digest() 复制成指定长度。同 cache_id+model+node
-    恒产生同字节 → 可验 round-trip 完整性。默认后端, 满足 #33 验收不依赖上游。
-    """
-
     name = "synthetic"
 
     def __init__(self, tensor_size: int = 512):
@@ -109,14 +104,13 @@ class SyntheticKVTransport:
         pass
 
 
+# 真 MLX 张量后端 — 调本地 fusion-mlx /distributed/kv_cache/export|import。
+#
+# 待上游 issue #650 落地激活 (env FUSION_KV_TENSOR_BACKEND=mlx)。
+# 端点 404 (未落地) → export 返 None (降级), import 返 True (store_local 兜底)。
+# 100% 本地: 仅调同节点/集群 fusion-mlx, 无云端路径。
+#
 class MLXKVTransport:
-    """真 MLX 张量后端 — 调本地 fusion-mlx /distributed/kv_cache/export|import。
-
-    待上游 issue #650 落地激活 (env FUSION_KV_TENSOR_BACKEND=mlx)。
-    端点 404 (未落地) → export 返 None (降级), import 返 True (store_local 兜底)。
-    100% 本地: 仅调同节点/集群 fusion-mlx, 无云端路径。
-    """
-
     name = "mlx"
 
     def __init__(
@@ -218,14 +212,14 @@ class MLXKVTransport:
             await self._client.aclose()
 
 
+# 工厂 — 按 env FUSION_KV_TENSOR_BACKEND 选后端。
+#
+# 默认 "synthetic" (无依赖, 满足 #33 验收); "mlx" 激活真张量 (待上游 #650)。
+#
 def get_kv_transport(
     backend: str | None = None,
     **kwargs: Any,
 ) -> KVTransportBackend:
-    """工厂 — 按 env FUSION_KV_TENSOR_BACKEND 选后端。
-
-    默认 "synthetic" (无依赖, 满足 #33 验收); "mlx" 激活真张量 (待上游 #650)。
-    """
     name = (backend or os.environ.get("FUSION_KV_TENSOR_BACKEND", "synthetic")).strip().lower()
     if name == "mlx":
         logger.info("GAP-7 KV 张量后端: mlx (真张量, 待上游 issue #650 端点)")

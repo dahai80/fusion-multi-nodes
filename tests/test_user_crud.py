@@ -1,13 +1,12 @@
-"""GAP-8 Phase F2 — 用户管理 CRUD (ADMIN-only)。
-
-覆盖:
-- ADMIN 建/查/删/改角色/签发/吊销/轮换用户与令牌。
-- 非 ADMIN (USER/VIEWER) → 403。
-- 集群令牌 → 403 (用户管理须 ADMIN 用户令牌)。
-- 令牌明文仅签发/轮换时返回一次, 审计日志不含明文。
-- 持久化跨重启 (同文件重载 UserStore 保留用户/令牌)。
-- 自删拒绝; GET detail 不返回 token_hash/salt。
-"""
+# GAP-8 Phase F2 — 用户管理 CRUD (ADMIN-only)。
+#
+# 覆盖:
+# - ADMIN 建/查/删/改角色/签发/吊销/轮换用户与令牌。
+# - 非 ADMIN (USER/VIEWER) → 403。
+# - 集群令牌 → 403 (用户管理须 ADMIN 用户令牌)。
+# - 令牌明文仅签发/轮换时返回一次, 审计日志不含明文。
+# - 持久化跨重启 (同文件重载 UserStore 保留用户/令牌)。
+# - 自删拒绝; GET detail 不返回 token_hash/salt。
 
 from __future__ import annotations
 
@@ -19,8 +18,8 @@ from fusion_multi_node.security.user_store import UserStore
 from fusion_multi_node.server.master_server import MasterServer
 
 
+# 建带 user_store 的 master + 预建 ADMIN root + USER alice, 返 (server, tokens)。
 def _make_server(tmp_path, monkeypatch):
-    """建带 user_store 的 master + 预建 ADMIN root + USER alice, 返 (server, tokens)。"""
     monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
     monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
     monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")

@@ -1,4 +1,4 @@
-"""Master FastAPI 服务层 — 集群管理 HTTP API。"""
+# Master FastAPI 服务层 — 集群管理 HTTP API。
 
 from __future__ import annotations
 
@@ -54,8 +54,8 @@ logger = logging.getLogger(__name__)
 MIN_COMPAT_PROTOCOL_VERSION = "0.8.0"
 
 
+# 解析 '0.8.7' → (0, 8, 7); 非法段当 0。空串 → ()。
 def _parse_version(v: str) -> tuple[int, ...]:
-    """解析 '0.8.7' → (0, 8, 7); 非法段当 0。空串 → ()。"""
     parts = []
     for seg in v.split("."):
         seg = seg.strip()
@@ -66,8 +66,8 @@ def _parse_version(v: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+# 返回 (compatible, detail)。compatible=False 时 detail 为拒因+降级指引。
 def _check_protocol_compat(agent_version: str) -> tuple[bool, str]:
-    """返回 (compatible, detail)。compatible=False 时 detail 为拒因+降级指引。"""
     if not agent_version:
         return True, "agent 未上报 protocol_version (旧客户端), 放行 (灰度兼容)"
     av = _parse_version(agent_version)
@@ -169,9 +169,8 @@ class TaskCancelRequest(BaseModel):
     reason: str = ""
 
 
+# #82 常驻节点会话登记体 — origin 设备起会话登记, handoff 由独立路由承接。
 class SessionRegisterRequest(BaseModel):
-    """#82 常驻节点会话登记体 — origin 设备起会话登记, handoff 由独立路由承接。"""
-
     session_id: str
     origin_node: str = ""
     host_node: str = ""
@@ -179,9 +178,8 @@ class SessionRegisterRequest(BaseModel):
     meta: dict[str, Any] = {}
 
 
+# #82 会话交接体 — origin 笔记本离线, 会话宿主切到常驻节点。
 class SessionHandoffRequest(BaseModel):
-    """#82 会话交接体 — origin 笔记本离线, 会话宿主切到常驻节点。"""
-
     target_node_id: str
 
 
@@ -466,9 +464,8 @@ class TestBatchReportResponse(BaseModel):
 # ── Master Server ──
 
 
+# 集群 Master HTTP 服务。
 class MasterServer:
-    """集群 Master HTTP 服务。"""
-
     def __init__(
         self,
         master: ClusterMaster | None = None,
@@ -550,12 +547,12 @@ class MasterServer:
         self._sync_manager = ClusterSyncManager(node_id="master")
         self._setup_routes()
 
+    # #74: fusion-identity opt-in 时拉 per-tenant 配额注入 master._tenant_quotas。
+    #
+    # 未启用 identity / 无 user → no-op (退回全局 _tenant_max_concurrent, 离线默认)。
+    # best-effort: 取配额失败仅日志, 不阻塞 submit (退回全局配额)。
+    #
     async def _resolve_tenant_quota(self, user: str) -> None:
-        """#74: fusion-identity opt-in 时拉 per-tenant 配额注入 master._tenant_quotas。
-
-        未启用 identity / 无 user → no-op (退回全局 _tenant_max_concurrent, 离线默认)。
-        best-effort: 取配额失败仅日志, 不阻塞 submit (退回全局配额)。
-        """
         identity = getattr(self, "_identity", None)
         if identity is None or not identity.enabled or not user:
             return
@@ -567,14 +564,14 @@ class MasterServer:
         if q is not None:
             await self.master.set_tenant_quota(user, q)
 
+    # #77: per-leader token 过期写入拒绝 (opt-in, HA standby 模式)。
+    #
+    # 仅当 master.leader_token_enforce() (HA + env FUSION_LEADER_TOKEN_ENFORCE=1) 时生效。
+    # 客户端发 X-Leader-Token: <token>; 与当前 master.leader_token() 不符 → 409 LeaderChanged。
+    # 缺 header → 放行 (灰度兼容, 不破坏无感知客户端; 仅显式发过期 token 才拒)。
+    # 单 Master / active-active: enforce 永关, 本方法 no-op。
+    #
     def _check_leader_token(self, request) -> None:
-        """#77: per-leader token 过期写入拒绝 (opt-in, HA standby 模式)。
-
-        仅当 master.leader_token_enforce() (HA + env FUSION_LEADER_TOKEN_ENFORCE=1) 时生效。
-        客户端发 X-Leader-Token: <token>; 与当前 master.leader_token() 不符 → 409 LeaderChanged。
-        缺 header → 放行 (灰度兼容, 不破坏无感知客户端; 仅显式发过期 token 才拒)。
-        单 Master / active-active: enforce 永关, 本方法 no-op。
-        """
         if not self.master.leader_token_enforce():
             return
         presented = request.headers.get("x-leader-token", "").strip()
@@ -669,12 +666,12 @@ class MasterServer:
             except ValueError:
                 return None
 
+        # 用户令牌鉴权关卡 — 返回已认证 actor (user_id)。
+        #
+        # 集群令牌 (无 user_id) → 返回 "" 跳过用户层鉴权 (交 node-RBAC)。
+        # 用户令牌但权限不足 → 抛 403 + 审计 permission_deny。
+        #
         def _enforce_user_rbac(request, path: str, method: str) -> str:
-            """用户令牌鉴权关卡 — 返回已认证 actor (user_id)。
-
-            集群令牌 (无 user_id) → 返回 "" 跳过用户层鉴权 (交 node-RBAC)。
-            用户令牌但权限不足 → 抛 403 + 审计 permission_deny。
-            """
             role = _user_token_role(request)
             if role is None:
                 return ""  # 集群令牌, 非用户面调用
@@ -1738,9 +1735,9 @@ class MasterServer:
             )
             return {"status": "ok", "session": forked}
 
+        # #84 sandbox 委派 run 查询 — X-Fusion-Run-Id → 任务状态 (attach/resume 用)。
         @app.get("/api/v1/runs/{run_id}")
         async def run_lookup(run_id: str, request: Request):
-            """#84 sandbox 委派 run 查询 — X-Fusion-Run-Id → 任务状态 (attach/resume 用)。"""
             _enforce_user_rbac(request, "/api/v1/runs", "GET")
             if not is_safe_path_segment(run_id):
                 raise HTTPException(status_code=400, detail=f"非法 run_id: {run_id!r}")
@@ -2584,11 +2581,11 @@ class MasterServer:
         # 集群令牌 (内部 HA/CLI) 不该建用户 → 额外守卫: 无 user_store 或无 user 身份 → 403/503。
         # 令牌明文仅签发/轮换时返回一次 (与 UserStore 语义一致)。
 
+        # 用户管理路由前置 — 须有 user_store + 用户令牌 (ADMIN) 身份。
+        #
+        # 返回已认证 actor (ADMIN user_id)。无 user_store → 503; 非用户令牌 → 403。
+        #
         def _require_user_store(request: Request):
-            """用户管理路由前置 — 须有 user_store + 用户令牌 (ADMIN) 身份。
-
-            返回已认证 actor (ADMIN user_id)。无 user_store → 503; 非用户令牌 → 403。
-            """
             if self._user_store is None:
                 raise HTTPException(
                     status_code=503,
@@ -2936,12 +2933,12 @@ class MasterServer:
             confirms = await self.master.get_confirms(epoch)
             return V1ConfirmListResponse(confirms=confirms, count=len(confirms))
 
+    # C11: 本地 liveness 检查 — 磁盘可写 / 内存充足 / task-store 可写。
+    #
+    # 全本地无出站无锁, 供 /api/health (liveness) 与 /api/health/deep (readiness) 复用。
+    # 失败项进 checks 字典返回 (key→bool), 上层据此定 status。
+    #
     def _liveness_checks(self) -> dict[str, Any]:
-        """C11: 本地 liveness 检查 — 磁盘可写 / 内存充足 / task-store 可写。
-
-        全本地无出站无锁, 供 /api/health (liveness) 与 /api/health/deep (readiness) 复用。
-        失败项进 checks 字典返回 (key→bool), 上层据此定 status。
-        """
         checks: dict[str, Any] = {}
         try:
             import psutil

@@ -1,13 +1,12 @@
-"""Phase 4 故障注入 E2E — 真 ASGI 路由, 验调度器对真实故障的端到端自愈。
-
-三组单链路 (非单元 mock):
-(a) agent 宕机 → 任务超时 → 入重试队列 → 重派存活节点 → COMPLETED。
-(b) 反复派发失败 → 节点 ban → select_nodes 跳过 → 新任务路由到存活节点。
-(c) HA leader 故障 → standby 升 leader → assign_task 恢复派发 + 同步任务可读。
-
-走 PortRoutingTransport (无真 TCP) + 真 AgentServer /api/execute + FakeBackend
-(非真模型, 推理为合成 OpenAI 形状, 不触 fusion-mlx)。Bearer 鉴权携带 TEST_TOKEN。
-"""
+# Phase 4 故障注入 E2E — 真 ASGI 路由, 验调度器对真实故障的端到端自愈。
+#
+# 三组单链路 (非单元 mock):
+# (a) agent 宕机 → 任务超时 → 入重试队列 → 重派存活节点 → COMPLETED。
+# (b) 反复派发失败 → 节点 ban → select_nodes 跳过 → 新任务路由到存活节点。
+# (c) HA leader 故障 → standby 升 leader → assign_task 恢复派发 + 同步任务可读。
+#
+# 走 PortRoutingTransport (无真 TCP) + 真 AgentServer /api/execute + FakeBackend
+# (非真模型, 推理为合成 OpenAI 形状, 不触 fusion-mlx)。Bearer 鉴权携带 TEST_TOKEN。
 
 from __future__ import annotations
 
@@ -34,12 +33,11 @@ M1_PORT = 11452
 M2_PORT = 11453
 
 
+# 合成推理后端 — chat 返 OpenAI 形状, 不触 fusion-mlx。
+#
+# fail=True → raise, 触发 agent /api/execute 500 → master 派发失败路径。
+#
 class FakeBackend(InferenceBackend):
-    """合成推理后端 — chat 返 OpenAI 形状, 不触 fusion-mlx。
-
-    fail=True → raise, 触发 agent /api/execute 500 → master 派发失败路径。
-    """
-
     def __init__(self, node_id: str, fail: bool = False):
         self.node_id = node_id
         self.fail = fail
@@ -60,9 +58,8 @@ class FakeBackend(InferenceBackend):
         return not self.fail
 
 
+# 按 URL 端口路由到 ASGI app。drop(port) 模拟该 agent 宕机 → 后续请求 404。
 class FaultRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到 ASGI app。drop(port) 模拟该 agent 宕机 → 后续请求 404。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = dict(port_to_app)
         self._clients: dict[int, AsyncClient] = {
@@ -146,8 +143,8 @@ def _task(tid: str = "t-fault", timeout_seconds: float = 300.0) -> ClusterTask:
     )
 
 
+# 等 master 后台派发协程全部落定 (fire-and-forget 完成)。空列表跳过。
 async def _drain_dispatch(master: ClusterMaster, timeout: float = 5.0) -> None:
-    """等 master 后台派发协程全部落定 (fire-and-forget 完成)。空列表跳过。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         pending = [h for h in master._dispatch_tasks.values() if not h.done()]
@@ -168,9 +165,9 @@ def _patch_safe(monkeypatch):
     )
 
 
+# 两 agent server + master, 经 FaultRoutingTransport 互连。
 @pytest.fixture
 async def fault_cluster(tmp_path, monkeypatch):
-    """两 agent server + master, 经 FaultRoutingTransport 互连。"""
     _patch_safe(monkeypatch)
     server_a = _make_agent_server("agent-a", AGENT_PORT_A)
     server_b = _make_agent_server("agent-b", AGENT_PORT_B)
@@ -201,9 +198,9 @@ async def fault_cluster(tmp_path, monkeypatch):
         await routing.aclose()
 
 
+# 双 master + 互连路由, 选举已配置 (m1 leader, m2 standby)。
 @pytest.fixture
 async def ha_fault_pair(tmp_path, monkeypatch):
-    """双 master + 互连路由, 选举已配置 (m1 leader, m2 standby)。"""
     _patch_safe(monkeypatch)
     m1 = _make_master(tmp_path, port=M1_PORT)
     m2 = _make_master(tmp_path, port=M2_PORT)
@@ -240,9 +237,8 @@ async def ha_fault_pair(tmp_path, monkeypatch):
         await routing.aclose()
 
 
+# (a) agent 宕机 → 超时 → 重试 → 重派存活节点。
 class TestAgentDownRedispatch:
-    """(a) agent 宕机 → 超时 → 重试 → 重派存活节点。"""
-
     @pytest.mark.asyncio
     async def test_timeout_retry_lands_on_survivor(self, fault_cluster):
         master = fault_cluster["master"]
@@ -288,9 +284,8 @@ class TestAgentDownRedispatch:
         logger.info("Phase4(a) agent 宕机→超时→重试→存活节点 COMPLETED 通过")
 
 
+# (b) 反复派发失败 → ban → 新任务路由到存活节点。
 class TestDispatchFailBanRoutes:
-    """(b) 反复派发失败 → ban → 新任务路由到存活节点。"""
-
     @pytest.mark.asyncio
     async def test_banned_node_skipped_new_task_routes_survivor(self, fault_cluster, monkeypatch):
         master = fault_cluster["master"]
@@ -322,9 +317,8 @@ class TestDispatchFailBanRoutes:
         logger.info("Phase4(b) ban→select_nodes 跳过→新任务路由存活节点 COMPLETED 通过")
 
 
+# (c) HA leader 故障 → standby 升 leader → assign_task 恢复 + 同步任务可读。
 class TestHAFailoverTakeover:
-    """(c) HA leader 故障 → standby 升 leader → assign_task 恢复 + 同步任务可读。"""
-
     @pytest.mark.asyncio
     async def test_standby_takes_over_after_leader_death(self, ha_fault_pair):
         m1 = ha_fault_pair["m1"]  # leader

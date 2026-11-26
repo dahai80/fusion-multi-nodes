@@ -1,12 +1,11 @@
-"""GAP-8 Phase F2 — per-user RBAC + 防伪造审计。
-
-覆盖:
-- USER 令牌可提交/取消任务, 不可 migrate/degrade/manage users。
-- VIEWER 令牌只读, 提交/取消 → 403。
-- 用户令牌提交 → task.user=已认证 user_id (忽略客户端 req.user, 防伪造审计 actor)。
-- 集群令牌路径不变 (node-RBAC, req.user 自声明)。
-- 审计 actor=已认证 user_id (非伪造 req.user)。
-"""
+# GAP-8 Phase F2 — per-user RBAC + 防伪造审计。
+#
+# 覆盖:
+# - USER 令牌可提交/取消任务, 不可 migrate/degrade/manage users。
+# - VIEWER 令牌只读, 提交/取消 → 403。
+# - 用户令牌提交 → task.user=已认证 user_id (忽略客户端 req.user, 防伪造审计 actor)。
+# - 集群令牌路径不变 (node-RBAC, req.user 自声明)。
+# - 审计 actor=已认证 user_id (非伪造 req.user)。
 
 from __future__ import annotations
 
@@ -17,8 +16,8 @@ from fusion_multi_node.security.permission import UserRole
 from fusion_multi_node.server.master_server import MasterServer
 
 
+# 建带 user_store 的 master + 预建用户, 返 (server, {user_id: token})。
 def _make_server(tmp_path, monkeypatch, *, users=None):
-    """建带 user_store 的 master + 预建用户, 返 (server, {user_id: token})。"""
     monkeypatch.setenv("FUSION_USERS_FILE", str(tmp_path / "users.json"))
     monkeypatch.setenv("FUSION_AUDIT_LOG", str(tmp_path / "audit.log"))
     monkeypatch.setenv("FUSION_PERMISSION_ENFORCE", "0")
@@ -112,8 +111,8 @@ class TestUserRbacTaskSubmit:
 
 
 class TestTamperProofAudit:
+    # 用户令牌提交 → task.user=已认证 user_id, 忽略伪造 req.user。
     async def test_task_user_is_authenticated(self, tmp_path, monkeypatch):
-        """用户令牌提交 → task.user=已认证 user_id, 忽略伪造 req.user。"""
         server, tok = _make_server(tmp_path, monkeypatch, users={"alice": UserRole.USER})
         async with _client(server) as c:
             resp = await c.post(
@@ -128,8 +127,8 @@ class TestTamperProofAudit:
         assert task is not None
         assert task.user == "alice"  # 已认证身份, 非 "rootadmin"
 
+    # 审计日志 actor=已认证 user_id, 非伪造 req.user。
     async def test_audit_actor_is_authenticated(self, tmp_path, monkeypatch):
-        """审计日志 actor=已认证 user_id, 非伪造 req.user。"""
         server, tok = _make_server(tmp_path, monkeypatch, users={"alice": UserRole.USER})
         async with _client(server) as c:
             await c.post(
@@ -142,8 +141,8 @@ class TestTamperProofAudit:
         assert len(submits) == 1
         assert submits[0]["actor"] == "alice"  # 非 "evil"
 
+    # VIEWER 提交被拒 → 审计 permission_deny, actor=viewer。
     async def test_user_deny_audited(self, tmp_path, monkeypatch):
-        """VIEWER 提交被拒 → 审计 permission_deny, actor=viewer。"""
         server, tok = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})
         async with _client(server) as c:
             await c.post(
@@ -159,8 +158,8 @@ class TestTamperProofAudit:
 
 
 class TestClusterTokenBypass:
+    # 集群令牌 (内部可信) → task.user=req.user (自声明), 用户层鉴权不拦。
     async def test_cluster_token_submit_uses_req_user(self, tmp_path, monkeypatch):
-        """集群令牌 (内部可信) → task.user=req.user (自声明), 用户层鉴权不拦。"""
         server, _ = _make_server(tmp_path, monkeypatch, users={"alice": UserRole.USER})
         async with _client(server) as c:
             resp = await c.post(
@@ -180,11 +179,10 @@ class TestClusterTokenBypass:
         assert resp.status_code == 200
 
 
+# P1-5 (审计 §3.4) RBAC fail-closed: 未登记路径拒用户令牌。
+# P1-6: 集群内部路由 (CLUSTER_INTERNAL) 拒用户令牌, 仅 cluster_token 可达;
+# 用户面新增路由 (config/metrics/observability-export) 登记鉴权。
 class TestP15P16RbacFailClosed:
-    """P1-5 (审计 §3.4) RBAC fail-closed: 未登记路径拒用户令牌。
-    P1-6: 集群内部路由 (CLUSTER_INTERNAL) 拒用户令牌, 仅 cluster_token 可达;
-    用户面新增路由 (config/metrics/observability-export) 登记鉴权。"""
-
     async def test_unregistered_path_denies_user_token(self, tmp_path, monkeypatch):
         # P1-5: 未登记路由 (/api/foobar) → 用户令牌 fail-closed 拒 (旧 fail-open 放行)。
         from fusion_multi_node.security.permission import check_user_path_access
@@ -249,10 +247,9 @@ class TestP15P16RbacFailClosed:
         assert resp.status_code == 200
 
 
+# P2-8 (审计 §3.4): F2 动态子路径全 op — 写 op 各自权限, 读 op 继承父 task:list。
+# 旧 F2 仅覆盖 cancel/migrate/degrade, GET 读子路径 (progress/timeline) 无登记。
 class TestP2_8DynamicSubpathAllOps:
-    """P2-8 (审计 §3.4): F2 动态子路径全 op — 写 op 各自权限, 读 op 继承父 task:list。
-    旧 F2 仅覆盖 cancel/migrate/degrade, GET 读子路径 (progress/timeline) 无登记。"""
-
     async def test_viewer_can_read_task_detail(self, tmp_path, monkeypatch):
         # GET /api/tasks/{id} 详情 → task:list (VIEWER 可读) → 非 403 (任务不存在→404)。
         server, toks = _make_server(tmp_path, monkeypatch, users={"bob": UserRole.VIEWER})

@@ -1,12 +1,11 @@
-"""GAP-7 (#33) S2 — agent export/import 路由端到端 (真 ASGI, 非 mock)。
-
-覆盖:
-- POST /api/kv/export: 源节点产含张量 bundle
-- POST /api/kv/import: 目标节点存入, 张量字节完整 round-trip
-- 未鉴权 401 (Bearer 缺)
-- export 不存在 cache_id → 404
-- 预算超限 → stored=0 (skip)
-"""
+# GAP-7 (#33) S2 — agent export/import 路由端到端 (真 ASGI, 非 mock)。
+#
+# 覆盖:
+# - POST /api/kv/export: 源节点产含张量 bundle
+# - POST /api/kv/import: 目标节点存入, 张量字节完整 round-trip
+# - 未鉴权 401 (Bearer 缺)
+# - export 不存在 cache_id → 404
+# - 预算超限 → stored=0 (skip)
 
 from __future__ import annotations
 

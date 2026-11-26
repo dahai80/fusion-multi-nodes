@@ -1,10 +1,9 @@
-"""P1-H 多租户限流/配额/优先级调度测试 — 优先级队列 + 租户配额。
-
-验收: 租户超配额入队 (非拒绝); 高优先级任务先得空闲节点;
-任务完成/节点上线排空队列; 取消移除队列任务。
-
-免真模型 — 用 FakeBackend + 真实 dispatch HTTP (PortRoutingTransport)。
-"""
+# P1-H 多租户限流/配额/优先级调度测试 — 优先级队列 + 租户配额。
+#
+# 验收: 租户超配额入队 (非拒绝); 高优先级任务先得空闲节点;
+# 任务完成/节点上线排空队列; 取消移除队列任务。
+#
+# 免真模型 — 用 FakeBackend + 真实 dispatch HTTP (PortRoutingTransport)。
 
 from __future__ import annotations
 
@@ -101,9 +100,8 @@ class _HoldClient:
         pass
 
 
+# 租户配额 — 超额入队, 非拒绝。
 class TestTenantQuota:
-    """租户配额 — 超额入队, 非拒绝。"""
-
     @pytest.mark.asyncio
     async def test_over_quota_enqueues(self):
         master = ClusterMaster()
@@ -169,9 +167,8 @@ class TestTenantQuota:
         assert len(master._pending_queue) == 6, "超节点容量的 6 个入队"
 
 
+# #74 per-tenant 配额覆盖全局 — set_tenant_quota 后该租户用独立上限, 其余租户用全局。
 class TestPerTenantQuota:
-    """#74 per-tenant 配额覆盖全局 — set_tenant_quota 后该租户用独立上限, 其余租户用全局。"""
-
     @pytest.mark.asyncio
     async def test_per_tenant_overrides_global(self):
         master = ClusterMaster()
@@ -220,9 +217,8 @@ class TestPerTenantQuota:
         assert master._tenant_limit_for("tenant-VIP") == 2  # 退回全局
 
 
+# 优先级队列 — 高优先级先得空闲节点。
 class TestPriorityQueue:
-    """优先级队列 — 高优先级先得空闲节点。"""
-
     @pytest.mark.asyncio
     async def test_high_priority_dispatched_first(self):
         master = ClusterMaster()

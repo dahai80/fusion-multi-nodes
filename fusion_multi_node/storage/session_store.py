@@ -1,9 +1,8 @@
-"""#84 集群侧共享会话存储 — agent-studio 跨节点 resume 的 transcript/checkpoint 载体。
-
-Master 为唯一权威存储 (source of truth): 文件落盘 + HTTP API (/api/v1/session-store/*),
-任一节点上的消费者经集群 registry 直连 master 水化/回写。语义对齐 fusion-agent-studio
-SessionStore 适配器 (list/get/put/delete/fork), SQLite 默认路径不受影响 (消费侧自选后端)。
-"""
+# #84 集群侧共享会话存储 — agent-studio 跨节点 resume 的 transcript/checkpoint 载体。
+#
+# Master 为唯一权威存储 (source of truth): 文件落盘 + HTTP API (/api/v1/session-store/*),
+# 任一节点上的消费者经集群 registry 直连 master 水化/回写。语义对齐 fusion-agent-studio
+# SessionStore 适配器 (list/get/put/delete/fork), SQLite 默认路径不受影响 (消费侧自选后端)。
 
 from __future__ import annotations
 
@@ -18,15 +17,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_STORE_DIR = os.path.join(os.path.expanduser("~"), ".fusion", "multi-node", "session-store")
 
 
+# 存储目录优先级: 显式配置 > env FUSION_MULTINODE_SESSION_STORE_DIR > 默认路径。
 def resolve_store_dir(configured_dir: str = "") -> str:
-    """存储目录优先级: 显式配置 > env FUSION_MULTINODE_SESSION_STORE_DIR > 默认路径。"""
     d = (configured_dir or "").strip() or os.environ.get("FUSION_MULTINODE_SESSION_STORE_DIR", "").strip()
     return d or DEFAULT_STORE_DIR
 
 
+# 文件级会话存储 — 每会话一 JSON 文件, 原子 tmp+replace 落盘, 会话 id 作路径段强校验。
 class ClusterSessionStore:
-    """文件级会话存储 — 每会话一 JSON 文件, 原子 tmp+replace 落盘, 会话 id 作路径段强校验。"""
-
     def __init__(self, base_dir: str = ""):
         self.base_dir = Path(resolve_store_dir(base_dir))
         self.base_dir.mkdir(parents=True, exist_ok=True)

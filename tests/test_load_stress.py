@@ -1,9 +1,8 @@
-"""S3 负载/压测基线测试 — 并发任务派发吞吐 / 尾延迟 / 无丢失。
-
-调度层压测 (免真模型): N 节点集群 + FakeInferenceBackend, 并发提交 M 任务,
-测派发吞吐 (task/s), 尾延迟 (p95/p99 completed_at - started_at), 无丢失
-(全部 COMPLETED, 无 FAILED/丢失)。派发走真 ASGI 路由 (PortRoutingTransport)。
-"""
+# S3 负载/压测基线测试 — 并发任务派发吞吐 / 尾延迟 / 无丢失。
+#
+# 调度层压测 (免真模型): N 节点集群 + FakeInferenceBackend, 并发提交 M 任务,
+# 测派发吞吐 (task/s), 尾延迟 (p95/p99 completed_at - started_at), 无丢失
+# (全部 COMPLETED, 无 FAILED/丢失)。派发走真 ASGI 路由 (PortRoutingTransport)。
 
 from __future__ import annotations
 
@@ -28,9 +27,8 @@ AUTH_HEADERS = {"Authorization": f"Bearer {TEST_TOKEN}"}
 NODE_PORTS = {"n1": 22445, "n2": 22446, "n3": 22447, "n4": 22448}
 
 
+# 零延迟假后端 — 压测调度器派发链路, 非模型推理。
 class FastBackend(InferenceBackend):
-    """零延迟假后端 — 压测调度器派发链路, 非模型推理。"""
-
     def __init__(self, node_id: str):
         self._node_id = node_id
         self.call_count = 0
@@ -56,9 +54,8 @@ class FastBackend(InferenceBackend):
         return True
 
 
+# 按 URL 端口路由到对应 agent ASGI app。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -82,9 +79,9 @@ class PortRoutingTransport(AsyncBaseTransport):
             await c.aclose()
 
 
+# 起 master + 四节点 agent, SSRF 测试内放行 127.0.0.1。
 @pytest.fixture
 async def stress_cluster(monkeypatch):
-    """起 master + 四节点 agent, SSRF 测试内放行 127.0.0.1。"""
     monkeypatch.setattr(
         "fusion_multi_node.master.cluster_master.is_safe_peer_host",
         lambda host: True,
@@ -147,8 +144,8 @@ async def stress_cluster(monkeypatch):
         await routing_transport.aclose()
 
 
+# 等所有派发后台任务结束。
 async def _drain(master: ClusterMaster, timeout_s: float = 15.0) -> None:
-    """等所有派发后台任务结束。"""
     for _ in range(int(timeout_s * 20)):
         pending = [t for t in master._dispatch_tasks.values() if not t.done()]
         if not pending:
@@ -156,18 +153,17 @@ async def _drain(master: ClusterMaster, timeout_s: float = 15.0) -> None:
         await asyncio.sleep(0.05)
 
 
+# S3 调度层压测基线 — 吞吐 / 尾延迟 / 无丢失。
 class TestLoadStress:
-    """S3 调度层压测基线 — 吞吐 / 尾延迟 / 无丢失。"""
-
+    # 并发 40 任务 (单节点 DATA) 全部 COMPLETED, 无丢失/无 FAILED。
+    #
+    # 基线断言 (非阈值卡死, 记录基线值供回归对比):
+    # - 全部 COMPLETED (lost == 0, failed == 0)
+    # - 每任务派发到达一节点 (backend 总调用 == 40)
+    # - 派发吞吐 > 20 task/s (调度器自身非瓶颈)
+    #
     @pytest.mark.asyncio
     async def test_concurrent_dispatch_no_loss(self, stress_cluster):
-        """并发 40 任务 (单节点 DATA) 全部 COMPLETED, 无丢失/无 FAILED。
-
-        基线断言 (非阈值卡死, 记录基线值供回归对比):
-        - 全部 COMPLETED (lost == 0, failed == 0)
-        - 每任务派发到达一节点 (backend 总调用 == 40)
-        - 派发吞吐 > 20 task/s (调度器自身非瓶颈)
-        """
         master = stress_cluster["master"]
         backends = stress_cluster["backends"]
         n_tasks = 40
@@ -209,14 +205,14 @@ class TestLoadStress:
         assert completed == n_tasks, f"完成数不匹配: {completed}/{n_tasks}"
         assert total_backend_calls == n_tasks, f"backend 调用数 != 任务数: {total_backend_calls}/{n_tasks}"
 
+    # 派发延迟尾部分布 — p95 < 5.0s, p99 < 8.0s (单节点 DATA, 免真模型)。
+    #
+    # 记录基线: completed_at - started_at 包含 select_nodes + httpx 派发 + backend
+    # (零延迟) + finalize + _drain 0.05s 轮询粒度。卡死阈值防回归恶化 (串行化
+    # 退化时 p95 会冲到数十秒), 不卡绝对最优 — 阈值留机器负载余量。
+    #
     @pytest.mark.asyncio
     async def test_dispatch_latency_tail(self, stress_cluster):
-        """派发延迟尾部分布 — p95 < 5.0s, p99 < 8.0s (单节点 DATA, 免真模型)。
-
-        记录基线: completed_at - started_at 包含 select_nodes + httpx 派发 + backend
-        (零延迟) + finalize + _drain 0.05s 轮询粒度。卡死阈值防回归恶化 (串行化
-        退化时 p95 会冲到数十秒), 不卡绝对最优 — 阈值留机器负载余量。
-        """
         master = stress_cluster["master"]
         n_tasks = 30
 
@@ -255,13 +251,13 @@ class TestLoadStress:
         assert p95 < 5.0, f"p95 派发延迟过高: {p95:.3f}s"
         assert p99 < 8.0, f"p99 派发延迟过高: {p99:.3f}s"
 
+    # DATA 并行 (两节点两 shard) 并发 20 任务 — 吞吐 > 3.0 task/s, 无丢失。
+    #
+    # 验证多节点派发在并发压力下不丢任务、不串行化退化 (串行化退化吞吐
+    # 会跌到 <1 task/s)。阈值留机器负载余量, 不卡绝对最优。
+    #
     @pytest.mark.asyncio
     async def test_data_parallel_throughput(self, stress_cluster):
-        """DATA 并行 (两节点两 shard) 并发 20 任务 — 吞吐 > 3.0 task/s, 无丢失。
-
-        验证多节点派发在并发压力下不丢任务、不串行化退化 (串行化退化吞吐
-        会跌到 <1 task/s)。阈值留机器负载余量, 不卡绝对最优。
-        """
         master = stress_cluster["master"]
         backends = stress_cluster["backends"]
         n_tasks = 20

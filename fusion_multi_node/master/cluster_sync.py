@@ -1,14 +1,13 @@
-"""集群同步与韧性 — 共享模型缓存、增量同步、网络分区降级、节点负载报告。
-
-⚠️ AR审计 P1 合规: 仅限局域网对端同步 (is_safe_peer_host 拒环回/链路本地/元数据,
-放行私网), 不出站云。路径安全 (is_safe_path_segment + normpath 遍历拦截)。
-ClusterSyncManager 已接 master_server start()/stop() 生命周期 (E1 一次性构造于 __init__)。
-
-- ModelManifest: 模型文件清单 + SHA256 哈希
-- IncrementalSync: 仅同步差异文件
-- PartitionDetector: 心跳超时检测，降级单机运行，恢复后自动同步
-- NodeLoadReport: 节点硬件负载报告
-"""
+# 集群同步与韧性 — 共享模型缓存、增量同步、网络分区降级、节点负载报告。
+#
+# ⚠️ AR审计 P1 合规: 仅限局域网对端同步 (is_safe_peer_host 拒环回/链路本地/元数据,
+# 放行私网), 不出站云。路径安全 (is_safe_path_segment + normpath 遍历拦截)。
+# ClusterSyncManager 已接 master_server start()/stop() 生命周期 (E1 一次性构造于 __init__)。
+#
+# - ModelManifest: 模型文件清单 + SHA256 哈希
+# - IncrementalSync: 仅同步差异文件
+# - PartitionDetector: 心跳超时检测，降级单机运行，恢复后自动同步
+# - NodeLoadReport: 节点硬件负载报告
 
 from __future__ import annotations
 
@@ -29,11 +28,11 @@ from fusion_multi_node.utils.auth import build_safe_url, is_safe_path_segment, i
 logger = logging.getLogger(__name__)
 
 
+# 校验来自远端 manifest 的相对路径，防路径穿越。
+#
+# 规范化后必须仍在 model_dir 内，且每个段合法。
+#
 def _safe_rel_path(rel: str) -> str:
-    """校验来自远端 manifest 的相对路径，防路径穿越。
-
-    规范化后必须仍在 model_dir 内，且每个段合法。
-    """
     if not rel or "\x00" in rel:
         raise ValueError(f"非法同步路径: {rel!r}")
     # 拒绝对绝对路径与盘符
@@ -142,8 +141,8 @@ def compute_file_sha256(file_path: str) -> str:
         return ""
 
 
+# 扫描模型目录，生成 ModelManifest。
 def build_manifest(model_name: str, model_dir: str, model_id: str = "") -> ModelManifest:
-    """扫描模型目录，生成 ModelManifest。"""
     files = []
     total_size = 0
     if not os.path.isdir(model_dir):
@@ -176,8 +175,8 @@ def build_manifest(model_name: str, model_dir: str, model_id: str = "") -> Model
     )
 
 
+# 对比本地与远端 manifest，返回需要同步的文件列表。
 def compute_sync_diff(local: ModelManifest, remote: ModelManifest) -> list[FileEntry]:
-    """对比本地与远端 manifest，返回需要同步的文件列表。"""
     local_map = {f.path: f for f in local.files}
     remote_map = {f.path: f for f in remote.files}
     diff_files = []
@@ -192,9 +191,8 @@ def compute_sync_diff(local: ModelManifest, remote: ModelManifest) -> list[FileE
     return diff_files
 
 
+# 网络分区检测与降级管理。
 class PartitionDetector:
-    """网络分区检测与降级管理。"""
-
     def __init__(
         self,
         node_id: str,
@@ -287,9 +285,8 @@ class PartitionDetector:
         }
 
 
+# 集群模型同步管理器。
 class ClusterSyncManager:
-    """集群模型同步管理器。"""
-
     def __init__(
         self,
         model_cache_dir: str = "",
@@ -317,11 +314,12 @@ class ClusterSyncManager:
             self._sync_task.cancel()
             self._sync_task = None
 
+    # 获取本地模型的 manifest。
     def get_manifest(self, model_name: str) -> ModelManifest:
-        """获取本地模型的 manifest。"""
         model_dir = os.path.join(self.model_cache_dir, model_name)
         return build_manifest(model_name, model_dir)
 
+    # 增量同步: 对比 manifest，仅下载差异文件。
     async def incremental_sync(
         self,
         model_name: str,
@@ -329,7 +327,6 @@ class ClusterSyncManager:
         source_host: str,
         source_port: int = 11452,
     ) -> dict[str, Any]:
-        """增量同步: 对比 manifest，仅下载差异文件。"""
         local_manifest = self.get_manifest(model_name)
         diff_files = compute_sync_diff(local_manifest, remote_manifest)
         if not diff_files:
@@ -363,8 +360,8 @@ class ClusterSyncManager:
         logger.info(f"增量同步完成: {model_name}, {synced}/{len(diff_files)} files")
         return {"model_name": model_name, "synced": synced, "total_diff": len(diff_files)}
 
+    # 触发异步同步任务。
     def trigger_sync(self, model_name: str, source_host: str, source_port: int = 11452) -> None:
-        """触发异步同步任务。"""
         self._sync_queue.put_nowait((model_name, source_host, source_port))
         logger.info(f"同步任务入队: {model_name} from {source_host}")
 
@@ -388,14 +385,14 @@ class ClusterSyncManager:
             except Exception as e:
                 logger.error(f"同步循环处理失败: {model_name}, {e}")
 
+    # 采集本节点硬件负载。
+    #
+    # #64 修复: 原 system_profiler SPDisplaysDataType VRAM parse 是 `pass` no-op
+    # → gpu_memory_*_gb 恒 0.0 (Apple Silicon 统一内存无独立 VRAM, 且 parse 没填字段)。
+    # 改抓本地 fusion-mlx /v1/health memory 块 (mx.metal.get_active_memory 派生),
+    # 底座未运行 → 0.0 (离线安全)。psutil RAM/disk/cpu 不变。
+    #
     def collect_load_report(self) -> NodeLoadReport:
-        """采集本节点硬件负载。
-
-        #64 修复: 原 system_profiler SPDisplaysDataType VRAM parse 是 `pass` no-op
-        → gpu_memory_*_gb 恒 0.0 (Apple Silicon 统一内存无独立 VRAM, 且 parse 没填字段)。
-        改抓本地 fusion-mlx /v1/health memory 块 (mx.metal.get_active_memory 派生),
-        底座未运行 → 0.0 (离线安全)。psutil RAM/disk/cpu 不变。
-        """
         try:
             import psutil
 

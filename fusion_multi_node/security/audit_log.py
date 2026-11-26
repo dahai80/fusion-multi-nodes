@@ -1,25 +1,24 @@
-"""审计日志 — 追加写 JSONL, 记录所有安全相关动作 (GAP-8, 复审计 2026-08-26)。
-
-企业级商业生产发布阻塞项: 旧实现无审计日志 — 节点注册/审批/鉴权失败/权限拒绝/任务提交取消
-等敏感动作无留痕, 事故不可溯源。本模块补齐: append-only JSONL 落盘 `~/.fusion/multi-node/audit.log`,
-每行一条事件, 字段固定。
-
-字段契约:
-  ts       ISO8601 带时区时间戳
-  actor    动作发起方 (node_id / "master" / "unknown" / ip)
-  action   动作类型 (register/join/approve/reject/auth_fail/permission_deny/task_submit/task_cancel/config_reload)
-  path     请求路径
-  method   HTTP 方法
-  node_id  动作目标节点 (注册/审批对象; 任务动作可空)
-  result   ok | denied | error
-  detail   人类可读补充 (拒因 / 角色等)
-
-设计约束:
-- 追加写 (open "a"), 进程内 threading.Lock 串行化, 不丢条目。
-- 写失败只 log warning 不 raise — 审计日志不应拖垮主请求路径 (Rule 12 但安全日志降级,
-  因 audit.log 不可用不应让鉴权通过/拒绝本身失败)。
-- 路径经 FUSION_AUDIT_LOG 环境变量可覆盖 (测试隔离用)。
-"""
+# 审计日志 — 追加写 JSONL, 记录所有安全相关动作 (GAP-8, 复审计 2026-08-26)。
+#
+# 企业级商业生产发布阻塞项: 旧实现无审计日志 — 节点注册/审批/鉴权失败/权限拒绝/任务提交取消
+# 等敏感动作无留痕, 事故不可溯源。本模块补齐: append-only JSONL 落盘 `~/.fusion/multi-node/audit.log`,
+# 每行一条事件, 字段固定。
+#
+# 字段契约:
+# ts       ISO8601 带时区时间戳
+# actor    动作发起方 (node_id / "master" / "unknown" / ip)
+# action   动作类型 (register/join/approve/reject/auth_fail/permission_deny/task_submit/task_cancel/config_reload)
+# path     请求路径
+# method   HTTP 方法
+# node_id  动作目标节点 (注册/审批对象; 任务动作可空)
+# result   ok | denied | error
+# detail   人类可读补充 (拒因 / 角色等)
+#
+# 设计约束:
+# - 追加写 (open "a"), 进程内 threading.Lock 串行化, 不丢条目。
+# - 写失败只 log warning 不 raise — 审计日志不应拖垮主请求路径 (Rule 12 但安全日志降级,
+# 因 audit.log 不可用不应让鉴权通过/拒绝本身失败)。
+# - 路径经 FUSION_AUDIT_LOG 环境变量可覆盖 (测试隔离用)。
 
 from __future__ import annotations
 
@@ -38,8 +37,8 @@ _lock = threading.Lock()
 _default: AuditLogger | None = None
 
 
+# 模块级单例 — 进程内复用同一 writer (同一 lock 串行写同一文件)。
 def get_audit_logger() -> AuditLogger:
-    """模块级单例 — 进程内复用同一 writer (同一 lock 串行写同一文件)。"""
     global _default
     if _default is None:
         with _lock:
@@ -48,16 +47,15 @@ def get_audit_logger() -> AuditLogger:
     return _default
 
 
+# 测试用 — 清单例 (测试改 FUSION_AUDIT_LOG 后须 reset 才生效)。
 def reset_audit_logger() -> None:
-    """测试用 — 清单例 (测试改 FUSION_AUDIT_LOG 后须 reset 才生效)。"""
     global _default
     with _lock:
         _default = None
 
 
+# 追加写 JSONL 审计日志。线程安全, 写失败降级不抛。
 class AuditLogger:
-    """追加写 JSONL 审计日志。线程安全, 写失败降级不抛。"""
-
     def __init__(self, log_path: str | None = None):
         env_path = os.environ.get("FUSION_AUDIT_LOG", "").strip()
         if log_path:
@@ -82,13 +80,13 @@ class AuditLogger:
     def path(self) -> Path:
         return self._path
 
+    # 惰性派生 HMAC 链密钥 — 从 cluster_token 经 HKDF (cluster_key 模块)。
+    #
+    # 首次 log 时取 token; 失败 (token 未就绪/库缺) 降级 _chain_key=None
+    # → 该条及后续无链字段, guard 视为未验证基线 (审计不丢事件优先)。
+    # token 轮换后进程需重建单例 (reset_audit_logger) 才重派生 — v0.13.0 已知限制。
+    #
     def _ensure_chain_key(self) -> None:
-        """惰性派生 HMAC 链密钥 — 从 cluster_token 经 HKDF (cluster_key 模块)。
-
-        首次 log 时取 token; 失败 (token 未就绪/库缺) 降级 _chain_key=None
-        → 该条及后续无链字段, guard 视为未验证基线 (审计不丢事件优先)。
-        token 轮换后进程需重建单例 (reset_audit_logger) 才重派生 — v0.13.0 已知限制。
-        """
         if self._chain_key_loaded:
             return
         try:
@@ -104,23 +102,24 @@ class AuditLogger:
         finally:
             self._chain_key_loaded = True
 
+    # 规范 JSON over (record 减 mac) — MAC 签名输入, 须确定性。
     def _chain_payload(self, record: dict) -> bytes:
-        """规范 JSON over (record 减 mac) — MAC 签名输入, 须确定性。"""
         from fusion_multi_node.security.cluster_key import canonical_json
 
         payload = {k: v for k, v in record.items() if k != "mac"}
         return canonical_json(payload)
 
+    # 规范 JSON over 完整记录 (含 mac) — prev_hash 滚动锚点用。
+    #
+    # 与 _chain_payload 同算法 (canonical_json), 但含 mac — guard 验证:
+    # sha256(_canonical_full(record)) == 下条 prev_hash。
+    #
     def _canonical_full(self, record: dict) -> bytes:
-        """规范 JSON over 完整记录 (含 mac) — prev_hash 滚动锚点用。
-
-        与 _chain_payload 同算法 (canonical_json), 但含 mac — guard 验证:
-        sha256(_canonical_full(record)) == 下条 prev_hash。
-        """
         from fusion_multi_node.security.cluster_key import canonical_json
 
         return canonical_json(record)
 
+    # 写一条审计事件。绝不抛 — 失败只 warning。
     def log(
         self,
         *,
@@ -132,7 +131,6 @@ class AuditLogger:
         result: str = "ok",
         detail: str = "",
     ) -> None:
-        """写一条审计事件。绝不抛 — 失败只 warning。"""
         event = {
             "ts": datetime.now(UTC).isoformat(),
             "actor": actor,
@@ -182,8 +180,8 @@ class AuditLogger:
             else:
                 logger.warning(f"审计日志写入失败 (降级, 不影响主路径): {e} event={line}")
 
+    # 读全部事件 — 测试校验用。损坏行跳过。
     def read(self) -> list[dict]:
-        """读全部事件 — 测试校验用。损坏行跳过。"""
         if not self._path.exists():
             return []
         events: list[dict] = []

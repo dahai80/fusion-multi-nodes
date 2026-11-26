@@ -1,13 +1,12 @@
-"""Node Agent — 每台 Mac 必须部署的节点代理。
-
-核心职责：
-- 与本机 fusion-desk 深度绑定
-- 上报本机硬件、进程、显存占用
-- 转发 Master 下发任务给本地 fusion-mlx
-- 本地插件网关
-- 分布式通信适配层
-- 本地故障上报
-"""
+# Node Agent — 每台 Mac 必须部署的节点代理。
+#
+# 核心职责：
+# - 与本机 fusion-desk 深度绑定
+# - 上报本机硬件、进程、显存占用
+# - 转发 Master 下发任务给本地 fusion-mlx
+# - 本地插件网关
+# - 分布式通信适配层
+# - 本地故障上报
 
 from __future__ import annotations
 
@@ -38,13 +37,12 @@ from fusion_multi_node.utils.auth import is_safe_path_segment
 logger = logging.getLogger(__name__)
 
 
+# 推理后端协议 — 解耦 Agent 对 fusion-mlx 的硬依赖。
+#
+# 默认实现 FusionMLXBackend 通过 HTTP 调用本地 fusion-mlx；
+# 可替换为其他推理引擎（vLLM、TGI 等），只需实现 chat / embed 接口。
+#
 class InferenceBackend:
-    """推理后端协议 — 解耦 Agent 对 fusion-mlx 的硬依赖。
-
-    默认实现 FusionMLXBackend 通过 HTTP 调用本地 fusion-mlx；
-    可替换为其他推理引擎（vLLM、TGI 等），只需实现 chat / embed 接口。
-    """
-
     async def chat(
         self,
         model: str,
@@ -67,14 +65,13 @@ class InferenceBackend:
         raise NotImplementedError
 
 
+# 默认推理后端 — 通过 HTTP 调用本地 fusion-mlx (OpenAI-compatible API)。
+#
+# P3: 除 /v1/chat/completions 外, 接上游 /distributed/* (#621) 真实张量
+# PIPELINE — load_shard 注册层分片, pipeline_step 跑层前向, 激活 b64.npy 跨节点。
+# /distributed/* 受 fusion-mlx api_key 保护 (Bearer), 与集群 cluster_token 不同源。
+#
 class FusionMLXBackend(InferenceBackend):
-    """默认推理后端 — 通过 HTTP 调用本地 fusion-mlx (OpenAI-compatible API)。
-
-    P3: 除 /v1/chat/completions 外, 接上游 /distributed/* (#621) 真实张量
-    PIPELINE — load_shard 注册层分片, pipeline_step 跑层前向, 激活 b64.npy 跨节点。
-    /distributed/* 受 fusion-mlx api_key 保护 (Bearer), 与集群 cluster_token 不同源。
-    """
-
     def __init__(
         self,
         base_url: str = "http://localhost:11432",
@@ -110,13 +107,14 @@ class FusionMLXBackend(InferenceBackend):
         # /v1/models 探测须带 Bearer, fusion-mlx 启用 api_key 时无头恒 401 (issue #60)。
         return self._api_key
 
+    # fusion-mlx /distributed/* 鉴权头 — api_key Bearer。
     def _dist_headers(self) -> dict[str, str]:
-        """fusion-mlx /distributed/* 鉴权头 — api_key Bearer。"""
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
+    # 上游 /distributed/load_shard — 注册模型层分片, 返回 shard_id。
     async def load_shard(
         self,
         model_id: str,
@@ -124,7 +122,6 @@ class FusionMLXBackend(InferenceBackend):
         layer_range: list[int],
         dtype: str | None = None,
     ) -> dict[str, Any]:
-        """上游 /distributed/load_shard — 注册模型层分片, 返回 shard_id。"""
         body = {
             "model_id": model_id,
             "shard_index": shard_index,
@@ -140,6 +137,7 @@ class FusionMLXBackend(InferenceBackend):
         resp.raise_for_status()
         return resp.json()
 
+    # 上游 /distributed/pipeline_step — 跑分片层前向, 返回 hidden_states b64.npy。
     async def pipeline_step(
         self,
         shard_id: str,
@@ -147,7 +145,6 @@ class FusionMLXBackend(InferenceBackend):
         input_ids: list[int] | None,
         position_ids: list[int] | None = None,
     ) -> dict[str, Any]:
-        """上游 /distributed/pipeline_step — 跑分片层前向, 返回 hidden_states b64.npy。"""
         body = {
             "shard_id": shard_id,
             "hidden_states": hidden_states,
@@ -163,8 +160,8 @@ class FusionMLXBackend(InferenceBackend):
         resp.raise_for_status()
         return resp.json()
 
+    # 上游 /distributed/shards/{id} DELETE — 释放分片 (E2E 清理)。
     async def drop_shard(self, shard_id: str) -> dict[str, Any]:
-        """上游 /distributed/shards/{id} DELETE — 释放分片 (E2E 清理)。"""
         client = await self._get_client()
         req = client.build_request(
             "DELETE",
@@ -256,10 +253,9 @@ class FusionMLXBackend(InferenceBackend):
             await self._client.aclose()
 
 
+# 节点代理配置。
 @dataclass
 class AgentConfig:
-    """节点代理配置。"""
-
     node_id: str = ""
     master_host: str = "localhost"
     master_port: int = 11452
@@ -338,12 +334,11 @@ class AgentConfig:
                 self.drivers.append("resident")
 
 
+# 节点代理 — 每台 Mac 运行一个实例。
+#
+# 与 Cluster Master 保持心跳，上报硬件状态，执行下发的推理任务。
+#
 class NodeAgent:
-    """节点代理 — 每台 Mac 运行一个实例。
-
-    与 Cluster Master 保持心跳，上报硬件状态，执行下发的推理任务。
-    """
-
     def __init__(
         self,
         config: AgentConfig | None = None,
@@ -432,18 +427,18 @@ class NodeAgent:
             enforce_rlimits=enforce,
         )
 
+    # #73: 惰性建 SupervisorBridge (首次 supervisor_rpc 任务 / ping 时)。
     def _get_supervisor(self):
-        """#73: 惰性建 SupervisorBridge (首次 supervisor_rpc 任务 / ping 时)。"""
         if self._supervisor is None:
             from fusion_multi_node.agent.supervisor_bridge import SupervisorBridge
 
             self._supervisor = SupervisorBridge()
         return self._supervisor
 
+    # #73: 心跳周期探测 fusion-sv 可用 (ping status, 3s, 经 to_thread 不阻塞 loop)。
+    # 节流 30s 一次 (心跳 3s 一次, 无需每心跳都 fork)。返回缓存的 supervisor_available。
+    #
     async def _refresh_supervisor_available(self) -> bool:
-        """#73: 心跳周期探测 fusion-sv 可用 (ping status, 3s, 经 to_thread 不阻塞 loop)。
-        节流 30s 一次 (心跳 3s 一次, 无需每心跳都 fork)。返回缓存的 supervisor_available。
-        """
         now = time.time()
         if now - self._supervisor_last_ping < 30.0:
             return self._supervisor_available
@@ -458,13 +453,13 @@ class NodeAgent:
 
     # ── 硬件信息收集 ──
 
+    # 采集并缓存准静态硬件信息 (设备型号/GPU核数/IP/MLX版本等)。
+    #
+    # R1 修复: 这类信息在进程生命周期内基本不变, 启动时采集一次即可。
+    # system_profiler/sysctl 子进程 (秒级开销) 只在此处运行一次,
+    # 后续心跳/硬件循环改用 _collect_dynamic_load (纯 psutil, 微秒级)。
+    #
     def _ensure_static_hardware(self) -> dict[str, Any]:
-        """采集并缓存准静态硬件信息 (设备型号/GPU核数/IP/MLX版本等)。
-
-        R1 修复: 这类信息在进程生命周期内基本不变, 启动时采集一次即可。
-        system_profiler/sysctl 子进程 (秒级开销) 只在此处运行一次,
-        后续心跳/硬件循环改用 _collect_dynamic_load (纯 psutil, 微秒级)。
-        """
         if self._static_hardware is not None:
             return self._static_hardware
 
@@ -494,17 +489,17 @@ class NodeAgent:
         )
         return self._static_hardware
 
+    # 采集动态负载字段 (psutil + MLX Metal 显存, 无 system_profiler 子进程)。
+    #
+    # R1 修复: 供心跳/硬件循环高频调用, 替代 collect_hardware_info 的全量重采集。
+    # R5 修复: active_tasks 取 len(_running_task_handles) 反映并发任务数,
+    # task_queue_len 同源, 供 LoadRouter 队列维度真实感知。
+    # #64 修复: 抓 fusion-mlx /v1/health memory 块 → metal_util (VRAM_FIRST weight 0.2)
+    # + gpu_memory_*_gb。原 metal_util 恒 0.0 = VRAM_FIRST 该维度死权重。
+    # psutil 统一内存 = 系统级, MLX active bytes = 推理实际 Metal 占用, 二者互补。
+    # 底座未运行 → None → 全 0.0, 不拖垮心跳 (离线安全)。
+    #
     async def _collect_dynamic_load(self) -> dict[str, Any]:
-        """采集动态负载字段 (psutil + MLX Metal 显存, 无 system_profiler 子进程)。
-
-        R1 修复: 供心跳/硬件循环高频调用, 替代 collect_hardware_info 的全量重采集。
-        R5 修复: active_tasks 取 len(_running_task_handles) 反映并发任务数,
-                 task_queue_len 同源, 供 LoadRouter 队列维度真实感知。
-        #64 修复: 抓 fusion-mlx /v1/health memory 块 → metal_util (VRAM_FIRST weight 0.2)
-                 + gpu_memory_*_gb。原 metal_util 恒 0.0 = VRAM_FIRST 该维度死权重。
-                 psutil 统一内存 = 系统级, MLX active bytes = 推理实际 Metal 占用, 二者互补。
-                 底座未运行 → None → 全 0.0, 不拖垮心跳 (离线安全)。
-        """
         import psutil
 
         mem = psutil.virtual_memory()
@@ -539,13 +534,13 @@ class NodeAgent:
             "timestamp": time.time(),
         }
 
+    # 收集本机硬件信息 (静态缓存 + 动态 psutil+MLX 合并)。
+    #
+    # P1-10: _ensure_static_hardware 首次调 system_profiler/ipconfig (至 5s) —
+    # 经 to_thread 移出 event loop; 后续命中缓存为纯内存微秒级。
+    # #64: 动态负载 _collect_dynamic_load 已 async (抓 MLX /v1/health)。
+    #
     async def collect_hardware_info(self) -> dict[str, Any]:
-        """收集本机硬件信息 (静态缓存 + 动态 psutil+MLX 合并)。
-
-        P1-10: _ensure_static_hardware 首次调 system_profiler/ipconfig (至 5s) —
-        经 to_thread 移出 event loop; 后续命中缓存为纯内存微秒级。
-        #64: 动态负载 _collect_dynamic_load 已 async (抓 MLX /v1/health)。
-        """
         static = await asyncio.to_thread(self._ensure_static_hardware)
         dynamic = await self._collect_dynamic_load()
         return {**static, **dynamic}
@@ -581,8 +576,8 @@ class NodeAgent:
             pass
         return "127.0.0.1"
 
+    # 获取 fusion-mlx 底座版本。
     def _get_mlx_version(self) -> str:
-        """获取 fusion-mlx 底座版本。"""
         try:
             _mlx_url = os.environ.get("FUSION_MLX_URL") or f"http://localhost:{self.config.fusion_mlx_port}"
             # /v1/models 须带 api_key Bearer — fusion-mlx 启用鉴权时无头恒 401 (issue #60)。
@@ -616,8 +611,8 @@ class NodeAgent:
             logger.debug(f"获取 GPU 信息失败: {e}")
             return 0, ""
 
+    # 检查本地服务是否运行。
     def _check_service(self, port: int) -> bool:
-        """检查本地服务是否运行。"""
         try:
             import socket
 
@@ -639,14 +634,14 @@ class NodeAgent:
             self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers, **mtls_client_kwargs())
         return self._http_client
 
+    # 向 Master 发送心跳 + 五维负载。
+    #
+    # R1 修复: 仅用 psutil 刷动态字段, 不再每 3s fork system_profiler。
+    # R5 修复: 心跳同时 POST /api/nodes/load 上报五维负载 (task_queue_len/cpu/uma),
+    # LoadRouter 队列维度据此真实感知并发负载, 不再恒为 0。
+    # 静态硬件信息由 report_hardware 启动时一次性上报。
+    #
     async def send_heartbeat(self) -> bool:
-        """向 Master 发送心跳 + 五维负载。
-
-        R1 修复: 仅用 psutil 刷动态字段, 不再每 3s fork system_profiler。
-        R5 修复: 心跳同时 POST /api/nodes/load 上报五维负载 (task_queue_len/cpu/uma),
-                 LoadRouter 队列维度据此真实感知并发负载, 不再恒为 0。
-        静态硬件信息由 report_hardware 启动时一次性上报。
-        """
         load = await self._collect_dynamic_load()
         # #73: 周期探测 fusion-sv 可用, 心跳上报 supervisor_available。
         await self._refresh_supervisor_available()
@@ -687,8 +682,8 @@ class NodeAgent:
             logger.debug(f"心跳发送失败: {e}")
             return False
 
+    # 向 Master 上报完整硬件信息。
     async def report_hardware(self) -> bool:
-        """向 Master 上报完整硬件信息。"""
         # P1-10: collect_hardware_info 内部已把 system_profiler/ipconfig (至 5s)
         # 经 to_thread 移出 event loop (审计 §4.5); collect_hardware_info 自身 async。
         info = await self.collect_hardware_info()
@@ -727,17 +722,17 @@ class NodeAgent:
 
     # ── 任务执行 ──
 
+    # 执行 Master 下发的任务。
+    #
+    # 任务格式：
+    # {
+    # "task_id": "...",
+    # "type": "inference" | "embedding" | "plugin",
+    # "model": "...",
+    # "params": {...},
+    # }
+    #
     async def execute_task(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行 Master 下发的任务。
-
-        任务格式：
-        {
-            "task_id": "...",
-            "type": "inference" | "embedding" | "plugin",
-            "model": "...",
-            "params": {...},
-        }
-        """
         # P1-14 (审计 §5.3): 拒同 task_id 重复派发 — master 重派同 task_id 到本节点时
         # 上一执行仍在跑 → 拒, 返回 dedup 错误 (master 归类逻辑错误不重试, 避免双重推理)。
         # 无 task_id (直接调用/旧客户端) 分配匿名 id, 不做去重但防 _running_task_handles 撞键。
@@ -834,15 +829,15 @@ class NodeAgent:
 
         return result
 
+    # M6-02 沙箱入口校验 — 校验任务携带的不可信路径/网络, 拒则返回原因字符串。
+    #
+    # 纯 Python 进程内检查, 不做 OS 级资源限制 (见 __init__ 注释)。
+    # 只过滤任务方下发的路径/对端 (model_path、model_sync source), 不校验 agent
+    # 自建临时目录 — 后者是 agent 内部工作目录 (macOS 上为 $TMPDIR 非 /tmp),
+    # 对其加沙箱 allowed_paths 会误拒所有任务。
+    # 无沙箱或允许时返回 None。
+    #
     def _sandbox_gate(self, task: dict[str, Any], task_type: str, temp_dir: str) -> str | None:
-        """M6-02 沙箱入口校验 — 校验任务携带的不可信路径/网络, 拒则返回原因字符串。
-
-        纯 Python 进程内检查, 不做 OS 级资源限制 (见 __init__ 注释)。
-        只过滤任务方下发的路径/对端 (model_path、model_sync source), 不校验 agent
-        自建临时目录 — 后者是 agent 内部工作目录 (macOS 上为 $TMPDIR 非 /tmp),
-        对其加沙箱 allowed_paths 会误拒所有任务。
-        无沙箱或允许时返回 None。
-        """
         # E5: 不可信输入段段校验防穿越 — 无沙箱配置时也强制 (plugin/action/model 不可信)。
         # 旧实现 sandbox is None 在此之前 short-circuit return, 致默认部署 E5 gate 失效
         # (AR 审计 #24: 默认安全姿态 sandbox=None → 入口防穿越形同虚设)。
@@ -869,8 +864,8 @@ class NodeAgent:
             return f"模型路径 {model_path} 不在沙箱允许访问路径内"
         return None
 
+    # 取消正在运行的任务 — 真中止运行推理协程, 非假动作。
     async def cancel_task(self, task_id: str) -> bool:
-        """取消正在运行的任务 — 真中止运行推理协程, 非假动作。"""
         handle = self._running_task_handles.get(task_id)
         if not handle or handle.done():
             logger.info(f"任务无可取消运行句柄: {task_id}")
@@ -879,8 +874,8 @@ class NodeAgent:
         logger.info(f"已发送取消信号到任务协程: {task_id}")
         return True
 
+    # 执行推理任务（通过 InferenceBackend）。
     async def _execute_inference(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行推理任务（通过 InferenceBackend）。"""
         model = task.get("model", "")
         # E5: model_name 为不可信输入, 校验防特殊字符触发下游解析问题
         if model and not is_safe_path_segment(model):
@@ -917,8 +912,8 @@ class NodeAgent:
             "node_id": self.config.node_id,
         }
 
+    # 执行 Embedding 任务（通过 InferenceBackend）。
     async def _execute_embedding(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行 Embedding 任务（通过 InferenceBackend）。"""
         text = task.get("params", {}).get("text", "")
         model = task.get("model", "BGE-M3")
         # E5: model 校验
@@ -945,12 +940,12 @@ class NodeAgent:
             "node_id": self.config.node_id,
         }
 
+    # 执行插件任务（转发给本机 fusion-desk）。
+    #
+    # E5: plugin/action 为不可信外部输入, 段段校验 is_safe_path_segment 防 ../ 穿越,
+    # 防特殊字符注入下游 URL。转发经 _get_http_client, 已带集群 Bearer token 鉴权。
+    #
     async def _execute_plugin(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行插件任务（转发给本机 fusion-desk）。
-
-        E5: plugin/action 为不可信外部输入, 段段校验 is_safe_path_segment 防 ../ 穿越,
-        防特殊字符注入下游 URL。转发经 _get_http_client, 已带集群 Bearer token 鉴权。
-        """
         plugin = task.get("plugin", "")
         action = task.get("action", "")
         if not is_safe_path_segment(plugin):
@@ -967,12 +962,12 @@ class NodeAgent:
         )
         return resp.json()
 
+    # 执行 supervisor_rpc 任务 — 本机 shell-out 调 fusion-sv CLI (进程协调)。
+    #
+    # task["params"] 取 op/svc/timeout。离线安全: fusion-sv 未安装返 available=False,
+    # 不崩 (agent 仍服务推理)。返回 SupervisorBridge.call 结果 + task_id。
+    #
     async def _execute_supervisor(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行 supervisor_rpc 任务 — 本机 shell-out 调 fusion-sv CLI (进程协调)。
-
-        task["params"] 取 op/svc/timeout。离线安全: fusion-sv 未安装返 available=False,
-        不崩 (agent 仍服务推理)。返回 SupervisorBridge.call 结果 + task_id。
-        """
         params = task.get("params", {}) or {}
         op = str(params.get("op", ""))
         svc = str(params.get("svc", "") or "")
@@ -987,8 +982,8 @@ class NodeAgent:
         logger.info(f"#73 supervisor_rpc 完成 task_id={task.get('task_id', '')} op={op} ok={result.get('ok')}")
         return result
 
+    # 执行模型同步任务 — 将指定模型同步到本节点。
     async def _execute_model_sync(self, task: dict[str, Any]) -> dict[str, Any]:
-        """执行模型同步任务 — 将指定模型同步到本节点。"""
         from fusion_multi_node.utils.auth import (
             build_safe_url,
             is_safe_peer_host,
@@ -1019,16 +1014,16 @@ class NodeAgent:
             logger.error(f"模型同步失败: {model_name}, {e}")
             return {"error": str(e)}
 
+    # P3 真实张量 PIPELINE 步骤 — 调上游 fusion-mlx /distributed/*。
+    #
+    # Master 把模型按层切成多段, 每节点跑一段。首段带 input_ids (embed+layers),
+    # 后续段带 hidden_states (b64.npy, 仅 layers)。本方法:
+    # 1) load_shard 注册本节点层段 → shard_id
+    # 2) pipeline_step 跑层前向 → 出口 hidden_states b64.npy
+    # 返回 {hidden_states, shape, dtype, shard_id, node_id} 供 Master 链传下一段。
+    # 末段输出即最终 hidden_states (lm_head/解码超上游首版范围, docs line 151)。
+    #
     async def _execute_pipeline_step(self, task: dict[str, Any]) -> dict[str, Any]:
-        """P3 真实张量 PIPELINE 步骤 — 调上游 fusion-mlx /distributed/*。
-
-        Master 把模型按层切成多段, 每节点跑一段。首段带 input_ids (embed+layers),
-        后续段带 hidden_states (b64.npy, 仅 layers)。本方法:
-        1) load_shard 注册本节点层段 → shard_id
-        2) pipeline_step 跑层前向 → 出口 hidden_states b64.npy
-        返回 {hidden_states, shape, dtype, shard_id, node_id} 供 Master 链传下一段。
-        末段输出即最终 hidden_states (lm_head/解码超上游首版范围, docs line 151)。
-        """
         params = task.get("params", {}) or {}
         model_id = params.get("model_id", "")
         shard_index = int(params.get("shard_index", 0))
@@ -1082,13 +1077,13 @@ class NodeAgent:
             logger.error(f"P3 pipeline_step 失败: task={task_id} model={model_id}: {e}")
             return {"task_id": task_id, "error": f"pipeline_step: {e}"}
 
+    # #79 测试任务 — 在 SandboxExecutor 子进程内跑 operator 下发的命令。
+    #
+    # 安全: 默认 test_exec_enabled=False (env FUSION_NODE_TEST_EXEC=1 开),
+    # 且 select_nodes 据 required_capability 匹配 drivers — 未广告 "test" 不派本节点。
+    # 即便误派, 此处 gate 再拒 (纵深防御)。沙箱做 OS 级隔离 (sandbox-exec/unshare + rlimit)。
+    #
     async def _execute_test(self, task: dict[str, Any]) -> dict[str, Any]:
-        """#79 测试任务 — 在 SandboxExecutor 子进程内跑 operator 下发的命令。
-
-        安全: 默认 test_exec_enabled=False (env FUSION_NODE_TEST_EXEC=1 开),
-        且 select_nodes 据 required_capability 匹配 drivers — 未广告 "test" 不派本节点。
-        即便误派, 此处 gate 再拒 (纵深防御)。沙箱做 OS 级隔离 (sandbox-exec/unshare + rlimit)。
-        """
         task_id = task.get("task_id", "")
         if not self.config.test_exec_enabled:
             logger.warning(f"#79 测试执行未启用, 拒 task={task_id}")
@@ -1131,8 +1126,8 @@ class NodeAgent:
 
     # ── 故障上报 ──
 
+    # 向 Master 上报故障。
     async def report_fault(self, fault_type: str, message: str) -> bool:
-        """向 Master 上报故障。"""
         try:
             client = await self._get_http_client(5.0)
             resp = await client.post(
@@ -1151,8 +1146,8 @@ class NodeAgent:
 
     # ── 生命周期 ──
 
+    # 启动节点代理。
     async def start(self, with_server: bool = True, auto_discover: bool = False) -> None:
-        """启动节点代理。"""
         self._running = True
         logger.info(f"Node Agent 启动: {self.config.node_id}")
 
@@ -1178,8 +1173,8 @@ class NodeAgent:
             server = AgentServer(agent=self)
             await server.start(host=self.config.agent_host, port=self.config.agent_port)
 
+    # 停止节点代理 — 优雅关停: drain 在途任务后再下线。
     async def stop(self) -> None:
-        """停止节点代理 — 优雅关停: drain 在途任务后再下线。"""
         self._running = False
         for task in (self._heartbeat_task, self._hardware_task):
             if task and not task.done():
@@ -1209,14 +1204,14 @@ class NodeAgent:
         await self.report_fault("shutdown", "Node agent stopped")
         logger.info(f"Node Agent 已停止: {self.config.node_id}")
 
+    # 心跳循环。
     async def _heartbeat_loop(self) -> None:
-        """心跳循环。"""
         while self._running:
             await self.send_heartbeat()
             await asyncio.sleep(self.config.heartbeat_interval)
 
+    # 硬件上报循环 (仅日志, R1: 用动态采集避免 system_profiler 风暴)。
     async def _hardware_report_loop(self) -> None:
-        """硬件上报循环 (仅日志, R1: 用动态采集避免 system_profiler 风暴)。"""
         while self._running:
             await asyncio.sleep(self.config.report_interval)
             load = await self._collect_dynamic_load()
@@ -1226,8 +1221,8 @@ class NodeAgent:
                 f"MLX: {load['fusion_mlx_running']} metal={load['metal_util']:.2f}"
             )
 
+    # 通过 mDNS 自动发现 Master 节点。
     async def _discover_master(self) -> bool:
-        """通过 mDNS 自动发现 Master 节点。"""
         try:
             from fusion_multi_node.discovery import MDNSDiscovery
 

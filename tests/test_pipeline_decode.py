@@ -1,12 +1,11 @@
-"""H1 PIPELINE decode 单元测试 — mock httpx, 不依赖真 fusion-mlx。
-
-上游 fusion-mlx /distributed/decode 端点 (issue #630) 未落地 → 调用必 404。
-本测验覆盖:
-1. FusionMLXBackend.decode POST /distributed/decode 带 Bearer 鉴权头 (mock client)
-2. DistributedMLXBridge.pipeline_inference decode 404 → fallback decoded=False + 返隐藏状态
-3. pipeline_inference decode 200 → decoded=True 取 output
-4. pipeline_inference decode 异常 → fallback decoded=False (不 crash)
-"""
+# H1 PIPELINE decode 单元测试 — mock httpx, 不依赖真 fusion-mlx。
+#
+# 上游 fusion-mlx /distributed/decode 端点 (issue #630) 未落地 → 调用必 404。
+# 本测验覆盖:
+# 1. FusionMLXBackend.decode POST /distributed/decode 带 Bearer 鉴权头 (mock client)
+# 2. DistributedMLXBridge.pipeline_inference decode 404 → fallback decoded=False + 返隐藏状态
+# 3. pipeline_inference decode 200 → decoded=True 取 output
+# 4. pipeline_inference decode 异常 → fallback decoded=False (不 crash)
 
 from __future__ import annotations
 
@@ -29,9 +28,8 @@ def _mock_resp(status_code: int, json_body: dict | None = None) -> MagicMock:
     return resp
 
 
+# FusionMLXBackend.decode — POST /distributed/decode 鉴权 + 返值。
 class TestFusionMLXBackendDecode:
-    """FusionMLXBackend.decode — POST /distributed/decode 鉴权 + 返值。"""
-
     @pytest.mark.asyncio
     async def test_decode_sends_bearer_auth(self):
         backend = FusionMLXBackend(base_url="http://127.0.0.1:11432", api_key="dahai168")
@@ -82,13 +80,12 @@ class TestFusionMLXBackendDecode:
                 await backend.decode(shard_id="0", hidden_states="hs")
 
 
+# DistributedMLXBridge.pipeline_inference — decode 端点未就绪 fallback。
+#
+# node_chain 经 forward 链 (/distributed/pipeline_step) 跑通后, 末段调 decode。
+# #630 未落地 → 404/异常 → decoded=False, output=hidden_states (末段 forward 输出)。
+#
 class TestPipelineDecodeFallback:
-    """DistributedMLXBridge.pipeline_inference — decode 端点未就绪 fallback。
-
-    node_chain 经 forward 链 (/distributed/pipeline_step) 跑通后, 末段调 decode。
-    #630 未落地 → 404/异常 → decoded=False, output=hidden_states (末段 forward 输出)。
-    """
-
     @pytest.mark.asyncio
     async def test_pipeline_decode_404_returns_fallback(self):
         bridge = DistributedMLXBridge()

@@ -1,15 +1,14 @@
-"""P3 E2E 真实张量 PIPELINE — 接上游 fusion-mlx /distributed/* (#621)。
-
-真实链: ClusterMaster PIPELINE 派发 → PortRoutingTransport → 两 AgentServer 真 FastAPI
-→ NodeAgent._execute_pipeline_step → FusionMLXBackend → fusion-mlx /distributed/load_shard
-+ /distributed/pipeline_step (真模型 Llama-3.2-1B-Instruct-4bit, 16 层, 切 [0,8]/[8,16])。
-末节点返回最终 hidden_states (b64.npy, shape (1,4,2048))。
-
-lm_head/解码超上游首版范围 (docs/distributed-pipeline.md line 151) — 本测试只验层前向链
-数值张量 round-trip, 不验 token 生成。
-
-依赖真 fusion-mlx 运行 + 小模型已下载; 不满足则 skip (不假模型, 不 mock)。
-"""
+# P3 E2E 真实张量 PIPELINE — 接上游 fusion-mlx /distributed/* (#621)。
+#
+# 真实链: ClusterMaster PIPELINE 派发 → PortRoutingTransport → 两 AgentServer 真 FastAPI
+# → NodeAgent._execute_pipeline_step → FusionMLXBackend → fusion-mlx /distributed/load_shard
+# + /distributed/pipeline_step (真模型 Llama-3.2-1B-Instruct-4bit, 16 层, 切 [0,8]/[8,16])。
+# 末节点返回最终 hidden_states (b64.npy, shape (1,4,2048))。
+#
+# lm_head/解码超上游首版范围 (docs/distributed-pipeline.md line 151) — 本测试只验层前向链
+# 数值张量 round-trip, 不验 token 生成。
+#
+# 依赖真 fusion-mlx 运行 + 小模型已下载; 不满足则 skip (不假模型, 不 mock)。
 
 from __future__ import annotations
 
@@ -73,9 +72,8 @@ skip_no_backend = pytest.mark.skipif(
 )
 
 
+# 按 URL 端口路由到对应 agent ASGI app (复用 P5 测试约定)。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app (复用 P5 测试约定)。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -99,8 +97,8 @@ class PortRoutingTransport(AsyncBaseTransport):
             await c.aclose()
 
 
+# 真实 NodeAgent + 真 FusionMLXBackend (指向 live fusion-mlx)。
 def _make_real_agent_server(node_id: str, port: int) -> AgentServer:
-    """真实 NodeAgent + 真 FusionMLXBackend (指向 live fusion-mlx)。"""
     backend = FusionMLXBackend(base_url=_MLX_URL, api_key=_MLX_API_KEY)
     agent = NodeAgent(
         config=AgentConfig(
@@ -129,13 +127,12 @@ def _register_node(client: AsyncClient, node_id: str, port: int) -> Any:
     return client.post("/api/nodes/register", json=payload, headers=AUTH_HEADERS)
 
 
+# 真实张量 PIPELINE 端到端 — 真 fusion-mlx + 真模型层切分。
 @pytest.mark.skipif(
     not (_mlx_alive() and _model_present() and _mlx_lib_present()),
     reason="真 fusion-mlx 未运行 / 小模型未下载 / 本地无 mlx 包",
 )
 class TestPipelineE2E:
-    """真实张量 PIPELINE 端到端 — 真 fusion-mlx + 真模型层切分。"""
-
     @pytest.fixture
     async def cluster(self, monkeypatch):
         monkeypatch.setattr(
@@ -182,12 +179,12 @@ class TestPipelineE2E:
                 return
             await asyncio.sleep(0.05)
 
+    # 两节点 PIPELINE: shard0 [0,8] embed+layers → shard1 [8,16] layers
+    # → 末节点返回 hidden_states (1,4,2048) b64.npy。
+    #
+    # 真 fusion-mlx /distributed/* 真模型层前向, 非退化非 mock。
+    #
     async def test_pipeline_two_shard_real_tensor(self, cluster):
-        """两节点 PIPELINE: shard0 [0,8] embed+layers → shard1 [8,16] layers
-        → 末节点返回 hidden_states (1,4,2048) b64.npy。
-
-        真 fusion-mlx /distributed/* 真模型层前向, 非退化非 mock。
-        """
         master = cluster["master"]
         transport = ASGITransport(app=cluster["master_app"])
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -244,8 +241,8 @@ class TestPipelineE2E:
         logger.info(f"P3 E2E 通过: final shape {arr.shape} dtype {arr.dtype}")
 
 
+# E2E 后清 fusion-mlx 注册的分片 (过程数据, 不留)。
 async def _cleanup_shards() -> None:
-    """E2E 后清 fusion-mlx 注册的分片 (过程数据, 不留)。"""
     import httpx
 
     try:

@@ -1,10 +1,9 @@
-"""GAP-2 / GAP-8 企业级安全修复测试 (复审计 2026-08-26)。
-
-覆盖:
-- GAP-2 mTLS fail-closed: 开启但证书不全 → raise, 不静默回退明文。
-- GAP-8 审计日志: 安全动作 (鉴权失败/权限拒绝/注册/审批/任务提交) 写 JSONL, 字段完整。
-- GAP-8 权限强制校验默认开: FUSION_PERMISSION_ENFORCE 默认 "1", 缺 X-Node-Id → 403。
-"""
+# GAP-2 / GAP-8 企业级安全修复测试 (复审计 2026-08-26)。
+#
+# 覆盖:
+# - GAP-2 mTLS fail-closed: 开启但证书不全 → raise, 不静默回退明文。
+# - GAP-8 审计日志: 安全动作 (鉴权失败/权限拒绝/注册/审批/任务提交) 写 JSONL, 字段完整。
+# - GAP-8 权限强制校验默认开: FUSION_PERMISSION_ENFORCE 默认 "1", 缺 X-Node-Id → 403。
 
 from __future__ import annotations
 
@@ -19,9 +18,8 @@ from fusion_multi_node.server.master_server import MasterServer
 # ── GAP-2: mTLS fail-closed ──
 
 
+# 开启但证书路径不全 → raise, 不回退明文。
 class TestMTLSFailClosed:
-    """开启但证书路径不全 → raise, 不回退明文。"""
-
     def _enable_no_certs(self, monkeypatch):
         monkeypatch.setenv("FUSION_MTLS_ENABLED", "1")
         monkeypatch.delenv("FUSION_MTLS_CA_CERT", raising=False)
@@ -67,16 +65,16 @@ class TestMTLSFailClosed:
         self._clear(monkeypatch)
         assert mtls_mod.certs_available() is True
 
+    # mTLS 关 → 各 helper 返回 None/{}, 不 raise (明文合法)。
     def test_disabled_returns_none_not_raise(self, monkeypatch):
-        """mTLS 关 → 各 helper 返回 None/{}, 不 raise (明文合法)。"""
         self._clear(monkeypatch)
         assert mtls_mod.server_ssl_context() is None
         assert mtls_mod.client_ssl_context() is None
         assert mtls_mod.server_ssl_kwargs() == {}
         assert mtls_mod.client_kwargs() == {}
 
+    # 开启 + 证书齐全 → 正常构建, 不 raise (回归: fail-closed 不误伤合法配置)。
     def test_full_certs_build_context_not_raise(self, monkeypatch, tmp_path):
-        """开启 + 证书齐全 → 正常构建, 不 raise (回归: fail-closed 不误伤合法配置)。"""
         ca_dir = tmp_path / "ca"
         ca_cert, ca_key = mtls_mod.provision_cluster(str(ca_dir))
         cert, key = mtls_mod.provision_node("n1", "worker", ca_cert, ca_key, str(tmp_path / "n1"))
@@ -95,9 +93,8 @@ class TestMTLSFailClosed:
 # ── GAP-8: 审计日志 ──
 
 
+# AuditLogger 追加写 JSONL, 字段完整, 写失败降级。
 class TestAuditLogger:
-    """AuditLogger 追加写 JSONL, 字段完整, 写失败降级。"""
-
     def test_log_writes_jsonl_line(self, tmp_path):
         log_path = tmp_path / "audit.log"
         al = AuditLogger(log_path=str(log_path))
@@ -136,8 +133,8 @@ class TestAuditLogger:
         al = AuditLogger(log_path=str(tmp_path / "nope.log"))
         assert al.read() == []
 
+    # 写失败 (路径不可写) → 降级 warning, 不抛 (审计日志不拖垮主路径)。
     def test_write_failure_does_not_raise(self, tmp_path):
-        """写失败 (路径不可写) → 降级 warning, 不抛 (审计日志不拖垮主路径)。"""
         # 用一个已存在文件当目录 → open 失败
         blocker = tmp_path / "blocker"
         blocker.write_text("x")
@@ -201,9 +198,8 @@ class TestAuditLogger:
 # ── GAP-8: 鉴权失败写审计 (BearerAuthMiddleware) ──
 
 
+# 缺 token / token 不匹配 → 401 + 写 auth_fail 审计条目。
 class TestAuthFailAudit:
-    """缺 token / token 不匹配 → 401 + 写 auth_fail 审计条目。"""
-
     async def test_missing_token_writes_auth_fail(self, tmp_path, monkeypatch):
         from fusion_multi_node.security.audit_log import reset_audit_logger
 
@@ -247,10 +243,9 @@ class TestAuthFailAudit:
 # ── GAP-8 (Phase F1): 用户令牌双令牌分流 ──
 
 
+# fmu_ 用户令牌在 master 用户面路由通过; 错误令牌 401+审计; cluster 令牌不变;
+# agent 路由拒 fmu_ 前缀。
 class TestUserTokenAuth:
-    """fmu_ 用户令牌在 master 用户面路由通过; 错误令牌 401+审计; cluster 令牌不变;
-    agent 路由拒 fmu_ 前缀。"""
-
     async def test_user_token_accepted_on_master(self, tmp_path, monkeypatch):
         from fusion_multi_node.security.audit_log import reset_audit_logger
         from fusion_multi_node.security.permission import UserRole
@@ -303,8 +298,8 @@ class TestUserTokenAuth:
             resp = await c.get("/api/nodes", headers={"Authorization": "Bearer cluster-tok"})
         assert resp.status_code == 200
 
+    # 集群内部流量不携带用户令牌 — agent 路由拒 fmu_ 前缀。
     async def test_user_token_rejected_on_agent(self, tmp_path, monkeypatch):
-        """集群内部流量不携带用户令牌 — agent 路由拒 fmu_ 前缀。"""
         from fusion_multi_node.security.audit_log import reset_audit_logger
         from fusion_multi_node.security.permission import UserRole
         from fusion_multi_node.security.user_store import UserStore
@@ -327,8 +322,8 @@ class TestUserTokenAuth:
         fails = [e for e in al.read() if e["action"] == "auth_fail"]
         assert any("节点路由" in e["detail"] for e in fails)
 
+    # 无 FUSION_USERS_FILE / users.json → load_user_store 返回 None → 纯 cluster_token。
     async def test_no_user_store_cluster_token_unchanged(self, tmp_path, monkeypatch):
-        """无 FUSION_USERS_FILE / users.json → load_user_store 返回 None → 纯 cluster_token。"""
         from fusion_multi_node.security.audit_log import reset_audit_logger
 
         monkeypatch.delenv("FUSION_USERS_FILE", raising=False)
@@ -364,9 +359,8 @@ class TestUserTokenAuth:
 # ── GAP-8: 权限强制校验默认开 ──
 
 
+# FUSION_PERMISSION_ENFORCE 默认 "1" → 缺 X-Node-Id → 403 + 审计。
 class TestPermissionEnforceDefault:
-    """FUSION_PERMISSION_ENFORCE 默认 "1" → 缺 X-Node-Id → 403 + 审计。"""
-
     async def test_enforce_default_on_rejects_missing_node_id(self, tmp_path, monkeypatch):
         from fusion_multi_node.security.audit_log import reset_audit_logger
 
@@ -439,9 +433,8 @@ class TestPermissionEnforceDefault:
 # ── GAP-8: master 路由审计 (register/approve/reject/task_submit) ──
 
 
+# master 安全路由写审计条目。
 class TestMasterRouteAudit:
-    """master 安全路由写审计条目。"""
-
     @pytest.fixture
     def _master(self, tmp_path, monkeypatch):
         from fusion_multi_node.security.audit_log import reset_audit_logger

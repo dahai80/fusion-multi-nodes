@@ -1,15 +1,13 @@
+# 容器集群真压测客户端 — 经 master:11452 并发提交任务, 测吞吐/尾延迟/成功率。
+#
+# 用法:
+# python scripts/stress_live.py --master 127.0.0.1:11452 --token <TOKEN>         --tasks 100 --concurrency 20 --model mlx-community-Llama-3.2-1B-Instruct-4bit
+#
+# 阶段3: 吞吐/延迟基线 (N=4 节点, 并发 M 任务)。
+# 阶段4: 故障注入 (kill master→HA / kill agent→重派 / 网络分区→熔断)。
+#
+# 输出: JSON 汇总 + 逐任务 CSV → stress-result-<ts>.json / .csv
 #!/usr/bin/env python3
-"""容器集群真压测客户端 — 经 master:11452 并发提交任务, 测吞吐/尾延迟/成功率。
-
-用法:
-    python scripts/stress_live.py --master 127.0.0.1:11452 --token <TOKEN> \
-        --tasks 100 --concurrency 20 --model mlx-community-Llama-3.2-1B-Instruct-4bit
-
-阶段3: 吞吐/延迟基线 (N=4 节点, 并发 M 任务)。
-阶段4: 故障注入 (kill master→HA / kill agent→重派 / 网络分区→熔断)。
-
-输出: JSON 汇总 + 逐任务 CSV → stress-result-<ts>.json / .csv
-"""
 
 from __future__ import annotations
 
@@ -47,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+# 提交单任务 → 轮询至终态, 返回时延/状态记录。
 async def submit_and_poll(
     client: httpx.AsyncClient,
     base: str,
@@ -55,7 +54,6 @@ async def submit_and_poll(
     timeout: float,
     idx: int,
 ) -> dict[str, Any]:
-    """提交单任务 → 轮询至终态, 返回时延/状态记录。"""
     t0 = time.monotonic()
     rec: dict[str, Any] = {"idx": idx}
     try:
@@ -92,8 +90,8 @@ async def submit_and_poll(
         return rec
 
 
+# 阶段3: 并发提交 M 任务, 测吞吐/尾延迟/成功率。
 async def run_phase3(args: argparse.Namespace) -> dict[str, Any]:
-    """阶段3: 并发提交 M 任务, 测吞吐/尾延迟/成功率。"""
     base = f"http://{args.master}"
     headers = {"Authorization": f"Bearer {args.token}", "Content-Type": "application/json"}
     payload_base = {
@@ -142,8 +140,8 @@ async def run_phase3(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
+# 汇总压测指标。
 def summarize(records: list[dict[str, Any]], wall: float, args: argparse.Namespace) -> dict[str, Any]:
-    """汇总压测指标。"""
     total = len(records)
     by_status: dict[str, int] = {}
     lats: list[float] = []
@@ -178,8 +176,8 @@ def summarize(records: list[dict[str, Any]], wall: float, args: argparse.Namespa
     return summary
 
 
+# 落盘 JSON + CSV。
 def write_outputs(summary: dict[str, Any], records: list[dict[str, Any]], prefix: str) -> None:
-    """落盘 JSON + CSV。"""
     ts = int(time.time())
     jpath = f"{prefix}-{ts}.json"
     cpath = f"{prefix}-{ts}.csv"

@@ -1,10 +1,9 @@
-"""issue #52 原语 1 — 审计链 HMAC + 链段拉取端点测试。
-
-3 类:
-- TestAuditChainLocal — seq 单调 / prev_hash 链接 / mac 验证 / 篡改检出 / 实例重置 / 降级无 token / 向后兼容旧记录。
-- TestAuditChainEndpoint — master 链字段 / since_seq 过滤 / 基线记录 / 用户令牌 403 / 集群令牌 200。
-- TestAuditChainAgentEndpoint — agent node_id / 链字段。
-"""
+# issue #52 原语 1 — 审计链 HMAC + 链段拉取端点测试。
+#
+# 3 类:
+# - TestAuditChainLocal — seq 单调 / prev_hash 链接 / mac 验证 / 篡改检出 / 实例重置 / 降级无 token / 向后兼容旧记录。
+# - TestAuditChainEndpoint — master 链字段 / since_seq 过滤 / 基线记录 / 用户令牌 403 / 集群令牌 200。
+# - TestAuditChainAgentEndpoint — agent node_id / 链字段。
 
 from __future__ import annotations
 

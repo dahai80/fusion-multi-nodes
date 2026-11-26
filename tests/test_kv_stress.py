@@ -1,16 +1,15 @@
-"""P1-F 跨机 KV 共享规模化压测 — 真端口跨进程 KV 迁移大规模。
-
-真链: N AgentServer 真端口 uvicorn.serve ←→ KVSharingManager 跨 HTTP
-(/api/kv/warm 推送, /api/kv/transfer 拉取)。验:
-- 大规模 warm_cache: M prompt × N node, 全成功 (0 丢失)
-- 迁移延迟: p50 / p99 量测
-- 预热开销: warm 总耗时 / 单 prompt 耗时
-- 显存占用代理: total_size_bytes 累计 (合成数据, 非真显存)
-
-非容器: 进程内真 uvicorn 真端口真 socket (测规模 + 延迟 + 丢失, 非容器编排)。
-容器规模化见 TestKVContainerStress (skip-gate docker)。
-免真模型 — 合成 KVCacheEntry (KV 路由不触推理)。
-"""
+# P1-F 跨机 KV 共享规模化压测 — 真端口跨进程 KV 迁移大规模。
+#
+# 真链: N AgentServer 真端口 uvicorn.serve ←→ KVSharingManager 跨 HTTP
+# (/api/kv/warm 推送, /api/kv/transfer 拉取)。验:
+# - 大规模 warm_cache: M prompt × N node, 全成功 (0 丢失)
+# - 迁移延迟: p50 / p99 量测
+# - 预热开销: warm 总耗时 / 单 prompt 耗时
+# - 显存占用代理: total_size_bytes 累计 (合成数据, 非真显存)
+#
+# 非容器: 进程内真 uvicorn 真端口真 socket (测规模 + 延迟 + 丢失, 非容器编排)。
+# 容器规模化见 TestKVContainerStress (skip-gate docker)。
+# 免真模型 — 合成 KVCacheEntry (KV 路由不触推理)。
 
 from __future__ import annotations
 
@@ -47,9 +46,8 @@ def _pct(values: list[float], p: float) -> float:
     return s[idx]
 
 
+# 按 URL 端口路由到对应 agent ASGI app。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -73,9 +71,8 @@ class PortRoutingTransport(AsyncBaseTransport):
             await c.aclose()
 
 
+# N 真端口 agent, KVSharingManager 跨 HTTP 真路由。
 class _KVCluster:
-    """N 真端口 agent, KVSharingManager 跨 HTTP 真路由。"""
-
     def __init__(self, n: int = 3):
         self.n = n
         self.servers: list[AgentServer] = []
@@ -181,9 +178,8 @@ def _make_prompts(m: int) -> list[str]:
     return [f"prompt-{i}-prefix-content" for i in range(m)]
 
 
+# 跨机 KV 共享规模化压测 — 0 丢失 + 延迟量测。
 class TestKVStress:
-    """跨机 KV 共享规模化压测 — 0 丢失 + 延迟量测。"""
-
     @pytest.mark.asyncio
     async def test_warm_cache_scale_zero_loss(self, kv_cluster):
         # M prompt × N node warm, 全成功 (0 丢失)。

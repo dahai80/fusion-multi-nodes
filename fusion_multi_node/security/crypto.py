@@ -1,4 +1,4 @@
-"""M6-04 FMPCrypto — AES-256-GCM 加密/解密，配合 key_exchange 协商的会话密钥。"""
+# M6-04 FMPCrypto — AES-256-GCM 加密/解密，配合 key_exchange 协商的会话密钥。
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+# AES-256-GCM 加密 — 使用 ECDH 协商的会话密钥。
 class FMPCrypto:
-    """AES-256-GCM 加密 — 使用 ECDH 协商的会话密钥。"""
-
     def __init__(self, session_key: bytes | None = None):
         self._session_key = session_key
         if session_key:
@@ -62,13 +61,12 @@ class FMPCrypto:
         return json.loads(plaintext.decode("utf-8"))
 
 
+# P2-01 Metal AES-GCM 加速后端 — macOS Apple Silicon 硬件加速。
+#
+# 通过 PyObjC 桥接 Security.framework 的 SecKeyEncrypt/Decrypt，
+# 利用 Apple Secure Enclave 和 AES 硬件引擎。不可用时自动降级到 cryptography。
+#
 class MetalCryptoBackend:
-    """P2-01 Metal AES-GCM 加速后端 — macOS Apple Silicon 硬件加速。
-
-    通过 PyObjC 桥接 Security.framework 的 SecKeyEncrypt/Decrypt，
-    利用 Apple Secure Enclave 和 AES 硬件引擎。不可用时自动降级到 cryptography。
-    """
-
     def __init__(self):
         self._available = False
         self._sec = None
@@ -94,8 +92,8 @@ class MetalCryptoBackend:
     def available(self) -> bool:
         return self._available
 
+    # 使用 CommonCrypto 的 CCCryptorGCM 加密。降级到 cryptography。
     def encrypt(self, key: bytes, plaintext: bytes, aad: bytes | None = None) -> bytes:
-        """使用 CommonCrypto 的 CCCryptorGCM 加密。降级到 cryptography。"""
         if not self._available:
             return self._fallback_encrypt(key, plaintext, aad)
         try:
@@ -104,8 +102,8 @@ class MetalCryptoBackend:
             logger.warning(f"MetalCryptoBackend: Metal 加密失败，降级: {e}")
             return self._fallback_encrypt(key, plaintext, aad)
 
+    # 解密。降级到 cryptography。
     def decrypt(self, key: bytes, data: bytes, aad: bytes | None = None) -> bytes:
-        """解密。降级到 cryptography。"""
         if not self._available:
             return self._fallback_decrypt(key, data, aad)
         try:

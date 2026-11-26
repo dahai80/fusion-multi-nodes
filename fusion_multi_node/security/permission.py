@@ -1,9 +1,8 @@
-"""M3-01 Master/Worker 权限隔离 — 基于角色的访问控制。
-
-- MASTER: 全部管理 API（节点/任务/KV/集群统计）
-- WORKER: 仅任务执行 + 本地 KV + 硬件信息
-- 未授权 API 调用返回 403
-"""
+# M3-01 Master/Worker 权限隔离 — 基于角色的访问控制。
+#
+# - MASTER: 全部管理 API（节点/任务/KV/集群统计）
+# - WORKER: 仅任务执行 + 本地 KV + 硬件信息
+# - 未授权 API 调用返回 403
 
 from __future__ import annotations
 
@@ -19,14 +18,13 @@ class NodeRole(Enum):
     WORKER = "worker"
 
 
+# 用户层角色 (GAP-8 Phase F) — 与 NodeRole 正交, 管多租户 per-user RBAC。
+#
+# ADMIN: 全部用户管理 (CRUD/签发/吊销令牌) + 任务操作
+# USER:  任务提交/取消/查询 + 推理 (/v1/chat/completions), 不可管理用户
+# VIEWER: 只读 (节点/任务列表/集群统计), 不可提交/取消/推理
+#
 class UserRole(Enum):
-    """用户层角色 (GAP-8 Phase F) — 与 NodeRole 正交, 管多租户 per-user RBAC。
-
-    ADMIN: 全部用户管理 (CRUD/签发/吊销令牌) + 任务操作
-    USER:  任务提交/取消/查询 + 推理 (/v1/chat/completions), 不可管理用户
-    VIEWER: 只读 (节点/任务列表/集群统计), 不可提交/取消/推理
-    """
-
     ADMIN = "admin"
     USER = "user"
     VIEWER = "viewer"
@@ -120,9 +118,8 @@ class RoleAssignment:
     assigned_by: str = ""
 
 
+# 权限管理器 — 校验节点对 API 的访问权限。
 class PermissionManager:
-    """权限管理器 — 校验节点对 API 的访问权限。"""
-
     def __init__(self):
         self._assignments: dict[str, RoleAssignment] = {}
 
@@ -327,14 +324,14 @@ _USER_EXEMPT_PATHS = frozenset(
 )
 
 
+# 用户层路径鉴权 — 查 (method, path) 所需权限, 验角色是否持有。
+#
+# P1-5 (审计 §3.4) fail-closed: 未登记路径不再默认放行 (旧 fail-open 可让用户令牌
+# 调任意未登记路由)。健康/文档豁免路径白名单放行; 其余未登记 → 拒 (用户令牌不该
+# 到达集群内部路由, 到达即拒, 交调用方提示用 cluster_token)。
+# CLUSTER_INTERNAL sentinel = 仅 cluster_token, 用户令牌任何角色皆拒。
+#
 def check_user_path_access(role: UserRole, path: str, method: str = "GET") -> bool:
-    """用户层路径鉴权 — 查 (method, path) 所需权限, 验角色是否持有。
-
-    P1-5 (审计 §3.4) fail-closed: 未登记路径不再默认放行 (旧 fail-open 可让用户令牌
-    调任意未登记路由)。健康/文档豁免路径白名单放行; 其余未登记 → 拒 (用户令牌不该
-    到达集群内部路由, 到达即拒, 交调用方提示用 cluster_token)。
-    CLUSTER_INTERNAL sentinel = 仅 cluster_token, 用户令牌任何角色皆拒。
-    """
     if path in _USER_EXEMPT_PATHS:
         return True
     perm = _USER_PATH_PERMISSION_MAP.get((method, path))

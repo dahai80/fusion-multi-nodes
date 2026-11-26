@@ -1,4 +1,4 @@
-"""CavemanCompressor and CavemanManager detailed coverage tests."""
+# CavemanCompressor and CavemanManager detailed coverage tests.
 
 import struct
 import zlib

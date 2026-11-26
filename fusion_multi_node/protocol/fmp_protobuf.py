@@ -1,12 +1,11 @@
-"""FMP Protobuf 三层协议定义。
-
-三层结构:
-- Envelope: 信封层（路由、hop_count、源/目标、序列号）
-- Control: 控制层（心跳、ACK、流控、断连）
-- Payload: 业务负载层（序列化数据 + 类型标记）
-
-当 protobuf 不可用时自动降级到 JSON/msgpack 二进制帧。
-"""
+# FMP Protobuf 三层协议定义。
+#
+# 三层结构:
+# - Envelope: 信封层（路由、hop_count、源/目标、序列号）
+# - Control: 控制层（心跳、ACK、流控、断连）
+# - Payload: 业务负载层（序列化数据 + 类型标记）
+#
+# 当 protobuf 不可用时自动降级到 JSON/msgpack 二进制帧。
 
 from __future__ import annotations
 
@@ -68,10 +67,9 @@ class ControlCode(IntEnum):
     STATE_SYNC_RESP = 8
 
 
+# 信封层 — 路由与跳数控制。
 @dataclass
 class FMPEnvelope:
-    """信封层 — 路由与跳数控制。"""
-
     source_id: str
     target_id: str
     hop_count: int = 0
@@ -122,10 +120,9 @@ class FMPEnvelope:
         )
 
 
+# 控制层 — 心跳、ACK、流控。
 @dataclass
 class FMPControl:
-    """控制层 — 心跳、ACK、流控。"""
-
     code: ControlCode
     sequence: int = 0
     timestamp: float = 0.0
@@ -159,10 +156,9 @@ class FMPControl:
         )
 
 
+# 业务负载层 — 类型标记 + 序列化数据。
 @dataclass
 class FMPPayload:
-    """业务负载层 — 类型标记 + 序列化数据。"""
-
     payload_type: PayloadType
     data: bytes
     round_id: str = ""
@@ -203,10 +199,9 @@ class FMPPayload:
         )
 
 
+# Protobuf 三层协议完整消息。
 @dataclass
 class FMPProtoMessage:
-    """Protobuf 三层协议完整消息。"""
-
     envelope: FMPEnvelope
     control: FMPControl
     payload: FMPPayload
@@ -324,8 +319,8 @@ class FMPProtoMessage:
         return cls.from_dict(d)
 
 
+# 将消息字典编码为结构化 protobuf — 使用 FMPEnvelope/FMPControl/FMPPayload 字段。
 def _try_protobuf_encode(payload_dict: dict[str, Any]) -> bytes | None:
-    """将消息字典编码为结构化 protobuf — 使用 FMPEnvelope/FMPControl/FMPPayload 字段。"""
     try:
         import json
 
@@ -377,8 +372,8 @@ def _try_protobuf_encode(payload_dict: dict[str, Any]) -> bytes | None:
         return None
 
 
+# 从 protobuf 二进制解码为消息字典 — 使用结构化字段。
 def _try_protobuf_decode(data: bytes) -> dict[str, Any] | None:
-    """从 protobuf 二进制解码为消息字典 — 使用结构化字段。"""
     try:
         import json
 

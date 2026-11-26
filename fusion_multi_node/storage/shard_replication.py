@@ -1,7 +1,6 @@
-"""M9 分片副本管理 — 模型分片的多副本复制与同步。
-
-M9-02: ShardReplicator 实际数据传输/同步（通过 StorageVolume 或 FMP 跨节点传输）
-"""
+# M9 分片副本管理 — 模型分片的多副本复制与同步。
+#
+# M9-02: ShardReplicator 实际数据传输/同步（通过 StorageVolume 或 FMP 跨节点传输）
 
 from __future__ import annotations
 
@@ -16,10 +15,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# 副本配置。
 @dataclass
 class ReplicationConfig:
-    """副本配置。"""
-
     replication_factor: int = 2
     sync_timeout: float = 60.0
     retry_attempts: int = 3
@@ -27,10 +25,9 @@ class ReplicationConfig:
     verify_checksum: bool = True
 
 
+# 分片副本。
 @dataclass
 class ShardReplica:
-    """分片副本。"""
-
     shard_id: str
     node_id: str
     volume_name: str
@@ -42,10 +39,9 @@ class ShardReplica:
     status: str = "active"
 
 
+# 同步结果。
 @dataclass
 class SyncResult:
-    """同步结果。"""
-
     shard_id: str
     target_node_id: str
     success: bool
@@ -55,16 +51,15 @@ class SyncResult:
     error: str = ""
 
 
+# 分片副本管理器。
+#
+# 管理模型分片的多副本分布:
+# - 分配副本到不同节点
+# - 检测副本健康状态
+# - M9-02: 实际数据传输与同步
+# - 触发副本同步/修复
+#
 class ShardReplicator:
-    """分片副本管理器。
-
-    管理模型分片的多副本分布:
-    - 分配副本到不同节点
-    - 检测副本健康状态
-    - M9-02: 实际数据传输与同步
-    - 触发副本同步/修复
-    """
-
     def __init__(self, config: ReplicationConfig | None = None, fmp_interface: Any = None):
         self.config = config or ReplicationConfig()
         self._replicas: dict[str, list[ShardReplica]] = {}
@@ -72,13 +67,13 @@ class ShardReplicator:
         self._fmp_interface = fmp_interface
         self._local_node_id: str | None = None
 
+    # M9-02 注册分片数据（用于后续同步传输）。
     def register_shard_data(self, shard_id: str, data: bytes) -> None:
-        """M9-02 注册分片数据（用于后续同步传输）。"""
         self._shard_data[shard_id] = data
         logger.debug(f"分片数据注册: {shard_id} ({len(data)} bytes)")
 
+    # 获取缓存的分片数据。
     def get_shard_data(self, shard_id: str) -> bytes | None:
-        """获取缓存的分片数据。"""
         return self._shard_data.get(shard_id)
 
     def assign_replicas(
@@ -108,17 +103,17 @@ class ShardReplicator:
         logger.info(f"分片副本分配: {shard_id} × {count}")
         return replicas
 
+    # M9-02 将分片数据同步到目标节点。
+    #
+    # 当目标节点是远程节点且 fmp_interface 已设置时，通过 FMP 传输；
+    # 否则写入本地 StorageVolume。
+    #
     def sync_to_node(
         self,
         shard_id: str,
         target_node_id: str,
         storage_volume: Any = None,
     ) -> SyncResult:
-        """M9-02 将分片数据同步到目标节点。
-
-        当目标节点是远程节点且 fmp_interface 已设置时，通过 FMP 传输；
-        否则写入本地 StorageVolume。
-        """
         start = time.time()
         data = self._shard_data.get(shard_id)
         if data is None:
@@ -154,6 +149,7 @@ class ShardReplicator:
 
         return self._sync_local(shard_id, target_node_id, data, replica, storage_volume, start)
 
+    # 通过 FMP 协议将分片数据发送到远程节点。
     def _sync_via_fmp(
         self,
         shard_id: str,
@@ -162,7 +158,6 @@ class ShardReplicator:
         replica: ShardReplica,
         start: float,
     ) -> SyncResult:
-        """通过 FMP 协议将分片数据发送到远程节点。"""
         try:
             from fusion_multi_node.protocol.fmp_message import FMPMessage, PayloadType
 
@@ -227,6 +222,7 @@ class ShardReplicator:
                 error=str(e),
             )
 
+    # 本地 StorageVolume 写入。
     def _sync_local(
         self,
         shard_id: str,
@@ -236,7 +232,6 @@ class ShardReplicator:
         storage_volume: Any,
         start: float,
     ) -> SyncResult:
-        """本地 StorageVolume 写入。"""
         try:
             if storage_volume is not None:
                 ok = storage_volume.write_file(
@@ -286,14 +281,14 @@ class ShardReplicator:
                 error=str(e),
             )
 
+    # 设置 FMPInterface 和本地节点 ID，启用跨节点传输。
     def set_fmp_interface(self, fmp_interface: Any, local_node_id: str) -> None:
-        """设置 FMPInterface 和本地节点 ID，启用跨节点传输。"""
         self._fmp_interface = fmp_interface
         self._local_node_id = local_node_id
         logger.info(f"ShardReplicator FMP 传输已启用: local_node={local_node_id}")
 
+    # M9-02 同步分片到所有副本节点。
     def sync_all_replicas(self, shard_id: str, storage_volume: Any = None) -> list[SyncResult]:
-        """M9-02 同步分片到所有副本节点。"""
         results = []
         for replica in self._replicas.get(shard_id, []):
             if replica.status == "active":
@@ -302,8 +297,8 @@ class ShardReplicator:
         logger.info(f"分片全量同步: {shard_id} 成功={sum(1 for r in results if r.success)}/{len(results)}")
         return results
 
+    # 修复失败副本。
     def repair_replica(self, shard_id: str, target_node_id: str, storage_volume: Any = None) -> SyncResult:
-        """修复失败副本。"""
         self.mark_replica_recovering(shard_id, target_node_id)
         result = self.sync_to_node(shard_id, target_node_id, storage_volume)
         if result.success:
@@ -356,16 +351,16 @@ class ShardReplicator:
 
     # ── M9-02 Quorum 读/写 ──
 
+    # M9-02 Quorum 写入：写入多数副本成功即视为写入成功。
+    #
+    # 写入 ⌈N/2⌉ 个副本即返回成功，其余异步补齐。
+    #
+    # E9: quorum 语义依赖真实多副本持久化 (每副本独立物理介质)。无 storage_volume 时
+    # 本地写路径 (_sync_local) 会跳过 storage_volume.write_file, 仅登记内存元数据
+    # (replica.checksum/last_synced) 却返回 success=True → 谎报多数持久化成功。
+    # 故无 storage_volume 一律拒绝, 不降级到内存自欺。
+    #
     def quorum_write(self, shard_id: str, data: bytes, storage_volume: Any = None) -> dict[str, Any]:
-        """M9-02 Quorum 写入：写入多数副本成功即视为写入成功。
-
-        写入 ⌈N/2⌉ 个副本即返回成功，其余异步补齐。
-
-        E9: quorum 语义依赖真实多副本持久化 (每副本独立物理介质)。无 storage_volume 时
-        本地写路径 (_sync_local) 会跳过 storage_volume.write_file, 仅登记内存元数据
-        (replica.checksum/last_synced) 却返回 success=True → 谎报多数持久化成功。
-        故无 storage_volume 一律拒绝, 不降级到内存自欺。
-        """
         if storage_volume is None:
             logger.warning(f"Quorum 写入拒绝：分片 {shard_id} 无存储卷，quorum 需真实多副本持久化")
             return {
@@ -399,15 +394,15 @@ class ShardReplicator:
             "quorum": quorum,
         }
 
+    # M9-02 Quorum 读取：从多数副本读取并校验一致性。
+    #
+    # 读取 ⌈N/2⌉ 个副本，校验 checksum 一致后返回数据。
+    #
+    # E9: 无 storage_volume 时所有副本读同一内存 dict (self._shard_data) → checksum
+    # 恒一致, consistent 恒 True, 掩盖真实跨副本不一致。quorum 读必须从每副本独立
+    # 物理介质读取才有意义, 故无 storage_volume 一律拒绝。
+    #
     def quorum_read(self, shard_id: str, storage_volume: Any = None) -> dict[str, Any]:
-        """M9-02 Quorum 读取：从多数副本读取并校验一致性。
-
-        读取 ⌈N/2⌉ 个副本，校验 checksum 一致后返回数据。
-
-        E9: 无 storage_volume 时所有副本读同一内存 dict (self._shard_data) → checksum
-        恒一致, consistent 恒 True, 掩盖真实跨副本不一致。quorum 读必须从每副本独立
-        物理介质读取才有意义, 故无 storage_volume 一律拒绝。
-        """
         if storage_volume is None:
             logger.warning(f"Quorum 读取拒绝：分片 {shard_id} 无存储卷，quorum 需真实多副本读取")
             return {

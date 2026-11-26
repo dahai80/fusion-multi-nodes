@@ -1,8 +1,7 @@
-"""FMP TCP 服务器 — 接受入站 FMP 连接，按 PayloadType 分发消息。
-
-每个节点启动时运行 FMPServer 监听指定端口，接受其他节点的
-FMPConnection 连入，并将收到的消息分发到已注册的 handler。
-"""
+# FMP TCP 服务器 — 接受入站 FMP 连接，按 PayloadType 分发消息。
+#
+# 每个节点启动时运行 FMPServer 监听指定端口，接受其他节点的
+# FMPConnection 连入，并将收到的消息分发到已注册的 handler。
 
 from __future__ import annotations
 
@@ -22,9 +21,8 @@ DEFAULT_FMP_PORT = 11446
 MAX_INBOUND_CONNECTIONS = 64
 
 
+# FMP TCP 服务器 — 监听端口，接受入站连接并分发消息。
 class FMPServer:
-    """FMP TCP 服务器 — 监听端口，接受入站连接并分发消息。"""
-
     def __init__(
         self,
         node_id: str = "",
@@ -45,21 +43,21 @@ class FMPServer:
         self._msg_counter = 0
         self._fmp_sender: Callable | None = None
 
+    # 注册消息处理器。handler 可以是 sync 或 async 函数。
     def register_handler(
         self,
         payload_type: PayloadType,
         handler: Callable[[FMPMessage], Any],
     ) -> None:
-        """注册消息处理器。handler 可以是 sync 或 async 函数。"""
         self._handlers[payload_type] = handler
         logger.info(f"FMP handler 注册: {payload_type.value}")
 
+    # 设置默认处理器 — 处理无匹配 handler 的消息。
     def set_default_handler(self, handler: Callable[[FMPMessage], Any]) -> None:
-        """设置默认处理器 — 处理无匹配 handler 的消息。"""
         self._default_handler = handler
 
+    # 启动 TCP 服务器。
     async def start(self) -> bool:
-        """启动 TCP 服务器。"""
         if self._running:
             logger.warning("FMPServer 已在运行")
             return True
@@ -76,8 +74,8 @@ class FMPServer:
             logger.error(f"FMPServer 启动失败: {e}")
             return False
 
+    # 停止服务器，关闭所有入站连接。
     async def stop(self) -> None:
-        """停止服务器，关闭所有入站连接。"""
         self._running = False
         async with self._lock:
             peers = list(self._peers.values())
@@ -93,12 +91,12 @@ class FMPServer:
             self._server = None
         logger.info("FMPServer 已停止")
 
+    # 入站连接回调 — 为每个连接创建 _InboundPeer。
     async def _on_connect(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """入站连接回调 — 为每个连接创建 _InboundPeer。"""
         if len(self._peers) >= MAX_INBOUND_CONNECTIONS:
             logger.warning(f"入站连接超限 ({MAX_INBOUND_CONNECTIONS})，拒绝新连接")
             writer.close()
@@ -129,8 +127,8 @@ class FMPServer:
                 self._peers.pop(peer_id, None)
             logger.info(f"入站连接断开: {peer_id}")
 
+    # 按 PayloadType 分发消息到注册的 handler。
     async def _dispatch(self, msg: FMPMessage) -> None:
-        """按 PayloadType 分发消息到注册的 handler。"""
         self._msg_counter += 1
         ptype = msg.business.payload_type
         handler = self._handlers.get(ptype, self._default_handler)
@@ -158,8 +156,8 @@ class FMPServer:
             "handlers": [pt.value for pt in self._handlers],
         }
 
+    # 注册分片同步处理器 — 收到 SHARD_SYNC 后写入本地存储卷。
     def register_shard_handler(self, storage_volume: Any = None) -> None:
-        """注册分片同步处理器 — 收到 SHARD_SYNC 后写入本地存储卷。"""
 
         def _on_shard_sync(msg: FMPMessage) -> None:
             try:
@@ -215,8 +213,8 @@ class FMPServer:
 
         self.register_handler(PayloadType.SHARD_SYNC, _on_shard_sync)
 
+    # 注册 KV 存储处理器 — 收到 KV_GET/KV_PUT 后操作本地 KVStore。
     def register_kv_handler(self, kv_store: Any = None) -> None:
-        """注册 KV 存储处理器 — 收到 KV_GET/KV_PUT 后操作本地 KVStore。"""
 
         def _on_kv_get(msg: FMPMessage) -> None:
             if not self._fmp_sender or not kv_store:
@@ -270,14 +268,13 @@ class FMPServer:
         self.register_handler(PayloadType.KV_GET, _on_kv_get)
         self.register_handler(PayloadType.KV_PUT, _on_kv_put)
 
+    # 设置消息发送回调 — 用于 handler 回复消息。
     def set_fmp_sender(self, sender: Callable) -> None:
-        """设置消息发送回调 — 用于 handler 回复消息。"""
         self._fmp_sender = sender
 
 
+# 入站连接 — 从 TCP 流读取 FMP 消息并回调。
 class _InboundPeer:
-    """入站连接 — 从 TCP 流读取 FMP 消息并回调。"""
-
     def __init__(
         self,
         peer_id: str,
@@ -299,8 +296,8 @@ class _InboundPeer:
     def is_alive(self) -> bool:
         return self._alive and not self._writer.is_closing()
 
+    # 持续读取 FMP 消息帧。
     async def read_loop(self) -> None:
-        """持续读取 FMP 消息帧。"""
         while self._alive:
             try:
                 len_bytes = await asyncio.wait_for(
