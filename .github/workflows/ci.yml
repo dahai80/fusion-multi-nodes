@@ -52,6 +52,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check fusion_multi_node/
 
+      - name: No-docstring convention gate (refs dahai80/fusion#9)
+        run: python ci/check_docstrings.py
+
       - name: Test (pytest, random order)
         env:
           FUSION_PERMISSION_ENFORCE: "0"
