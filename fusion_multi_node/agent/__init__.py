@@ -1,4 +1,4 @@
-"""Node Agent module exports."""
+# Node Agent module exports.
 
 from .node_agent import AgentConfig, FusionMLXBackend, InferenceBackend, NodeAgent
 

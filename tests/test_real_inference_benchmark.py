@@ -1,11 +1,10 @@
-"""P1-12 (审计 §6.5): 真推理吞吐基准 — 单节点 vs 多节点 DATA 并行。
-
-skip-gate: 真 fusion-mlx 运行 + 小模型可加载 (同 test_data_parallelism_e2e.py),
-不满足则 skip (不假模型, 不 mock)。测单/多节点 DATA 并行吞吐 (task/s), 记基准值
-(非断言绝对值 — 受机器负载波动), 断言多节点 > 单节点增益存在 (多节点不退化)。
-
-运行: ~/claude-home/fusion-mlx/start.sh start; 模型默认 mlx-community-Llama-3.2-1B-Instruct-4bit, api_key dahai168。
-"""
+# P1-12 (审计 §6.5): 真推理吞吐基准 — 单节点 vs 多节点 DATA 并行。
+#
+# skip-gate: 真 fusion-mlx 运行 + 小模型可加载 (同 test_data_parallelism_e2e.py),
+# 不满足则 skip (不假模型, 不 mock)。测单/多节点 DATA 并行吞吐 (task/s), 记基准值
+# (非断言绝对值 — 受机器负载波动), 断言多节点 > 单节点增益存在 (多节点不退化)。
+#
+# 运行: ~/claude-home/fusion-mlx/start.sh start; 模型默认 mlx-community-Llama-3.2-1B-Instruct-4bit, api_key dahai168。
 
 from __future__ import annotations
 
@@ -123,10 +122,9 @@ def _bench_task(tid: str) -> ClusterTask:
     )
 
 
+# P1-12: 真模型单/多节点 DATA 并行吞吐基准 (记值, 断言多节点不退化)。
 @_skip_no_backend
 class TestRealInferenceBenchmark:
-    """P1-12: 真模型单/多节点 DATA 并行吞吐基准 (记值, 断言多节点不退化)。"""
-
     @pytest.fixture
     async def cluster(self, monkeypatch, tmp_path):
         monkeypatch.setattr("fusion_multi_node.master.cluster_master.is_safe_peer_host", lambda host: True)
@@ -168,12 +166,12 @@ class TestRealInferenceBenchmark:
                 return
             await asyncio.sleep(0.05)
 
+    # 单节点 vs 双节点 DATA 并行吞吐 — 多节点不退化 (增益 ≥0.9× 单节点)。
+    #
+    # 真模型延迟抖动大, 不卡绝对增益比 (理想 >1×), 仅断言多节点吞吐不低于单节点 0.9×
+    # (多节点不该因调度开销退化), 记录两基准值供回归对比。
+    #
     async def test_single_vs_multi_node_throughput(self, cluster):
-        """单节点 vs 双节点 DATA 并行吞吐 — 多节点不退化 (增益 ≥0.9× 单节点)。
-
-        真模型延迟抖动大, 不卡绝对增益比 (理想 >1×), 仅断言多节点吞吐不低于单节点 0.9×
-        (多节点不该因调度开销退化), 记录两基准值供回归对比。
-        """
         master = cluster["master"]
         transport = ASGITransport(app=cluster["master_app"])
         async with AsyncClient(transport=transport, base_url="http://test") as client:

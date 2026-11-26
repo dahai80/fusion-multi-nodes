@@ -1,15 +1,14 @@
-"""P5 真实多节点派发集成测试 — submit→dispatch→COMPLETED 全链路。
-
-覆盖 P1 修复的真实派发循环: MasterServer /api/tasks/submit → ClusterMaster 后台派发
-→ httpx POST /api/execute → AgentServer 真实 FastAPI 路由 → NodeAgent.execute_task
-→ 注入 FakeInferenceBackend (免真模型) → 回填 COMPLETED + result。
-
-真实栈: 两个 AgentServer 真 FastAPI app (含 Bearer 鉴权/路由/execute_task),
-MasterServer 真 FastAPI app。派发 httpx 经自定义 async transport 按端口路由到对应
-agent ASGITransport (真 FastAPI 栈执行, 免真 TCP 端口抖动, 复用既有 ASGI 测试约定)。
-SSRF 守卫 is_safe_peer_host 测试内 monkeypatch 放行 127.0.0.1 (仅测试作用域,
-不削弱生产 SSRF 防护)。
-"""
+# P5 真实多节点派发集成测试 — submit→dispatch→COMPLETED 全链路。
+#
+# 覆盖 P1 修复的真实派发循环: MasterServer /api/tasks/submit → ClusterMaster 后台派发
+# → httpx POST /api/execute → AgentServer 真实 FastAPI 路由 → NodeAgent.execute_task
+# → 注入 FakeInferenceBackend (免真模型) → 回填 COMPLETED + result。
+#
+# 真实栈: 两个 AgentServer 真 FastAPI app (含 Bearer 鉴权/路由/execute_task),
+# MasterServer 真 FastAPI app。派发 httpx 经自定义 async transport 按端口路由到对应
+# agent ASGITransport (真 FastAPI 栈执行, 免真 TCP 端口抖动, 复用既有 ASGI 测试约定)。
+# SSRF 守卫 is_safe_peer_host 测试内 monkeypatch 放行 127.0.0.1 (仅测试作用域,
+# 不削弱生产 SSRF 防护)。
 
 from __future__ import annotations
 
@@ -37,12 +36,11 @@ AGENT_PORT_A = 21445
 AGENT_PORT_B = 21446
 
 
+# 假推理后端 — 返回固定 chat 响应, 免真模型加载。
+#
+# content 内嵌 node_id 供测试断言派发到达哪一节点。
+#
 class FakeInferenceBackend(InferenceBackend):
-    """假推理后端 — 返回固定 chat 响应, 免真模型加载。
-
-    content 内嵌 node_id 供测试断言派发到达哪一节点。
-    """
-
     def __init__(self, node_id: str):
         self._node_id = node_id
         self.chat_calls: list[dict[str, Any]] = []
@@ -68,13 +66,12 @@ class FakeInferenceBackend(InferenceBackend):
         return True
 
 
+# async transport — 按 URL 端口路由到对应 agent ASGI app。
+#
+# Master 派发建 URL 为 http://127.0.0.1:<port>/api/execute; 本 transport 解析端口,
+# 转交对应 agent ASGITransport 执行 (真 FastAPI 栈), 无匹配端口返回 404。
+#
 class PortRoutingTransport(AsyncBaseTransport):
-    """async transport — 按 URL 端口路由到对应 agent ASGI app。
-
-    Master 派发建 URL 为 http://127.0.0.1:<port>/api/execute; 本 transport 解析端口,
-    转交对应 agent ASGITransport 执行 (真 FastAPI 栈), 无匹配端口返回 404。
-    """
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -98,8 +95,8 @@ class PortRoutingTransport(AsyncBaseTransport):
             await c.aclose()
 
 
+# 构造真实 AgentServer + 注入 FakeInferenceBackend 的 NodeAgent。
 def _make_agent_server(node_id: str) -> tuple[AgentServer, FakeInferenceBackend]:
-    """构造真实 AgentServer + 注入 FakeInferenceBackend 的 NodeAgent。"""
     backend = FakeInferenceBackend(node_id)
     agent = NodeAgent(
         config=AgentConfig(node_id=node_id, cluster_token=TEST_TOKEN, agent_port=AGENT_PORT_A),
@@ -124,12 +121,11 @@ def _register_node(client: AsyncClient, node_id: str, port: int) -> Any:
     return client.post("/api/nodes/register", json=payload, headers=AUTH_HEADERS)
 
 
+# 真实多节点派发全链路集成测试。
 class TestDispatchIntegration:
-    """真实多节点派发全链路集成测试。"""
-
+    # 起 master + 两 agent, 派发走真 ASGI 路由, SSRF 测试内放行 127.0.0.1。
     @pytest.fixture
     async def cluster(self, monkeypatch):
-        """起 master + 两 agent, 派发走真 ASGI 路由, SSRF 测试内放行 127.0.0.1。"""
         # SSRF 测试放行 — 仅测试作用域, 不动生产防护
         monkeypatch.setattr(
             "fusion_multi_node.master.cluster_master.is_safe_peer_host",
@@ -174,10 +170,10 @@ class TestDispatchIntegration:
             await master.stop()
             await routing_transport.aclose()
 
+    # 轮询任务直到进入 target 状态 (COMPLETED/FAILED) 或超时。
     async def _wait_status(
         self, client: AsyncClient, task_id: str, target: str, timeout_s: float = 5.0
     ) -> dict[str, Any]:
-        """轮询任务直到进入 target 状态 (COMPLETED/FAILED) 或超时。"""
         for _ in range(int(timeout_s * 20)):
             resp = await client.get(f"/api/tasks/{task_id}", headers=AUTH_HEADERS)
             assert resp.status_code == 200
@@ -194,8 +190,8 @@ class TestDispatchIntegration:
         r2 = await _register_node(client, "agent-b", AGENT_PORT_B)
         assert r1.status_code == 200 and r2.status_code == 200
 
+    # 等所有派发后台任务结束 (派发是 fire-and-forget asyncio.Task)。
     async def _drain_dispatch(self, master: ClusterMaster, timeout_s: float = 5.0) -> None:
-        """等所有派发后台任务结束 (派发是 fire-and-forget asyncio.Task)。"""
         deadline_iters = int(timeout_s * 20)
         for _ in range(deadline_iters):
             pending = [t for t in master._dispatch_tasks.values() if not t.done()]
@@ -203,14 +199,14 @@ class TestDispatchIntegration:
                 return
             await asyncio.sleep(0.05)
 
+    # DATA 并行两节点 — model_shards=[{},{}] 选两节点, 并发派发, 回填 COMPLETED + 两节点输出。
+    #
+    # 证明 P1 派发全链路: assign_task → _trigger_dispatch → httpx POST /api/execute
+    # → AgentServer 真路由 → NodeAgent.execute_task → FakeBackend → _finalize_task。
+    # 两节点都派发到达, active_tasks 派发后回降 0。
+    #
     @pytest.mark.asyncio
     async def test_data_parallel_two_node_dispatch(self, cluster):
-        """DATA 并行两节点 — model_shards=[{},{}] 选两节点, 并发派发, 回填 COMPLETED + 两节点输出。
-
-        证明 P1 派发全链路: assign_task → _trigger_dispatch → httpx POST /api/execute
-        → AgentServer 真路由 → NodeAgent.execute_task → FakeBackend → _finalize_task。
-        两节点都派发到达, active_tasks 派发后回降 0。
-        """
         master = cluster["master"]
         backend_a = cluster["backend_a"]
         backend_b = cluster["backend_b"]
@@ -253,14 +249,14 @@ class TestDispatchIntegration:
         assert master.nodes["agent-a"].active_tasks == 0
         assert master.nodes["agent-b"].active_tasks == 0
 
+    # HTTP /api/tasks/submit 路由也连派发链 — 单节点 DATA, 走真 FastAPI submit 路由。
+    #
+    # submit 路由默认 model_shards=[] → count=1 → 单节点 (路由未暴露 shard 字段,
+    # 多节点须经 model_shards, 见 test_data_parallel_two_node_dispatch)。此处验证
+    # HTTP 提交入口同样触达真实派发, 非仅 assign_task 内存态。
+    #
     @pytest.mark.asyncio
     async def test_http_submit_route_dispatches(self, cluster):
-        """HTTP /api/tasks/submit 路由也连派发链 — 单节点 DATA, 走真 FastAPI submit 路由。
-
-        submit 路由默认 model_shards=[] → count=1 → 单节点 (路由未暴露 shard 字段,
-        多节点须经 model_shards, 见 test_data_parallel_two_node_dispatch)。此处验证
-        HTTP 提交入口同样触达真实派发, 非仅 assign_task 内存态。
-        """
         master = cluster["master"]
         backend_a = cluster["backend_a"]
 
@@ -295,13 +291,12 @@ class TestDispatchIntegration:
         assert master.nodes[assigned].active_tasks == 0
 
 
+# 假推理后端 — chat 永远抛异常, 模拟 agent 内部错误 (OOM/坏模型)。
+#
+# execute_task 捕获后返 {"error": ...} → master _dispatch_to_node 走 logic_fail 路径
+# (200+ok+result.error) → _dispatch_data 聚合为 PARTIAL (一成功一失败)。
+#
 class FailingInferenceBackend(InferenceBackend):
-    """假推理后端 — chat 永远抛异常, 模拟 agent 内部错误 (OOM/坏模型)。
-
-    execute_task 捕获后返 {"error": ...} → master _dispatch_to_node 走 logic_fail 路径
-    (200+ok+result.error) → _dispatch_data 聚合为 PARTIAL (一成功一失败)。
-    """
-
     async def chat(self, model, messages, temperature=0.7, max_tokens=4096, **kwargs):
         raise RuntimeError("simulated backend failure")
 
@@ -312,9 +307,8 @@ class FailingInferenceBackend(InferenceBackend):
         return False
 
 
+# P3-29 (审计 §5.9): DATA 并行部分节点成功 → PARTIAL 终态, 保留部分结果。
 class TestPartialSuccess:
-    """P3-29 (审计 §5.9): DATA 并行部分节点成功 → PARTIAL 终态, 保留部分结果。"""
-
     @pytest.fixture
     async def cluster_partial(self, monkeypatch):
         # SSRF 测试放行 — 仅测试作用域
@@ -365,13 +359,13 @@ class TestPartialSuccess:
             await master.stop()
             await routing_transport.aclose()
 
+    # DATA 并行: agent-a 成功 + agent-b 失败 → PARTIAL, 保留 agent-a 的 output。
+    #
+    # 证明 P3-29 部分成功语义: 不浪费已成功节点工作, 不整任务 FAILED, 客户端可取
+    # result.outputs 的部分结果。全失败才 FAILED (逻辑错误不重试)。
+    #
     @pytest.mark.asyncio
     async def test_data_parallel_partial_success(self, cluster_partial):
-        """DATA 并行: agent-a 成功 + agent-b 失败 → PARTIAL, 保留 agent-a 的 output。
-
-        证明 P3-29 部分成功语义: 不浪费已成功节点工作, 不整任务 FAILED, 客户端可取
-        result.outputs 的部分结果。全失败才 FAILED (逻辑错误不重试)。
-        """
         master = cluster_partial["master"]
         ok_backend = cluster_partial["ok_backend"]
         master_server = MasterServer(master=master, shared_token=TEST_TOKEN)
@@ -420,14 +414,13 @@ class TestPartialSuccess:
             await asyncio.sleep(0.05)
 
 
+# 假推理后端 — chat 永远抛 RateLimitExhausted, 模拟 fusion-mlx 429 限流耗尽。
+#
+# NodeAgent._execute_inference 捕获后返 {"error":..., "rate_limited": True} →
+# master _dispatch_data 走 transient_fail 路径 (可重试, 不 ban 节点)。
+# 与 FailingInferenceBackend (抛 RuntimeError → logic_fail → ban) 区分。
+#
 class RateLimitedBackend(InferenceBackend):
-    """假推理后端 — chat 永远抛 RateLimitExhausted, 模拟 fusion-mlx 429 限流耗尽。
-
-    NodeAgent._execute_inference 捕获后返 {"error":..., "rate_limited": True} →
-    master _dispatch_data 走 transient_fail 路径 (可重试, 不 ban 节点)。
-    与 FailingInferenceBackend (抛 RuntimeError → logic_fail → ban) 区分。
-    """
-
     def __init__(self, node_id: str):
         self._node_id = node_id
         self.chat_calls: list[dict[str, Any]] = []
@@ -443,13 +436,12 @@ class RateLimitedBackend(InferenceBackend):
         return True
 
 
+# GAP-6: 429 限流归类瞬时失败 (可重试), 非 logic_fail (不 ban 健康节点)。
+#
+# 旧缺陷: 429 → raise_for_status → {"error":...} 无 rate_limited 标记 →
+# master 归 logic_fail → report_fault 累计 → 熔断 ban 节点 300s (健康节点被限流却拉黑)。
+#
 class TestRateLimitedDispatch:
-    """GAP-6: 429 限流归类瞬时失败 (可重试), 非 logic_fail (不 ban 健康节点)。
-
-    旧缺陷: 429 → raise_for_status → {"error":...} 无 rate_limited 标记 →
-    master 归 logic_fail → report_fault 累计 → 熔断 ban 节点 300s (健康节点被限流却拉黑)。
-    """
-
     @pytest.fixture
     async def cluster_rl(self, monkeypatch):
         # SSRF 测试放行 — 仅测试作用域
@@ -493,9 +485,9 @@ class TestRateLimitedDispatch:
             await master.stop()
             await routing_transport.aclose()
 
+    # 单节点限流 → 末态 FAILED (重试超限), 但节点不进 ban 列表 (不计熔断)。
     @pytest.mark.asyncio
     async def test_rate_limited_classified_transient_not_banned(self, cluster_rl):
-        """单节点限流 → 末态 FAILED (重试超限), 但节点不进 ban 列表 (不计熔断)。"""
         from fusion_multi_node.master.cluster_master import TaskStatus as _TS
 
         master = cluster_rl["master"]
@@ -528,9 +520,9 @@ class TestRateLimitedDispatch:
         # 限流未累加熔断故障计数 (rate_limited 路径不调 report_fault)
         assert master._fault_counts.get("agent-rl", []) == []
 
+    # DATA 并行: 一节点限流 + 一节点成功 → PARTIAL (非全 FAILED), 限流节点不 ban。
     @pytest.mark.asyncio
     async def test_rate_limited_partial_with_one_healthy(self, monkeypatch, tmp_path):
-        """DATA 并行: 一节点限流 + 一节点成功 → PARTIAL (非全 FAILED), 限流节点不 ban。"""
         monkeypatch.setattr(
             "fusion_multi_node.master.cluster_master.is_safe_peer_host",
             lambda host: True,

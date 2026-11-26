@@ -1,4 +1,4 @@
-"""M9 任务检查点 — 推理任务的状态持久化与恢复。"""
+# M9 任务检查点 — 推理任务的状态持久化与恢复。
 
 from __future__ import annotations
 
@@ -12,10 +12,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# 检查点条目。
 @dataclass
 class CheckpointEntry:
-    """检查点条目。"""
-
     checkpoint_id: str
     task_id: str
     node_id: str
@@ -26,14 +25,13 @@ class CheckpointEntry:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
+# 检查点管理器。
+#
+# - 保存/加载任务执行状态
+# - 自动清理过期检查点
+# - 支持按 task_id 查询最新检查点
+#
 class CheckpointManager:
-    """检查点管理器。
-
-    - 保存/加载任务执行状态
-    - 自动清理过期检查点
-    - 支持按 task_id 查询最新检查点
-    """
-
     def __init__(
         self,
         checkpoint_dir: str = "",

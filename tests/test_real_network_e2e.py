@@ -1,15 +1,14 @@
-"""P0-C 跨机真网络 E2E — 真 bind 端口 + 真 HTTP 跨进程 (非 ASGITransport)。
-
-真链: MasterServer 真端口 uvicorn.serve ←→ AgentServer 真端口 uvicorn.serve
-两进程级 HTTP (真实 TCP socket), 经 httpx 真网络回连。验:
-- agent 真注册到 master (经 HTTP /api/nodes/register)
-- 真任务派发跨 HTTP (master → agent /api/execute)
-- agent 掉线 → master 标 OFFLINE → 重启重连 → 恢复 ONLINE + 可派
-
-非容器: 进程内起真 uvicorn (真端口真 socket), 跨 HTTP 边界通信。
-容器 E2E (docker-compose) 见 TestContainerE2E (同文件), skip-gate docker 可用。
-免真模型 — FakeBackend (测网络/调度, 非推理正确性)。
-"""
+# P0-C 跨机真网络 E2E — 真 bind 端口 + 真 HTTP 跨进程 (非 ASGITransport)。
+#
+# 真链: MasterServer 真端口 uvicorn.serve ←→ AgentServer 真端口 uvicorn.serve
+# 两进程级 HTTP (真实 TCP socket), 经 httpx 真网络回连。验:
+# - agent 真注册到 master (经 HTTP /api/nodes/register)
+# - 真任务派发跨 HTTP (master → agent /api/execute)
+# - agent 掉线 → master 标 OFFLINE → 重启重连 → 恢复 ONLINE + 可派
+#
+# 非容器: 进程内起真 uvicorn (真端口真 socket), 跨 HTTP 边界通信。
+# 容器 E2E (docker-compose) 见 TestContainerE2E (同文件), skip-gate docker 可用。
+# 免真模型 — FakeBackend (测网络/调度, 非推理正确性)。
 
 from __future__ import annotations
 
@@ -65,9 +64,8 @@ async def _wait_health(url: str, headers: dict, timeout: float = 15.0) -> bool:
     return False
 
 
+# 真端口 master + N agent, 各自 uvicorn.serve 真监听。
 class _Cluster:
-    """真端口 master + N agent, 各自 uvicorn.serve 真监听。"""
-
     def __init__(self):
         self.master_port = _free_port()
         self.master: ClusterMaster = ClusterMaster(heartbeat_timeout=6.0)
@@ -166,9 +164,8 @@ async def cluster():
         await c.stop()
 
 
+# 真端口 + 真 HTTP 跨进程 E2E。
 class TestRealNetworkE2E:
-    """真端口 + 真 HTTP 跨进程 E2E。"""
-
     @pytest.mark.asyncio
     async def test_real_register_cross_http(self, cluster):
         # agent 经真 HTTP 注册到 master (非 ASGITransport, 真 socket)。
@@ -319,13 +316,12 @@ _skip_no_docker = pytest.mark.skipif(
 )
 
 
+# docker-compose 真 1 Master + N Agent 跨容器 HTTP E2E。skip-gate docker。
+#
+# 起 compose (master:11452 + 2 agent), 验跨容器注册 + 派发, 完成后 down。
+# 依赖镜像 fusion-multi-node:latest 已 build (docker compose build)。
+#
 class TestContainerE2E:
-    """docker-compose 真 1 Master + N Agent 跨容器 HTTP E2E。skip-gate docker。
-
-    起 compose (master:11452 + 2 agent), 验跨容器注册 + 派发, 完成后 down。
-    依赖镜像 fusion-multi-node:latest 已 build (docker compose build)。
-    """
-
     @pytest.mark.asyncio
     @_skip_no_docker
     async def test_container_cross_register_and_dispatch(self):

@@ -1,9 +1,8 @@
-"""issue #52 原语 — cluster_key HKDF 派生 + MAC 助手单元测试。
-
-覆盖: 3 派生密钥 32 字节 / 域分离互异 / 确定性 / 不同 token 异 /
-mac hex / verify 接受-拒篡改-拒空 / canonical 排序无空白中文不转义。
-纯内存无 server 无 IO。
-"""
+# issue #52 原语 — cluster_key HKDF 派生 + MAC 助手单元测试。
+#
+# 覆盖: 3 派生密钥 32 字节 / 域分离互异 / 确定性 / 不同 token 异 /
+# mac hex / verify 接受-拒篡改-拒空 / canonical 排序无空白中文不转义。
+# 纯内存无 server 无 IO。
 
 from __future__ import annotations
 

@@ -1,8 +1,7 @@
-"""F4 (#32): docs/API.md 漂移检测 — 每个 /api/v1 路由须在 API.md 出现。
-
-防 docs rot: 新增 /api/v1 路由忘更文档时此测试 fail。FastAPI app routes 为源,
-docs/API.md 为文档面, 二者须一致。路径变量 ({node_id}) 原样匹配。
-"""
+# F4 (#32): docs/API.md 漂移检测 — 每个 /api/v1 路由须在 API.md 出现。
+#
+# 防 docs rot: 新增 /api/v1 路由忘更文档时此测试 fail。FastAPI app routes 为源,
+# docs/API.md 为文档面, 二者须一致。路径变量 ({node_id}) 原样匹配。
 
 from __future__ import annotations
 

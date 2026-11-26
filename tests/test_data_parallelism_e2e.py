@@ -1,15 +1,14 @@
-"""S4 E2E DATA 并行真实模型推理 — 接上游 fusion-mlx /v1/chat/completions。
-
-真实链: ClusterMaster DATA 派发 → PortRoutingTransport → 两 AgentServer 真 FastAPI
-→ NodeAgent._execute_inference → FusionMLXBackend.chat → fusion-mlx /v1/chat/completions
-(真模型 Llama-3.2-1B-Instruct-4bit)。两节点各跑同一 prompt, 各返回独立 content +
-usage, 末节点 COMPLETED, result.outputs 长度 == 节点数。
-
-DATA 并行语义: 同模型多副本并发服务批量请求, 各节点独立完整推理 (非层切分)。
-对照 PIPELINE (test_pipeline_e2e.py 切层链传 hidden_states)。
-
-依赖真 fusion-mlx 运行 + 小模型已下载; 不满足则 skip (不假模型, 不 mock)。
-"""
+# S4 E2E DATA 并行真实模型推理 — 接上游 fusion-mlx /v1/chat/completions。
+#
+# 真实链: ClusterMaster DATA 派发 → PortRoutingTransport → 两 AgentServer 真 FastAPI
+# → NodeAgent._execute_inference → FusionMLXBackend.chat → fusion-mlx /v1/chat/completions
+# (真模型 Llama-3.2-1B-Instruct-4bit)。两节点各跑同一 prompt, 各返回独立 content +
+# usage, 末节点 COMPLETED, result.outputs 长度 == 节点数。
+#
+# DATA 并行语义: 同模型多副本并发服务批量请求, 各节点独立完整推理 (非层切分)。
+# 对照 PIPELINE (test_pipeline_e2e.py 切层链传 hidden_states)。
+#
+# 依赖真 fusion-mlx 运行 + 小模型已下载; 不满足则 skip (不假模型, 不 mock)。
 
 from __future__ import annotations
 
@@ -80,9 +79,8 @@ _skip_no_backend = pytest.mark.skipif(
 )
 
 
+# 按 URL 端口路由到对应 agent ASGI app (复用 P5/P3 测试约定)。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app (复用 P5/P3 测试约定)。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -106,8 +104,8 @@ class PortRoutingTransport(AsyncBaseTransport):
             await c.aclose()
 
 
+# 真实 NodeAgent + 真 FusionMLXBackend (指向 live fusion-mlx)。
 def _make_real_agent_server(node_id: str, port: int) -> AgentServer:
-    """真实 NodeAgent + 真 FusionMLXBackend (指向 live fusion-mlx)。"""
     backend = FusionMLXBackend(base_url=_MLX_URL, api_key=_MLX_API_KEY)
     agent = NodeAgent(
         config=AgentConfig(
@@ -136,10 +134,9 @@ def _register_node(client: AsyncClient, node_id: str, port: int) -> Any:
     return client.post("/api/nodes/register", json=payload, headers=AUTH_HEADERS)
 
 
+# 真实 DATA 并行推理端到端 — 真 fusion-mlx + 真模型 chat。
 @_skip_no_backend
 class TestDataParallelismE2E:
-    """真实 DATA 并行推理端到端 — 真 fusion-mlx + 真模型 chat。"""
-
     @pytest.fixture
     async def cluster(self, monkeypatch):
         monkeypatch.setattr(
@@ -184,12 +181,12 @@ class TestDataParallelismE2E:
                 return
             await asyncio.sleep(0.05)
 
+    # 两节点 DATA 并行: 同 prompt 派发到两节点, 各独立推理, 合并两份 content。
+    #
+    # 真 fusion-mlx /v1/chat/completions 真模型, 非退化非 mock。
+    # 断言: COMPLETED, node_count==2, 两 outputs 各带 node_id + content。
+    #
     async def test_data_parallel_two_node_real_inference(self, cluster):
-        """两节点 DATA 并行: 同 prompt 派发到两节点, 各独立推理, 合并两份 content。
-
-        真 fusion-mlx /v1/chat/completions 真模型, 非退化非 mock。
-        断言: COMPLETED, node_count==2, 两 outputs 各带 node_id + content。
-        """
         master = cluster["master"]
         transport = ASGITransport(app=cluster["master_app"])
         async with AsyncClient(transport=transport, base_url="http://test") as client:

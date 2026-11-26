@@ -1,13 +1,12 @@
-"""#72 fencing token + 权威成员视图 (cluster_view/partitioned)。
-
-验证:
-(a) MasterElection.fencing_token 在 _become_leader 单调递增 + 持久化恢复。
-(b) NodeAgent 拒过期 master 派发 (incoming token < last → fencing_rejected)。
-(c) token 0 (单 master/active-active) 永不拒 (向后兼容)。
-(d) /api/nodes partitioned 标志 — 少数派非 leader follower (leader 未知) = True。
-(e) /api/nodes cluster_view — 单 master = True, leader = True, follower 近同步 = True。
-(f) standby receive_synced_state 后 _last_leader_sync 更新 → cluster_view 转 True。
-"""
+# #72 fencing token + 权威成员视图 (cluster_view/partitioned)。
+#
+# 验证:
+# (a) MasterElection.fencing_token 在 _become_leader 单调递增 + 持久化恢复。
+# (b) NodeAgent 拒过期 master 派发 (incoming token < last → fencing_rejected)。
+# (c) token 0 (单 master/active-active) 永不拒 (向后兼容)。
+# (d) /api/nodes partitioned 标志 — 少数派非 leader follower (leader 未知) = True。
+# (e) /api/nodes cluster_view — 单 master = True, leader = True, follower 近同步 = True。
+# (f) standby receive_synced_state 后 _last_leader_sync 更新 → cluster_view 转 True。
 
 import time
 

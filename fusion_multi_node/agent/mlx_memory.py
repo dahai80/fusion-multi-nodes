@@ -1,9 +1,8 @@
-"""fusion-mlx Metal 显存采集 — 经 GET /v1/health 抓 MLX 活动内存。
-
-issue #64: Apple Silicon 统一内存无独立显存, 真实 GPU/Metal 占用须从底座
-mx.metal.get_active_memory() 派生。多节点不引 mlx 依赖 (非声明依赖), 改走
-本地 loopback HTTP 抓 fusion-mlx /v1/health 返回的 memory 块。
-"""
+# fusion-mlx Metal 显存采集 — 经 GET /v1/health 抓 MLX 活动内存。
+#
+# issue #64: Apple Silicon 统一内存无独立显存, 真实 GPU/Metal 占用须从底座
+# mx.metal.get_active_memory() 派生。多节点不引 mlx 依赖 (非声明依赖), 改走
+# 本地 loopback HTTP 抓 fusion-mlx /v1/health 返回的 memory 块。
 
 from __future__ import annotations
 
@@ -17,12 +16,12 @@ logger = logging.getLogger(__name__)
 _GB = 1024**3
 
 
+# 抓 fusion-mlx /v1/health memory 块, 返回 {active_gb, cache_gb, peak_gb, total_gb, oom_risk}。
+#
+# 离线安全: 连接错误/超时/非 200 一律返 None (调用方回落 0.0, 不拖垮心跳)。
+# api_key 空 → 不发 Authorization 头 (匿名探测, 兼容未启鉴权底座)。
+#
 async def fetch_mlx_memory(base_url: str, api_key: str = "", timeout: float = 2.0) -> dict[str, Any] | None:
-    """抓 fusion-mlx /v1/health memory 块, 返回 {active_gb, cache_gb, peak_gb, total_gb, oom_risk}。
-
-    离线安全: 连接错误/超时/非 200 一律返 None (调用方回落 0.0, 不拖垮心跳)。
-    api_key 空 → 不发 Authorization 头 (匿名探测, 兼容未启鉴权底座)。
-    """
     url = f"{base_url.rstrip('/')}/v1/health"
     headers: dict[str, str] = {}
     if api_key:
@@ -62,8 +61,8 @@ async def fetch_mlx_memory(base_url: str, api_key: str = "", timeout: float = 2.
         return None
 
 
+# 同步版本 — 供 collect_load_report (to_thread 内) 复用同一逻辑。
 def fetch_mlx_memory_sync(base_url: str, api_key: str = "", timeout: float = 2.0) -> dict[str, Any] | None:
-    """同步版本 — 供 collect_load_report (to_thread 内) 复用同一逻辑。"""
     url = f"{base_url.rstrip('/')}/v1/health"
     headers: dict[str, str] = {}
     if api_key:

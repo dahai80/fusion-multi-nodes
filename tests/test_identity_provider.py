@@ -1,12 +1,11 @@
-"""#74 OPTIONAL fusion-identity 集成测试。
-
-覆盖:
-(a) IdentityProvider.verify_jwt — mock httpx, 解析 claims; revoked→None; 非200→None; 不可达→raise (fail-closed)。
-(b) get_tenant_quota — 缓存命中; admin 接口; 失败→None。
-(c) report_usage — best-effort, 失败不抛。
-(d) get_identity_provider — env 未设→None; 已设→单例。
-(e) 离线默认: 未启用 verify_jwt 返 None, get_tenant_quota 返 None。
-"""
+# #74 OPTIONAL fusion-identity 集成测试。
+#
+# 覆盖:
+# (a) IdentityProvider.verify_jwt — mock httpx, 解析 claims; revoked→None; 非200→None; 不可达→raise (fail-closed)。
+# (b) get_tenant_quota — 缓存命中; admin 接口; 失败→None。
+# (c) report_usage — best-effort, 失败不抛。
+# (d) get_identity_provider — env 未设→None; 已设→单例。
+# (e) 离线默认: 未启用 verify_jwt 返 None, get_tenant_quota 返 None。
 
 from __future__ import annotations
 

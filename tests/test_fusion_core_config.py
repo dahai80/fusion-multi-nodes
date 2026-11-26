@@ -1,8 +1,7 @@
-"""#89: fusion_core.config 单点解析接入后的语义回归。
-
-显式参数优先; env 链 FUSION_CLIENT_KEY → FUSION_MLX_API_KEY (旧名 warn) → MLX_API_KEY;
-dev 缺 key 返 "" + warning; FUSION_PROFILE=prod 缺 key RuntimeError (fail-fast)。
-"""
+# #89: fusion_core.config 单点解析接入后的语义回归。
+#
+# 显式参数优先; env 链 FUSION_CLIENT_KEY → FUSION_MLX_API_KEY (旧名 warn) → MLX_API_KEY;
+# dev 缺 key 返 "" + warning; FUSION_PROFILE=prod 缺 key RuntimeError (fail-fast)。
 
 import pytest
 

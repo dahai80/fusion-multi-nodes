@@ -1,4 +1,4 @@
-"""#82 常驻节点调度宿主测试 — spec 校验/next_run 确定性/持久化 roundtrip/触发循环。"""
+# #82 常驻节点调度宿主测试 — spec 校验/next_run 确定性/持久化 roundtrip/触发循环。
 
 import asyncio
 import time

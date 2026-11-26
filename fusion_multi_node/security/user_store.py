@@ -1,18 +1,17 @@
-"""用户令牌存储 — 多租户 per-user API 鉴权 (GAP-8, Phase F1)。
-
-企业级多租户/远程接入阻塞项: 旧实现仅一个集群共享 Bearer token, 所有调用方共享同一身份,
-无 per-user 鉴权、无 RBAC、task.user 客户自报可伪造。本模块补齐用户层:
-
-- 用户记录持久化 `~/.fusion/multi-node/users.json` (100% 本地, 无云), FUSION_USERS_FILE 覆盖。
-- 密钥只存 scrypt 哈希 (hashlib.scrypt, stdlib, 无新依赖); 明文 token 仅签发时返回一次。
-- 令牌格式 fmu_<userid>_<secret> — BearerAuthMiddleware 按 fmu_ 前缀分流到本存储校验。
-- 多活令牌 (rotation): 同一用户可持多个有效令牌, rotate 签新不废旧, revoke 废旧。
-
-设计约束:
-- 与 NodeRole (节点身份) 正交: UserRole 管用户层 RBAC (ADMIN/USER/VIEWER)。
-- 本地文件原子写 (tmp + os.replace), 0600 权限, 加载失败不抛 (降级空库 + warning)。
-- 集群内部 HTTP (master→agent 派发, agent 心跳, KV 跨节点) 仍用 cluster_token, 不走用户令牌。
-"""
+# 用户令牌存储 — 多租户 per-user API 鉴权 (GAP-8, Phase F1)。
+#
+# 企业级多租户/远程接入阻塞项: 旧实现仅一个集群共享 Bearer token, 所有调用方共享同一身份,
+# 无 per-user 鉴权、无 RBAC、task.user 客户自报可伪造。本模块补齐用户层:
+#
+# - 用户记录持久化 `~/.fusion/multi-node/users.json` (100% 本地, 无云), FUSION_USERS_FILE 覆盖。
+# - 密钥只存 scrypt 哈希 (hashlib.scrypt, stdlib, 无新依赖); 明文 token 仅签发时返回一次。
+# - 令牌格式 fmu_<userid>_<secret> — BearerAuthMiddleware 按 fmu_ 前缀分流到本存储校验。
+# - 多活令牌 (rotation): 同一用户可持多个有效令牌, rotate 签新不废旧, revoke 废旧。
+#
+# 设计约束:
+# - 与 NodeRole (节点身份) 正交: UserRole 管用户层 RBAC (ADMIN/USER/VIEWER)。
+# - 本地文件原子写 (tmp + os.replace), 0600 权限, 加载失败不抛 (降级空库 + warning)。
+# - 集群内部 HTTP (master→agent 派发, agent 心跳, KV 跨节点) 仍用 cluster_token, 不走用户令牌。
 
 from __future__ import annotations
 
@@ -37,8 +36,8 @@ _SCRYPT_DKLEN = 32
 _TOKEN_PREFIX = "fmu_"
 
 
+# 惰性算默认路径 — 不在模块导入时冻结 (HOME 可被测试 monkeypatch, 与 audit_log 一致)。
 def _default_users_path() -> Path:
-    """惰性算默认路径 — 不在模块导入时冻结 (HOME 可被测试 monkeypatch, 与 audit_log 一致)。"""
     return Path.home() / ".fusion" / "multi-node" / "users.json"
 
 
@@ -87,13 +86,12 @@ def _hash_token_secret(secret: str, salt: bytes) -> str:
     return dk.hex()
 
 
+# 用户存储 — 文件持久化, 线程安全, 多活令牌。
+#
+# None-safe: UserStore is None (无 FUSION_USERS_FILE / users.json 且无 bootstrap)
+# 时 BearerAuthMiddleware 回退纯 cluster_token 路径, 单租户零配置向后兼容。
+#
 class UserStore:
-    """用户存储 — 文件持久化, 线程安全, 多活令牌。
-
-    None-safe: UserStore is None (无 FUSION_USERS_FILE / users.json 且无 bootstrap)
-    时 BearerAuthMiddleware 回退纯 cluster_token 路径, 单租户零配置向后兼容。
-    """
-
     def __init__(self, path: str | None = None):
         env_path = os.environ.get("FUSION_USERS_FILE", "").strip()
         if path:
@@ -240,8 +238,8 @@ class UserStore:
             logger.info(f"用户角色变更: {user_id} → {role.value}")
             return True
 
+    # 签发令牌 — 返回明文 fmu_<uid>_<secret>, 仅此一次。
     def issue_token(self, user_id: str, label: str = "") -> str:
-        """签发令牌 — 返回明文 fmu_<uid>_<secret>, 仅此一次。"""
         import time
 
         with self._lock:
@@ -289,15 +287,15 @@ class UserStore:
             logger.info(f"全部令牌已吊销: user={user_id} count={n}")
             return n
 
+    # 轮换 — 签新令牌, 旧令牌保留 (多活), 返回新明文。revoke 旧令牌另调。
     def rotate_user_token(self, user_id: str, label: str = "") -> str:
-        """轮换 — 签新令牌, 旧令牌保留 (多活), 返回新明文。revoke 旧令牌另调。"""
         return self.issue_token(user_id, label=label or "rotated")
 
+    # 校验 fmu_<uid>_<secret> — 命中返回 (user_id, UserRole), 否则 None。
+    #
+    # 常量时间比较 (secrets.compare_digest), 不泄露哪步失败。
+    #
     def validate(self, token: str) -> tuple[str, UserRole] | None:
-        """校验 fmu_<uid>_<secret> — 命中返回 (user_id, UserRole), 否则 None。
-
-        常量时间比较 (secrets.compare_digest), 不泄露哪步失败。
-        """
         if not token.startswith(_TOKEN_PREFIX):
             return None
         rest = token[len(_TOKEN_PREFIX) :]
@@ -326,8 +324,8 @@ class UserStore:
         with self._lock:
             return len(self._users) == 0
 
+    # 首启引导 — 无用户时创建 ADMIN, 返回首个令牌明文。已有用户则 no-op 返回空。
     def bootstrap_admin(self, user_id: str = "admin", password: str = "") -> str:
-        """首启引导 — 无用户时创建 ADMIN, 返回首个令牌明文。已有用户则 no-op 返回空。"""
         with self._lock:
             if self._users:
                 logger.debug("引导跳过: 用户库非空")
@@ -340,12 +338,12 @@ class UserStore:
         return self.issue_token(user_id, label="bootstrap")
 
 
+# 加载用户存储 — FUSION_USERS_FILE 指定或默认路径存在则加载。
+#
+# 无用户文件且无 bootstrap → 返回 None (中间件回退纯 cluster_token 路径)。
+# 有文件但空 → 返回 UserStore (is_empty True), 仍走用户令牌路径但全部 reject。
+#
 def load_user_store() -> UserStore | None:
-    """加载用户存储 — FUSION_USERS_FILE 指定或默认路径存在则加载。
-
-    无用户文件且无 bootstrap → 返回 None (中间件回退纯 cluster_token 路径)。
-    有文件但空 → 返回 UserStore (is_empty True), 仍走用户令牌路径但全部 reject。
-    """
     env_path = os.environ.get("FUSION_USERS_FILE", "").strip()
     default_exists = _default_users_path().exists()
     if not env_path and not default_exists:

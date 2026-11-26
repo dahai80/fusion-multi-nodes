@@ -1,11 +1,10 @@
-"""FMP 消息路由器。
-
-职责:
-- 消息路由: 根据 target_id 投递到正确连接
-- hop_count 校验: 超限直接拦截
-- 多轮对话管理: round_id + round_number 追踪
-- 与 CircuitBreaker 集成
-"""
+# FMP 消息路由器。
+#
+# 职责:
+# - 消息路由: 根据 target_id 投递到正确连接
+# - hop_count 校验: 超限直接拦截
+# - 多轮对话管理: round_id + round_number 追踪
+# - 与 CircuitBreaker 集成
 
 from __future__ import annotations
 
@@ -25,10 +24,9 @@ from .fmp_message import (
 logger = logging.getLogger(__name__)
 
 
+# 多轮对话追踪。
 @dataclass
 class RoundInfo:
-    """多轮对话追踪。"""
-
     round_id: str
     source_id: str
     target_id: str
@@ -41,9 +39,8 @@ class RoundInfo:
         return self.current_round < self.max_rounds
 
 
+# FMP 消息路由器。
 class FMPRouter:
-    """FMP 消息路由器。"""
-
     def __init__(
         self,
         local_node_id: str = "",
@@ -63,8 +60,8 @@ class FMPRouter:
             "local_delivered": 0,
         }
 
+    # 路由消息。
     async def route(self, msg: FMPMessage) -> bool:
-        """路由消息。"""
         self.cleanup_stale_rounds()
         link = msg.link
 
@@ -116,6 +113,7 @@ class FMPRouter:
             self._stats["routed"] += 1
         return ok
 
+    # 便捷发送接口。
     async def send(
         self,
         target_id: str,
@@ -123,7 +121,6 @@ class FMPRouter:
         payload: Any,
         round_id: str = "",
     ) -> bool:
-        """便捷发送接口。"""
         msg = FMPMessage.create(
             source_id=self.local_node_id,
             target_id=target_id,

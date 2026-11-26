@@ -1,4 +1,4 @@
-"""Cluster Master module exports."""
+# Cluster Master module exports.
 
 # cloud_fallback / ast_diff 迁移债已清理 (接收端 fusion-gateway #106 + fusion-cowork #61 已 CLOSED 落地),
 # 死模块连同 re-export 删除; cluster_sync 保留 (live, agent 跨节点模型同步)。

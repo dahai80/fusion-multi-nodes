@@ -1,8 +1,7 @@
-"""#70 回归: exclude_nodes 透传到 select_nodes — 提交端点级验证。
-
-exclude_nodes 端到端已实现 (TaskSubmitRequest.exclude_nodes -> ClusterTask -> select_nodes 过滤)。
-本测试钉住提交端点契约: 排除的节点不出现在 assigned_nodes。
-"""
+# #70 回归: exclude_nodes 透传到 select_nodes — 提交端点级验证。
+#
+# exclude_nodes 端到端已实现 (TaskSubmitRequest.exclude_nodes -> ClusterTask -> select_nodes 过滤)。
+# 本测试钉住提交端点契约: 排除的节点不出现在 assigned_nodes。
 
 import pytest
 from httpx import ASGITransport, AsyncClient

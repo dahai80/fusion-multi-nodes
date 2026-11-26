@@ -1,12 +1,11 @@
-"""issue #52 原语 2 — 规则纪元广播测试。
-
-3 类:
-- TestRuleEpochMaster — 初始 0 / advance 增 / 查询 / advance 端点 ADMIN-only /
-  get 端点 USER+VIEWER 可读 / receive 拒回退 / receive 等于幂等。
-- TestRuleEpochBroadcast — advance 广播到 worker / agent 存 epoch /
-  跳 unsafe peer / state_sync_loop 周期补漏 / standby 收。
-- TestRuleEpochUserRbac — 用户令牌拒 advance / 集群令牌 ok。
-"""
+# issue #52 原语 2 — 规则纪元广播测试。
+#
+# 3 类:
+# - TestRuleEpochMaster — 初始 0 / advance 增 / 查询 / advance 端点 ADMIN-only /
+# get 端点 USER+VIEWER 可读 / receive 拒回退 / receive 等于幂等。
+# - TestRuleEpochBroadcast — advance 广播到 worker / agent 存 epoch /
+# 跳 unsafe peer / state_sync_loop 周期补漏 / standby 收。
+# - TestRuleEpochUserRbac — 用户令牌拒 advance / 集群令牌 ok。
 
 from __future__ import annotations
 
@@ -27,9 +26,8 @@ M_PORT = 11452
 AG_PORT = 11458
 
 
+# 按 URL 端口路由到对应 ASGI app。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 ASGI app。"""
-
     def __init__(self, port_to_app: dict[int, object]):
         self._port_to_app = port_to_app
         self._clients = {

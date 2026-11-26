@@ -1,10 +1,9 @@
-"""P0-5 SSRF 校验统一 — register/cancel/KV 出站路径 SSRF 守卫测试 (AR #24 H1/H2/H3)。
-
-验:
-- register_node 拒云元数据/链路本地主机 (H1), 放行 loopback + 私网。
-- KV lookup_remote/transfer/warm 跳过云元数据 host, 不发请求 (H3)。
-- cancel 通知跳过非安全对端 (H2, 经 master_server ASGI 路由验)。
-"""
+# P0-5 SSRF 校验统一 — register/cancel/KV 出站路径 SSRF 守卫测试 (AR #24 H1/H2/H3)。
+#
+# 验:
+# - register_node 拒云元数据/链路本地主机 (H1), 放行 loopback + 私网。
+# - KV lookup_remote/transfer/warm 跳过云元数据 host, 不发请求 (H3)。
+# - cancel 通知跳过非安全对端 (H2, 经 master_server ASGI 路由验)。
 
 from __future__ import annotations
 
@@ -35,9 +34,8 @@ def _node(node_id="n1", ip="10.0.0.1", port=11458) -> NodeInfo:
     )
 
 
+# H1: register_node 注册期校验 ip。
 class TestRegisterNodeSSRF:
-    """H1: register_node 注册期校验 ip。"""
-
     @pytest.mark.asyncio
     async def test_register_rejects_metadata_host(self):
         master = ClusterMaster()
@@ -113,9 +111,8 @@ class TestIsSafeOutboundHost:
         assert is_safe_outbound_host(host) is expected
 
 
+# H3: KV 跨节点路径出站 SSRF 守卫 — 跳过恶意 host, 不发请求。
 class TestKVOutboundSSRF:
-    """H3: KV 跨节点路径出站 SSRF 守卫 — 跳过恶意 host, 不发请求。"""
-
     @pytest.mark.asyncio
     async def test_lookup_remote_skips_metadata_host(self):
         m = KVSharingManager(enable_compression=False)
@@ -148,9 +145,8 @@ class TestKVOutboundSSRF:
         mock_client.post.assert_not_called()
 
 
+# H2: master_server cancel 路由出站通知跳过非安全对端。
 class TestCancelRouteSSRF:
-    """H2: master_server cancel 路由出站通知跳过非安全对端。"""
-
     @pytest.mark.asyncio
     async def test_cancel_skips_unsafe_node(self):
         master = ClusterMaster()

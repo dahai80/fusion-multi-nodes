@@ -1,4 +1,4 @@
-"""Observability coverage tests."""
+# Observability coverage tests.
 
 import asyncio
 import collections
@@ -681,13 +681,12 @@ class TestP05AlertWebhook:
             await m.stop()
 
 
+# P2-12 (审计 §6.5): 可观测 deque 持久化 (persist=True, env 门控默认关)。
+#
+# save() 落盘 JSONL (metrics/alerts/logs); load() 启动恢复; persist=False no-op。
+# 事件总线不持久化 (SSE 实时语义, 重连从当前开始)。
+#
 class TestP2_12ObservabilityPersist:
-    """P2-12 (审计 §6.5): 可观测 deque 持久化 (persist=True, env 门控默认关)。
-
-    save() 落盘 JSONL (metrics/alerts/logs); load() 启动恢复; persist=False no-op。
-    事件总线不持久化 (SSE 实时语义, 重连从当前开始)。
-    """
-
     def test_p2_12_persist_false_no_op(self, tmp_path, monkeypatch):
         # persist=False → save()/load() no-op, 不读写文件。
         monkeypatch.setenv("FUSION_OBSERVABILITY_FILE", str(tmp_path / "obs.jsonl"))

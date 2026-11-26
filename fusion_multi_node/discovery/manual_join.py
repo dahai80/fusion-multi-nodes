@@ -1,8 +1,7 @@
-"""M1-05 手动 IP 加入 — mDNS 失败时的 IP 直连回退机制。
-
-提供 join_by_ip() 方法，允许 Agent 通过已知的 Master IP:Port 直接注册，
-无需 mDNS 发现。同时提供 Master 端的 /api/join 端点。
-"""
+# M1-05 手动 IP 加入 — mDNS 失败时的 IP 直连回退机制。
+#
+# 提供 join_by_ip() 方法，允许 Agent 通过已知的 Master IP:Port 直接注册，
+# 无需 mDNS 发现。同时提供 Master 端的 /api/join 端点。
 
 from __future__ import annotations
 
@@ -24,10 +23,9 @@ from fusion_multi_node.security.mtls import (
 logger = logging.getLogger(__name__)
 
 
+# 手动加入请求。
 @dataclass
 class JoinRequest:
-    """手动加入请求。"""
-
     node_id: str
     hostname: str
     ip_address: str
@@ -40,10 +38,9 @@ class JoinRequest:
             self.capabilities = ["inference"]
 
 
+# 手动加入响应。
 @dataclass
 class JoinResponse:
-    """手动加入响应。"""
-
     success: bool
     master_host: str = ""
     master_port: int = 0
@@ -52,14 +49,13 @@ class JoinResponse:
     token: str = ""
 
 
+# 手动加入客户端 — Agent 端使用。
+#
+# 用法:
+# client = ManualJoinClient(node_id="node-1")
+# result = await client.join("192.168.1.100", 11452)
+#
 class ManualJoinClient:
-    """手动加入客户端 — Agent 端使用。
-
-    用法:
-        client = ManualJoinClient(node_id="node-1")
-        result = await client.join("192.168.1.100", 11452)
-    """
-
     def __init__(self, node_id: str = "", cluster_secret: str = "", timeout: float = 10.0):
         self.node_id = node_id
         self._cluster_secret = cluster_secret
@@ -73,6 +69,7 @@ class ManualJoinClient:
             self._client = httpx.AsyncClient(timeout=self._timeout, **mtls_client_kwargs())
         return self._client
 
+    # 通过 IP 直连方式加入集群。
     async def join(
         self,
         master_host: str,
@@ -82,7 +79,6 @@ class ManualJoinClient:
         agent_port: int = 11458,
         capabilities: list[str] | None = None,
     ) -> JoinResponse:
-        """通过 IP 直连方式加入集群。"""
         import platform
 
         hostname = hostname or platform.node()
@@ -137,8 +133,8 @@ class ManualJoinClient:
             logger.error(error)
             return JoinResponse(success=False, error=error)
 
+    # 验证 Master 是否可达。
     async def verify_master(self, master_host: str, master_port: int = 11452) -> bool:
-        """验证 Master 是否可达。"""
         try:
             client = await self._get_client()
             resp = await client.get(f"{mtls_scheme()}://{master_host}:{master_port}/api/health")
@@ -164,12 +160,11 @@ class ManualJoinClient:
             await self._client.aclose()
 
 
+# 手动加入管理器 — Master 端使用。
+#
+# 管理 /api/join 请求的审批流程，与 NodeApprovalManager 集成。
+#
 class ManualJoinManager:
-    """手动加入管理器 — Master 端使用。
-
-    管理 /api/join 请求的审批流程，与 NodeApprovalManager 集成。
-    """
-
     def __init__(self, cluster_secret: str = "", auto_approve: bool = True):
         # P1-8 (审计 §3.3): 空 cluster_secret → 警告 (空密钥等同禁用 join 鉴权, 隐患)。
         # 不强制 raise (兼容无密钥内网部署), 但 handle_join_request 配空密钥则密钥校验跳过。
@@ -180,13 +175,13 @@ class ManualJoinManager:
         self._join_history: list[dict[str, Any]] = []
         self._max_history = 500
 
+    # 处理手动加入请求。
+    #
+    # 返回:
+    # {"status": "ok", "node_id": ..., "token": ...} 或
+    # {"status": "error", "detail": ...}
+    #
     def handle_join_request(self, request_data: dict[str, Any]) -> dict[str, Any]:
-        """处理手动加入请求。
-
-        返回:
-            {"status": "ok", "node_id": ..., "token": ...} 或
-            {"status": "error", "detail": ...}
-        """
         node_id = request_data.get("node_id", "")
         if not node_id:
             return {"status": "error", "detail": "缺少 node_id"}

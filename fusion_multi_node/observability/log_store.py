@@ -1,10 +1,9 @@
-"""M8 日志存储与智能诊断 — 集中日志存储、导出、异常模式识别。
-
-- 日志集中存储（内存+磁盘）
-- 多格式导出（JSON/CSV/文本）
-- 智能故障诊断（异常模式检测、根因分析）
-- 日志清理与轮转
-"""
+# M8 日志存储与智能诊断 — 集中日志存储、导出、异常模式识别。
+#
+# - 日志集中存储（内存+磁盘）
+# - 多格式导出（JSON/CSV/文本）
+# - 智能故障诊断（异常模式检测、根因分析）
+# - 日志清理与轮转
 
 from __future__ import annotations
 
@@ -22,10 +21,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# 存储的日志条目。
 @dataclass
 class StoredLog:
-    """存储的日志条目。"""
-
     timestamp: float
     level: str
     source: str
@@ -41,10 +39,9 @@ class StoredLog:
         return LogLevel.from_str(self.level)
 
 
+# 诊断结果。
 @dataclass
 class DiagnosisResult:
-    """诊断结果。"""
-
     pattern: str
     severity: str
     description: str
@@ -101,9 +98,8 @@ FAULT_PATTERNS = [
 ]
 
 
+# 日志存储管理器。
 class LogStore:
-    """日志存储管理器。"""
-
     def __init__(
         self,
         store_dir: str = "",
@@ -250,12 +246,11 @@ class LogStore:
         }
 
 
+# 智能故障诊断器。
+#
+# 基于日志模式匹配和统计分析，识别异常模式并提供诊断建议。
+#
 class FaultDiagnoser:
-    """智能故障诊断器。
-
-    基于日志模式匹配和统计分析，识别异常模式并提供诊断建议。
-    """
-
     def __init__(self, custom_patterns: list[dict[str, str]] | None = None):
         self._patterns = list(FAULT_PATTERNS)
         if custom_patterns:

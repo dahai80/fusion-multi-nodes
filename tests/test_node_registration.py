@@ -1,4 +1,4 @@
-"""F-A12 节点注册幂等 (PATCH 语义) + F-A13 故障黑名单测试 (#20)。"""
+# F-A12 节点注册幂等 (PATCH 语义) + F-A13 故障黑名单测试 (#20)。
 
 from __future__ import annotations
 
@@ -24,9 +24,8 @@ def _node(node_id: str = "n1", **kw) -> NodeInfo:
     return NodeInfo(**base)
 
 
+# F-A12: 再注册 = PATCH, 保留 Master 权威运行态字段, 更新硬件声明字段。
 class TestRegisterIdempotency:
-    """F-A12: 再注册 = PATCH, 保留 Master 权威运行态字段, 更新硬件声明字段。"""
-
     @pytest.mark.asyncio
     async def test_reregister_preserves_runtime_fields(self):
         master = ClusterMaster()
@@ -69,9 +68,8 @@ class TestRegisterIdempotency:
         assert "n1" in master.nodes
 
 
+# F-A13: report_fault 窗口内达阈值 → ban; ban 内拒绝注册; 到期自动解封。
 class TestFaultBlacklist:
-    """F-A13: report_fault 窗口内达阈值 → ban; ban 内拒绝注册; 到期自动解封。"""
-
     @pytest.mark.asyncio
     async def test_report_fault_marks_fault(self):
         master = ClusterMaster()

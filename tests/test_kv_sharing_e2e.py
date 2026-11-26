@@ -1,11 +1,10 @@
-"""S4 E2E 跨节点 KV 缓存共享 — 真 ASGI 路由, 非单元 mock。
-
-真实链: 两 AgentServer 真 FastAPI → PortRoutingTransport 路由 → /api/kv/* 路由
-(store_local 直接注入 / lookup 经 HTTP / warm 经 HTTP 推送 / transfer 经 HTTP 拉取)。
-覆盖 agent_server KV 路由端到端 (原 17/24 文件 mock, KV 跨节点路由零覆盖)。
-
-KV 缓存为纯本地数据 (非模型张量), 用合成 KVCacheEntry 验路由链路, 不需真 fusion-mlx。
-"""
+# S4 E2E 跨节点 KV 缓存共享 — 真 ASGI 路由, 非单元 mock。
+#
+# 真实链: 两 AgentServer 真 FastAPI → PortRoutingTransport 路由 → /api/kv/* 路由
+# (store_local 直接注入 / lookup 经 HTTP / warm 经 HTTP 推送 / transfer 经 HTTP 拉取)。
+# 覆盖 agent_server KV 路由端到端 (原 17/24 文件 mock, KV 跨节点路由零覆盖)。
+#
+# KV 缓存为纯本地数据 (非模型张量), 用合成 KVCacheEntry 验路由链路, 不需真 fusion-mlx。
 
 from __future__ import annotations
 
@@ -33,9 +32,8 @@ AGENT_PORT_B = 22458
 # 这里走 warm_cache (nodes 列表) + transfer (source/target) 两条 HTTP 链路。
 
 
+# 按 URL 端口路由到对应 agent ASGI app (复用 P3/P5/S4-数据并行约定)。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 agent ASGI app (复用 P3/P5/S4-数据并行约定)。"""
-
     def __init__(self, port_to_app: dict[int, Any]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -85,8 +83,8 @@ def _make_entry(cache_id: str = "kv-e2e", model_name: str = "llama-1b") -> KVCac
     )
 
 
+# 真实 NodeAgent + AgentServer (无 backend 推理需求, KV 路由不触推理)。
 def _make_agent_server(node_id: str, port: int) -> AgentServer:
-    """真实 NodeAgent + AgentServer (无 backend 推理需求, KV 路由不触推理)。"""
     agent = NodeAgent(
         config=AgentConfig(node_id=node_id, cluster_token=TEST_TOKEN, agent_port=port),
     )
@@ -97,14 +95,14 @@ def _make_agent_server(node_id: str, port: int) -> AgentServer:
     return server
 
 
+# 两节点 agent server + 共享路由 transport。
+#
+# warm_cache/transfer 经 manager 拼 URL: http://{node_id}:11458/api/kv/*。
+# 端口 11458 硬编码 (kv_cache_sharing), 不在路由 map。E2E 把 manager 的
+# _get_http_client 换成路由 transport + URL 端口重写 (agent-a→port_a, agent-b→port_b)。
+#
 @pytest.fixture
 async def kv_cluster(monkeypatch):
-    """两节点 agent server + 共享路由 transport。
-
-    warm_cache/transfer 经 manager 拼 URL: http://{node_id}:11458/api/kv/*。
-    端口 11458 硬编码 (kv_cache_sharing), 不在路由 map。E2E 把 manager 的
-    _get_http_client 换成路由 transport + URL 端口重写 (agent-a→port_a, agent-b→port_b)。
-    """
     server_a = _make_agent_server("agent-a", AGENT_PORT_A)
     server_b = _make_agent_server("agent-b", AGENT_PORT_B)
     port_to_app = {AGENT_PORT_A: server_a.app, AGENT_PORT_B: server_b.app}
@@ -147,12 +145,11 @@ async def kv_cluster(monkeypatch):
         await routing_transport.aclose()
 
 
+# 跨节点 KV 缓存共享端到端 — 真 ASGI 路由 (非单元 mock)。
 class TestKVSharingE2E:
-    """跨节点 KV 缓存共享端到端 — 真 ASGI 路由 (非单元 mock)。"""
-
+    # 同节点: store_local 注入 → HTTP /api/kv/lookup 查回。
+    # 验 agent_server lookup 路由 + KVSharingManager 本地索引 round-trip。
     async def test_kv_store_and_lookup_same_node(self, kv_cluster):
-        """同节点: store_local 注入 → HTTP /api/kv/lookup 查回。
-        验 agent_server lookup 路由 + KVSharingManager 本地索引 round-trip。"""
         server_a = kv_cluster["server_a"]
         server_a.kv_manager.store_local(_make_entry(cache_id="c-aaa"))
 
@@ -173,8 +170,8 @@ class TestKVSharingE2E:
         assert len(entry["shards"]) == 1
         logger.info("S4 KV E2E 同节点 store→lookup 通过")
 
+    # lookup 未命中 → 404 (非静默 200 空)。
     async def test_kv_lookup_missing_returns_404(self, kv_cluster):
-        """lookup 未命中 → 404 (非静默 200 空)。"""
         server_a = kv_cluster["server_a"]
         transport = ASGITransport(app=server_a.app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -185,14 +182,14 @@ class TestKVSharingE2E:
             )
         assert resp.status_code == 404
 
+    # 跨节点 lookup_remote 真链路 — store 在 node-a, node-b 经 HTTP 查回。
+    #
+    # 验 lookup_remote 解码契约: route 返 {"found":True,"entry":{...}} → manager
+    # _deserialize_entry → 返回 (entry, node_id)。旧 route 返扁平 dict 无 "found"/"entry"
+    # 键 → lookup_remote 永远 None (静默失效); 单元 mock 捏造该形状掩盖此 bug。
+    # 此 E2E 用真 route (非 mock) 锁契约, 防 "假信心测试" 复发。
+    #
     async def test_kv_lookup_remote_cross_node_contract(self, kv_cluster):
-        """跨节点 lookup_remote 真链路 — store 在 node-a, node-b 经 HTTP 查回。
-
-        验 lookup_remote 解码契约: route 返 {"found":True,"entry":{...}} → manager
-        _deserialize_entry → 返回 (entry, node_id)。旧 route 返扁平 dict 无 "found"/"entry"
-        键 → lookup_remote 永远 None (静默失效); 单元 mock 捏造该形状掩盖此 bug。
-        此 E2E 用真 route (非 mock) 锁契约, 防 "假信心测试" 复发。
-        """
         server_a = kv_cluster["server_a"]
         server_b = kv_cluster["server_b"]
         server_a.kv_manager.store_local(_make_entry(cache_id="c-remote"))
@@ -206,12 +203,12 @@ class TestKVSharingE2E:
         assert node_id == "agent-a"
         logger.info("S4 KV E2E 跨节点 lookup_remote 契约通过 (route→found/entry→decode)")
 
+    # 预热推送: node-a warm_cache → 经路由 HTTP POST node-b /api/kv/warm。
+    #
+    # 验跨节点 warm HTTP 链路 (manager warm_cache → _get_http_client → 路由 → node-b)。
+    # fixture 已重写 :11458 端口 → 真实路由端口, 故直接调 warm_cache。
+    #
     async def test_kv_warm_pushes_to_remote_node(self, kv_cluster):
-        """预热推送: node-a warm_cache → 经路由 HTTP POST node-b /api/kv/warm。
-
-        验跨节点 warm HTTP 链路 (manager warm_cache → _get_http_client → 路由 → node-b)。
-        fixture 已重写 :11458 端口 → 真实路由端口, 故直接调 warm_cache。
-        """
         server_a = kv_cluster["server_a"]
         result = await server_a.kv_manager.warm_cache(
             model_name="llama-1b",
@@ -222,8 +219,8 @@ class TestKVSharingE2E:
         assert result["success"] >= 1, f"预热失败: {result}"
         logger.info(f"S4 KV E2E 跨节点 warm 推送通过: {result}")
 
+    # /api/kv/stats 路由 — 返 manager 统计。
     async def test_kv_stats_route(self, kv_cluster):
-        """/api/kv/stats 路由 — 返 manager 统计。"""
         server_a = kv_cluster["server_a"]
         server_a.kv_manager.store_local(_make_entry(cache_id="c-stats"))
         transport = ASGITransport(app=server_a.app)

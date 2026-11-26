@@ -1,9 +1,8 @@
-"""H3 Master 任务持久化 + 启动恢复测试。
-
-验证崩溃自愈: RUNNING/PENDING 任务落盘 → 新 Master 启动恢复 → RUNNING 置 PENDING 重派。
-终态任务不落盘。无文件时启动恢复 0 任务。
-No external API callers — internal unit tests.
-"""
+# H3 Master 任务持久化 + 启动恢复测试。
+#
+# 验证崩溃自愈: RUNNING/PENDING 任务落盘 → 新 Master 启动恢复 → RUNNING 置 PENDING 重派。
+# 终态任务不落盘。无文件时启动恢复 0 任务。
+# No external API callers — internal unit tests.
 
 import asyncio
 import json
@@ -200,23 +199,23 @@ class TestPersistRestore:
         real_write = m._write_task_store
 
         def slow_write(pending):
-            # 模拟慢盘 fsync: 同步阻塞 80ms (若在事件循环线程, 会拖垮并发协程)
+            # 模拟慢盘 fsync: 同步阻塞 500ms (若在事件循环线程, 会拖垮并发协程)
             import time as _t
 
-            _t.sleep(0.08)
+            _t.sleep(0.5)
             return real_write(pending)
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(m, "_write_task_store", slow_write)
             t0 = time.monotonic()
             persist_task = asyncio.create_task(m._persist_tasks())
-            # 并行计时器: 40ms sleep — 若 fsync 阻塞事件循环, 此 sleep 会被 80ms 慢盘推迟到 ~80ms+ 才完成
-            timer_task = asyncio.create_task(asyncio.sleep(0.04))
+            # 并行计时器: 200ms sleep — 若 fsync 阻塞事件循环, 此 sleep 会被 500ms 慢盘推迟到 ~500ms+ 才完成
+            timer_task = asyncio.create_task(asyncio.sleep(0.2))
             await timer_task
             timer_elapsed = time.monotonic() - t0
             await persist_task
-        # 计时器应在 ~40ms 完成 (容忍调度抖动), 不被 80ms 慢盘拖到 ~80ms — 证明 fsync 移出事件循环。
-        assert timer_elapsed < 0.07, f"事件循环被 fsync 阻塞: 计时器 {timer_elapsed:.3f}s 应 < 0.07s"
+        # 计时器应在 ~200ms 完成 (容忍满载调度抖动), 不被 500ms 慢盘拖到 ~500ms — 证明 fsync 移出事件循环。
+        assert timer_elapsed < 0.3, f"事件循环被 fsync 阻塞: 计时器 {timer_elapsed:.3f}s 应 < 0.3s"
         assert (tmp_path / "tasks.json").exists()
 
     @pytest.mark.asyncio

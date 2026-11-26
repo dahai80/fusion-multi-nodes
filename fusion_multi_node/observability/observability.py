@@ -1,10 +1,9 @@
-"""Cluster Observability — 全集群统一可观测模块。
-
-核心能力：
-- 全集群统一日志聚合
-- 指标监控（内存/推理TPS/网络RTT/会话耗时）
-- 告警体系（节点离线/长任务卡死/内存爆满）
-"""
+# Cluster Observability — 全集群统一可观测模块。
+#
+# 核心能力：
+# - 全集群统一日志聚合
+# - 指标监控（内存/推理TPS/网络RTT/会话耗时）
+# - 告警体系（节点离线/长任务卡死/内存爆满）
 
 from __future__ import annotations
 
@@ -53,10 +52,9 @@ class LogLevel(Enum):
         }[self]
 
 
+# 指标数据点。
 @dataclass
 class MetricPoint:
-    """指标数据点。"""
-
     timestamp: float
     node_id: str
     metric_name: str
@@ -64,10 +62,9 @@ class MetricPoint:
     tags: dict[str, str] = field(default_factory=dict)
 
 
+# 告警定义。
 @dataclass
 class Alert:
-    """告警定义。"""
-
     alert_id: str
     severity: str  # "info" | "warning" | "critical"
     title: str
@@ -78,10 +75,9 @@ class Alert:
     resolved_at: float = 0.0
 
 
+# 日志条目。
 @dataclass
 class LogEntry:
-    """日志条目。"""
-
     timestamp: float
     node_id: str
     level: str
@@ -90,9 +86,8 @@ class LogEntry:
     task_id: str = ""
 
 
+# 集群可观测模块 — 监控、日志、告警聚合。
 class ClusterObservability:
-    """集群可观测模块 — 监控、日志、告警聚合。"""
-
     def __init__(self, retention_hours: float = 168.0, persist: bool = False):
         self.retention_seconds = retention_hours * 3600
         self.metrics: collections.deque = collections.deque(maxlen=10000)
@@ -114,6 +109,7 @@ class ClusterObservability:
 
     # ── 指标收集 ──
 
+    # 记录指标。
     def record_metric(
         self,
         node_id: str,
@@ -121,7 +117,6 @@ class ClusterObservability:
         value: float,
         tags: dict[str, str] | None = None,
     ) -> None:
-        """记录指标。"""
         ts = time.time()
         self.metrics.append(
             MetricPoint(
@@ -134,6 +129,7 @@ class ClusterObservability:
         )
         self._metric_times.append(ts)
 
+    # 查询指标 — 使用时间索引加速 since 过滤。
     def get_metrics(
         self,
         name: str,
@@ -141,7 +137,6 @@ class ClusterObservability:
         since: float = 0.0,
         limit: int = 100,
     ) -> list[MetricPoint]:
-        """查询指标 — 使用时间索引加速 since 过滤。"""
         results = []
         start_idx = 0
         if since > 0 and self._metric_times:
@@ -157,8 +152,8 @@ class ClusterObservability:
                 break
         return results
 
+    # 获取最新指标值。
     def get_latest_metric(self, name: str, node_id: str = "") -> MetricPoint | None:
-        """获取最新指标值。"""
         for m in reversed(self.metrics):
             if m.metric_name == name and (not node_id or m.node_id == node_id):
                 return m
@@ -166,11 +161,11 @@ class ClusterObservability:
 
     # ── P2-12 持久化 ──
 
+    # P2-12: 落盘 metrics + alerts + logs (JSONL, 限最近 maxlen 条)。
+    # 原子 tmp+replace+fsync (对齐 config.py 范式)。事件总线不持久化 (SSE 实时语义)。
+    # persist=False → no-op。写失败降级 warning 不拖垮主路径 (审计主路径不被拖垮)。
+    #
     def save(self) -> bool:
-        """P2-12: 落盘 metrics + alerts + logs (JSONL, 限最近 maxlen 条)。
-        原子 tmp+replace+fsync (对齐 config.py 范式)。事件总线不持久化 (SSE 实时语义)。
-        persist=False → no-op。写失败降级 warning 不拖垮主路径 (审计主路径不被拖垮)。
-        """
         if not self.persist:
             return False
         try:
@@ -236,10 +231,10 @@ class ClusterObservability:
             logger.warning(f"P2-12 可观测数据落盘失败 (继续内存模式): {e}")
             return False
 
+    # P2-12: 启动恢复 — 从 JSONL 读回 metrics/alerts/logs。
+    # persist=False → no-op 返 0。文件不存在 → 0 (首启)。返回恢复条数。
+    #
     def load(self) -> int:
-        """P2-12: 启动恢复 — 从 JSONL 读回 metrics/alerts/logs。
-        persist=False → no-op 返 0。文件不存在 → 0 (首启)。返回恢复条数。
-        """
         if not self.persist:
             return 0
         if not os.path.isfile(self._persist_path):
@@ -296,8 +291,8 @@ class ClusterObservability:
 
     # ── 日志管理 ──
 
+    # 添加日志条目。
     def add_log(self, entry: LogEntry) -> None:
-        """添加日志条目。"""
         normalized = LogLevel.from_str(entry.level)
         entry.level = normalized.value
         self.logs.append(entry)
@@ -310,6 +305,7 @@ class ClusterObservability:
                 node_id=entry.node_id,
             )
 
+    # 查询日志。
     def get_logs(
         self,
         node_id: str = "",
@@ -317,7 +313,6 @@ class ClusterObservability:
         since: float = 0.0,
         limit: int = 100,
     ) -> list[LogEntry]:
-        """查询日志。"""
         results = []
         for log in reversed(self.logs):
             if node_id and log.node_id != node_id:
@@ -331,6 +326,7 @@ class ClusterObservability:
                 break
         return results
 
+    # Master侧全节点日志汇总 — 按node_id分组返回。
     def collect_node_logs(
         self,
         node_ids: list[str] | None = None,
@@ -338,7 +334,6 @@ class ClusterObservability:
         since: float = 0.0,
         limit: int = 500,
     ) -> dict[str, list[LogEntry]]:
-        """Master侧全节点日志汇总 — 按node_id分组返回。"""
         id_set = set(node_ids) if node_ids else None
         target_level = LogLevel.from_str(level) if level else None
         result: dict[str, list[LogEntry]] = collections.defaultdict(list)
@@ -358,6 +353,7 @@ class ClusterObservability:
 
     # ── 告警管理 ──
 
+    # 创建告警。
     def create_alert(
         self,
         severity: str,
@@ -365,7 +361,6 @@ class ClusterObservability:
         message: str,
         node_id: str = "",
     ) -> Alert:
-        """创建告警。"""
         alert = Alert(
             alert_id=f"alert_{uuid.uuid4().hex[:12]}",
             severity=severity,
@@ -383,8 +378,8 @@ class ClusterObservability:
                 logger.error(f"告警处理异常: {e}")
         return alert
 
+    # 解决告警。
     def resolve_alert(self, alert_id: str) -> bool:
-        """解决告警。"""
         for alert in self.alerts:
             if alert.alert_id == alert_id and not alert.resolved:
                 alert.resolved = True
@@ -392,22 +387,22 @@ class ClusterObservability:
                 return True
         return False
 
+    # 获取活跃告警。
     def get_active_alerts(self, severity: str = "") -> list[Alert]:
-        """获取活跃告警。"""
         return [a for a in self.alerts if not a.resolved and (not severity or a.severity == severity)]
 
+    # 注册告警处理器。
     def on_alert(self, handler: Callable) -> None:
-        """注册告警处理器。"""
         self._alert_handlers.append(handler)
 
     # ── 告警规则引擎 ──
 
+    # 检查告警规则。
+    #
+    # P0-8: 每 tick 调用 (接 master 健康循环), 须去重 — 同 (node_id, title)
+    # 已有活跃告警则跳过, 否则每 10s 刷一条, deque 被同质告警灌满。
+    #
     async def check_alert_rules(self, nodes: dict[str, Any]) -> list[Alert]:
-        """检查告警规则。
-
-        P0-8: 每 tick 调用 (接 master 健康循环), 须去重 — 同 (node_id, title)
-        已有活跃告警则跳过, 否则每 10s 刷一条, deque 被同质告警灌满。
-        """
         new_alerts = []
         active_keys = {(a.node_id, a.title) for a in self.alerts if not a.resolved}
 
@@ -444,8 +439,8 @@ class ClusterObservability:
 
     # ── 统计报表 ──
 
+    # 生成集群统计报告。
     def get_cluster_report(self) -> dict[str, Any]:
-        """生成集群统计报告。"""
         now = time.time()
         since = now - 3600  # 最近1小时
 
@@ -472,14 +467,14 @@ class ClusterObservability:
 
     # ── 生命周期 ──
 
+    # 启动可观测模块。
     async def start(self) -> None:
-        """启动可观测模块。"""
         self._running = True
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         logger.info("Cluster Observability 已启动")
 
+    # 停止可观测模块。
     async def stop(self) -> None:
-        """停止可观测模块。"""
         self._running = False
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
@@ -489,8 +484,8 @@ class ClusterObservability:
                 pass
         logger.info("Cluster Observability 已停止")
 
+    # M8-02 导出日志数据。
     def export_logs(self, fmt: str = "json", since: float = 0.0, node_id: str = "") -> Any:
-        """M8-02 导出日志数据。"""
         logs = list(self.logs)
         if since:
             logs = [l for l in logs if l.timestamp >= since]
@@ -516,8 +511,8 @@ class ClusterObservability:
             for l in logs
         ]
 
+    # M8-03 基于告警和日志生成智能优化建议。
     def generate_optimization_suggestions(self) -> list:
-        """M8-03 基于告警和日志生成智能优化建议。"""
         suggestions = []
         active = [a for a in self.alerts if not a.resolved]
         for alert in active:
@@ -578,8 +573,8 @@ class ClusterObservability:
 
         return suggestions
 
+    # 定期清理过期数据。
     async def _cleanup_loop(self) -> None:
-        """定期清理过期数据。"""
         try:
             while self._running:
                 await asyncio.sleep(300)  # 每5分钟清理
@@ -610,8 +605,8 @@ class ClusterObservability:
             pass
 
 
+# 构建节点指标摘要。
 def _build_node_summary(metrics: dict) -> dict:
-    """构建节点指标摘要。"""
     latency_vals = metrics.get("latency_ms", [])
     tps_vals = metrics.get("tokens_per_sec", [])
     return {

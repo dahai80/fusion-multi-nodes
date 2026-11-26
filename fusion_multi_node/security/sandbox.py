@@ -1,10 +1,9 @@
-"""M6-02 Worker 沙箱 — 限制 Worker 节点的资源与文件访问。
-
-- CPU/内存/磁盘配额限制
-- 文件系统路径白名单
-- 网络出站白名单
-- 执行超时
-"""
+# M6-02 Worker 沙箱 — 限制 Worker 节点的资源与文件访问。
+#
+# - CPU/内存/磁盘配额限制
+# - 文件系统路径白名单
+# - 网络出站白名单
+# - 执行超时
 
 from __future__ import annotations
 
@@ -21,10 +20,9 @@ from .data_isolation import DataIsolationPolicy
 logger = logging.getLogger(__name__)
 
 
+# 沙箱配置。
 @dataclass
 class SandboxConfig:
-    """沙箱配置。"""
-
     max_cpu_seconds: int = 300
     max_memory_mb: int = 8192
     max_disk_mb: int = 10240
@@ -57,17 +55,16 @@ class SandboxConfig:
     read_only_paths: list[str] = field(default_factory=list)
 
 
+# Worker 沙箱管理器 — 在任务执行前设置资源限制。
 class WorkerSandbox:
-    """Worker 沙箱管理器 — 在任务执行前设置资源限制。"""
-
     def __init__(self, config: SandboxConfig | None = None):
         self.config = config or SandboxConfig()
         self._active_sandboxes: dict[str, dict] = {}
         self._allowed_paths_set: frozenset[str] = frozenset(os.path.normpath(p) for p in self.config.allowed_paths)
         self._isolation_policy = DataIsolationPolicy()
 
+    # 为当前进程设置资源限制。仅对 Unix 有效。
     def apply_limits(self, task_id: str) -> bool:
-        """为当前进程设置资源限制。仅对 Unix 有效。"""
         try:
             resource.setrlimit(
                 resource.RLIMIT_CPU,
@@ -114,8 +111,8 @@ class WorkerSandbox:
         self._active_sandboxes.pop(task_id, None)
         logger.info(f"沙箱[{task_id}]: 已清理")
 
+    # 检查当前进程资源使用情况，与沙箱限制对比。
     def check_resource_usage(self, task_id: str) -> dict[str, Any]:
-        """检查当前进程资源使用情况，与沙箱限制对比。"""
         usage: dict[str, Any] = {
             "task_id": task_id,
             "within_limits": True,
@@ -142,8 +139,8 @@ class WorkerSandbox:
             usage["error"] = str(e)
         return usage
 
+    # 生成子进程可继承的环境变量，用于在子进程中执行资源限制。
     def apply_to_subprocess(self, task_id: str) -> dict[str, str]:
-        """生成子进程可继承的环境变量，用于在子进程中执行资源限制。"""
         env = {
             "FUSION_SANDBOX_TASK_ID": task_id,
             "FUSION_SANDBOX_CPU": str(self.config.max_cpu_seconds),
@@ -243,14 +240,13 @@ def _apply_rlimits_in_child(
         logger.warning(f"P2-9 子进程 rlimit 设置失败 (继续无 rlimit): {e}")
 
 
+# #107 编排用组合沙箱 — WorkerSandbox 入口 gate + SandboxExecutor 子进程执行。
+#
+# NodeAgent._sandbox 需同时满足两类契约: 入口路径/网络过滤 (check_path_access/
+# check_network_access, WorkerSandbox) 与 test 任务子进程执行 (execute_in_sandbox,
+# SandboxExecutor)。env FUSION_NODE_SANDBOX=1 时由 NodeAgent 惰性组装, 生产默认关。
+#
 class AgentSandbox:
-    """#107 编排用组合沙箱 — WorkerSandbox 入口 gate + SandboxExecutor 子进程执行。
-
-    NodeAgent._sandbox 需同时满足两类契约: 入口路径/网络过滤 (check_path_access/
-    check_network_access, WorkerSandbox) 与 test 任务子进程执行 (execute_in_sandbox,
-    SandboxExecutor)。env FUSION_NODE_SANDBOX=1 时由 NodeAgent 惰性组装, 生产默认关。
-    """
-
     def __init__(self, config: SandboxConfig | None = None):
         self.config = config or SandboxConfig()
         self._gate = WorkerSandbox(self.config)
@@ -276,9 +272,8 @@ class AgentSandbox:
         )
 
 
+# M6-02 OS 级沙箱执行器 — macOS sandbox-exec / Linux unshare。
 class SandboxExecutor:
-    """M6-02 OS 级沙箱执行器 — macOS sandbox-exec / Linux unshare。"""
-
     def __init__(self, config: SandboxConfig | None = None):
         self.config = config or SandboxConfig()
         self._backend = self._detect_backend()
@@ -302,8 +297,8 @@ class SandboxExecutor:
                 pass
         return "python-resource"
 
+    # 生成 macOS sandbox-exec SBPL profile。
     def _build_sbpl_profile(self) -> str:
-        """生成 macOS sandbox-exec SBPL profile。"""
         allow_paths = "\n".join(
             f'    (allow file-read* file-write* (subpath "{p}"))' for p in self.config.allowed_paths
         )
@@ -343,6 +338,10 @@ class SandboxExecutor:
             logger.debug(f"SandboxExecutor: 生成 SBPL profile {profile_path}")
         return self._profile_cache[task_id]
 
+    # 在 OS 沙箱中执行命令，返回执行结果。
+    #
+    # #79: cwd/env 透传到子进程 (测试任务工作目录 + 环境覆盖)。默认 None = 既有行为。
+    #
     async def execute_in_sandbox(
         self,
         task_id: str,
@@ -351,10 +350,6 @@ class SandboxExecutor:
         cwd: str | None = None,
         env: dict | None = None,
     ) -> dict[str, Any]:
-        """在 OS 沙箱中执行命令，返回执行结果。
-
-        #79: cwd/env 透传到子进程 (测试任务工作目录 + 环境覆盖)。默认 None = 既有行为。
-        """
         import asyncio as _asyncio
 
         exec_timeout = timeout or self.config.execution_timeout

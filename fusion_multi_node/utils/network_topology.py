@@ -1,10 +1,9 @@
-"""Network Topology — Thunderbolt RDMA 网络拓扑检测与链路优化。
-
-自动检测 Mac 之间的网络连接类型：
-- Thunderbolt 5 (40Gbps+) / Thunderbolt 4 (20Gbps) / Thunderbolt 3 (10Gbps)
-- Ethernet 10GbE / 1GbE / 100Mbps
-- 优先使用高速链路传输张量数据
-"""
+# Network Topology — Thunderbolt RDMA 网络拓扑检测与链路优化。
+#
+# 自动检测 Mac 之间的网络连接类型：
+# - Thunderbolt 5 (40Gbps+) / Thunderbolt 4 (20Gbps) / Thunderbolt 3 (10Gbps)
+# - Ethernet 10GbE / 1GbE / 100Mbps
+# - 优先使用高速链路传输张量数据
 
 from __future__ import annotations
 
@@ -18,9 +17,8 @@ from enum import Enum
 logger = logging.getLogger(__name__)
 
 
+# 网络链路类型。
 class LinkType(Enum):
-    """网络链路类型。"""
-
     THUNDERBOLT_5 = "thunderbolt_5"  # 40Gbps+
     THUNDERBOLT_4 = "thunderbolt_4"  # 20Gbps
     THUNDERBOLT_3 = "thunderbolt_3"  # 10Gbps
@@ -32,10 +30,9 @@ class LinkType(Enum):
     UNKNOWN = "unknown"  # 未知
 
 
+# 链路信息。
 @dataclass
 class LinkInfo:
-    """链路信息。"""
-
     type: LinkType
     bandwidth_mbps: float
     latency_ms: float
@@ -45,10 +42,9 @@ class LinkInfo:
     priority: int = 0
 
 
+# 网络路径 — 两节点之间的最优链路。
 @dataclass
 class NetworkPath:
-    """网络路径 — 两节点之间的最优链路。"""
-
     source: str
     target: str
     links: list[LinkInfo] = field(default_factory=list)
@@ -57,16 +53,15 @@ class NetworkPath:
     avg_latency_ms: float = 0.0
 
 
+# 网络拓扑检测器 — 发现节点间链路并选择最优路径。
 class NetworkTopologyDetector:
-    """网络拓扑检测器 — 发现节点间链路并选择最优路径。"""
-
     def __init__(self):
         self._interfaces: dict[str, LinkInfo] = {}
         self._paths: dict[tuple[str, str], NetworkPath] = {}
         self._detected = False
 
+    # 检测本机所有网络接口。
     async def detect(self) -> dict[str, LinkInfo]:
-        """检测本机所有网络接口。"""
         self._interfaces.clear()
 
         # 检测 Thunderbolt 桥接接口
@@ -85,8 +80,8 @@ class NetworkTopologyDetector:
 
         return self._interfaces
 
+    # 检测 Thunderbolt 网桥接口。
     async def _detect_thunderbolt(self) -> None:
-        """检测 Thunderbolt 网桥接口。"""
         try:
             # P1-10: subprocess 同步阻塞 (至 10s) — to_thread 移出 event loop (审计 §4.5)。
             result = await asyncio.to_thread(
@@ -131,8 +126,8 @@ class NetworkTopologyDetector:
         except Exception as e:
             logger.debug(f"Thunderbolt 检测失败: {e}")
 
+    # 检测以太网接口。
     async def _detect_ethernet(self) -> None:
-        """检测以太网接口。"""
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -164,8 +159,8 @@ class NetworkTopologyDetector:
         except Exception as e:
             logger.debug(f"以太网检测失败: {e}")
 
+    # 检测 WiFi 接口。
     async def _detect_wifi(self) -> None:
-        """检测 WiFi 接口。"""
         try:
             # P1-10: subprocess 同步阻塞 (至 3s) — to_thread 移出 event loop (审计 §4.5)。
             result = await asyncio.to_thread(
@@ -198,8 +193,8 @@ class NetworkTopologyDetector:
         except Exception as e:
             logger.debug(f"WiFi 检测失败: {e}")
 
+    # 回环接口。
     def _detect_loopback(self) -> None:
-        """回环接口。"""
         self._interfaces["lo0"] = LinkInfo(
             type=LinkType.THUNDERBOLT_5,  # 视为最高速
             bandwidth_mbps=40000,
@@ -210,8 +205,8 @@ class NetworkTopologyDetector:
             priority=0,
         )
 
+    # 获取接口类型。
     async def _get_interface_type(self, iface: str) -> str:
-        """获取接口类型。"""
         try:
             # P1-10: subprocess 同步阻塞 (至 5s) — to_thread 移出 event loop (审计 §4.5)。
             result = await asyncio.to_thread(
@@ -253,8 +248,8 @@ class NetworkTopologyDetector:
             return LinkType.WIFI_6
         return LinkType.UNKNOWN
 
+    # 获取链路优先级（越低越优先）。
     def _get_priority(self, link_type: LinkType) -> int:
-        """获取链路优先级（越低越优先）。"""
         priorities = {
             LinkType.THUNDERBOLT_5: 0,
             LinkType.THUNDERBOLT_4: 1,
@@ -268,8 +263,8 @@ class NetworkTopologyDetector:
         }
         return priorities.get(link_type, 10)
 
+    # 测量接口速度（Mbps）。
     async def _measure_interface_speed(self, iface: str) -> float:
-        """测量接口速度（Mbps）。"""
         try:
             # P1-10: subprocess 同步阻塞 (至 2s) — to_thread 移出 event loop (审计 §4.5)。
             result = await asyncio.to_thread(
@@ -294,15 +289,15 @@ class NetworkTopologyDetector:
             pass
         return 1000.0  # 默认 1Gbps
 
+    # 测量接口延迟（ms）。
     async def _measure_latency(self, iface: str) -> float:
-        """测量接口延迟（ms）。"""
         # 回环延迟极低
         if iface == "lo0":
             return 0.01
         return 0.1  # 局域网默认 0.1ms
 
+    # 测量到对端节点的延迟。
     async def measure_peer_latency(self, peer_ip: str, count: int = 3) -> float:
-        """测量到对端节点的延迟。"""
         latencies = []
         for _ in range(count):
             try:
@@ -321,37 +316,37 @@ class NetworkTopologyDetector:
             return 10.0  # 默认 10ms
         return sum(latencies) / len(latencies)
 
+    # 获取最优链路。
     def get_best_link(self) -> LinkInfo | None:
-        """获取最优链路。"""
         active = [lnk for lnk in self._interfaces.values() if lnk.is_active]
         if not active:
             return None
         return min(active, key=lambda lnk: lnk.priority)
 
+    # 获取主接口名称。
     def get_primary_interface(self) -> str:
-        """获取主接口名称。"""
         best = self.get_best_link()
         return best.interface if best else "lo0"
 
+    # 获取主链路类型。
     def get_link_type(self) -> LinkType:
-        """获取主链路类型。"""
         best = self.get_best_link()
         return best.type if best else LinkType.UNKNOWN
 
+    # 获取主链路速度（Mbps）。
     def get_link_speed(self) -> float:
-        """获取主链路速度（Mbps）。"""
         best = self.get_best_link()
         return best.bandwidth_mbps if best else 1000.0
 
+    # 检查是否有 Thunderbolt 高速链路。
     def is_thunderbolt_available(self) -> bool:
-        """检查是否有 Thunderbolt 高速链路。"""
         return any(
             lnk.type in (LinkType.THUNDERBOLT_5, LinkType.THUNDERBOLT_4, LinkType.THUNDERBOLT_3)
             for lnk in self._interfaces.values()
         )
 
+    # 根据链路类型推荐压缩策略。
     def get_recommended_compression(self) -> str:
-        """根据链路类型推荐压缩策略。"""
         link_type = self.get_link_type()
         if link_type in (LinkType.THUNDERBOLT_5, LinkType.THUNDERBOLT_4):
             return "none"

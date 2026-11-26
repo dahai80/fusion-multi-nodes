@@ -1,4 +1,4 @@
-"""SandboxExecutor + MetalCryptoBackend 单元测试。"""
+# SandboxExecutor + MetalCryptoBackend 单元测试。
 
 import os
 
@@ -136,13 +136,12 @@ class TestMetalCryptoBackend:
         assert decrypted == plaintext
 
 
+# P2-9 (审计 §6.2): apply_limits setrlimit 未调 — 子进程 rlimit 根本未应用。
+#
+# 修复: SandboxConfig.enforce_rlimits + execute_in_sandbox preexec_fn (仅子进程)。
+# 验证: rlimit 加到子进程 (非主进程), 0=不限 no-op, AgentConfig knob 桥接。
+#
 class TestP2_9RlimitsSubprocessOnly:
-    """P2-9 (审计 §6.2): apply_limits setrlimit 未调 — 子进程 rlimit 根本未应用。
-
-    修复: SandboxConfig.enforce_rlimits + execute_in_sandbox preexec_fn (仅子进程)。
-    验证: rlimit 加到子进程 (非主进程), 0=不限 no-op, AgentConfig knob 桥接。
-    """
-
     @pytest.mark.asyncio
     async def test_rlimits_apply_to_subprocess(self):
         # enforce_rlimits=True + max_memory_mb=16 → 子进程 RLIMIT_AS=16MB。

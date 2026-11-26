@@ -1,11 +1,10 @@
-"""Enhanced KV Cache Sharing — 跨节点 KV 缓存共享与复用。
-
-解决分布式推理中的显存瓶颈：
-1. 跨节点 KV 缓存读写：节点间共享 KV 缓存，避免重复计算
-2. 缓存预热：预加载高频 prompt 的 KV 缓存到多节点
-3. 缓存淘汰策略：LRU + 分片大小加权
-4. 缓存压缩：使用 Caveman 压缩减少传输量
-"""
+# Enhanced KV Cache Sharing — 跨节点 KV 缓存共享与复用。
+#
+# 解决分布式推理中的显存瓶颈：
+# 1. 跨节点 KV 缓存读写：节点间共享 KV 缓存，避免重复计算
+# 2. 缓存预热：预加载高频 prompt 的 KV 缓存到多节点
+# 3. 缓存淘汰策略：LRU + 分片大小加权
+# 4. 缓存压缩：使用 Caveman 压缩减少传输量
 
 from __future__ import annotations
 
@@ -52,10 +51,9 @@ TENSOR_KEY = "tensor"
 COMPRESS_METHOD_KEY = "tensor_compress"
 
 
+# KV 缓存分片。
 @dataclass
 class KVShard:
-    """KV 缓存分片。"""
-
     shard_id: str
     model_name: str
     layer_index: int
@@ -72,10 +70,9 @@ class KVShard:
     tensor: bytes | None = None
 
 
+# KV 缓存条目。
 @dataclass
 class KVCacheEntry:
-    """KV 缓存条目。"""
-
     cache_id: str
     model_name: str
     prompt_hash: str
@@ -92,16 +89,15 @@ class KVCacheEntry:
         return time.time() - self.created_at > self.ttl_seconds
 
 
+# KV 缓存共享管理器 — 跨节点 KV 缓存复用。
+#
+# 支持：
+# - 本地缓存管理（LRU 淘汰）
+# - 远程缓存查询（通过 Node Agent）
+# - 缓存预热（预加载高频 prompt）
+# - 缓存压缩（Caveman）
+#
 class KVSharingManager:
-    """KV 缓存共享管理器 — 跨节点 KV 缓存复用。
-
-    支持：
-    - 本地缓存管理（LRU 淘汰）
-    - 远程缓存查询（通过 Node Agent）
-    - 缓存预热（预加载高频 prompt）
-    - 缓存压缩（Caveman）
-    """
-
     def __init__(
         self,
         max_local_cache_mb: float = 4096.0,
@@ -166,8 +162,8 @@ class KVSharingManager:
             self._http_client = httpx.AsyncClient(timeout=timeout, **mtls_client_kwargs())
         return self._http_client
 
+    # 跨节点 KV HTTP 调用鉴权头 — Bearer 集群共享 token。
     def _auth_headers(self) -> dict[str, str]:
-        """跨节点 KV HTTP 调用鉴权头 — Bearer 集群共享 token。"""
         if self._cluster_token:
             return {"Authorization": f"Bearer {self._cluster_token}"}
         return {}
@@ -185,11 +181,11 @@ class KVSharingManager:
 
     # ── P1-22 (审计 §6.6): 跨节点 KV 调用异常分类 + 连续失败计数 ──
 
+    # 分类瞬时失败 (429/5xx/超时/连接拒) vs 逻辑失败 (4xx 业务错), 记 warning (非 debug 静默)。
+    #
+    # 连续失败达阈值 → 提 alert 级 warning (网络分区/对端宕机运维须可见)。
+    #
     def _classify_remote_fail(self, node_id: str, status_code: int | None, exc: Exception | None, op: str) -> None:
-        """分类瞬时失败 (429/5xx/超时/连接拒) vs 逻辑失败 (4xx 业务错), 记 warning (非 debug 静默)。
-
-        连续失败达阈值 → 提 alert 级 warning (网络分区/对端宕机运维须可见)。
-        """
         transient = False
         if exc is not None:
             # 传输异常 (ConnectError/Timeout/RemoteProtocolError) = 瞬时网络
@@ -210,14 +206,14 @@ class KVSharingManager:
         else:
             level(f"P1-22 KV 跨节点 {op} 失败 node={node_id} ({kind}): {str(exc)[:150] if exc else ''}")
 
+    # 成功调用清零连续失败计数。
     def _mark_remote_success(self, node_id: str) -> None:
-        """成功调用清零连续失败计数。"""
         self._remote_fail_counts.pop(node_id, None)
 
     # ── P1-9 磁盘持久化 ──
 
+    # 落盘本地 KV 缓存 (审计 §6.3)。原子写: tmp + os.replace。跳过已过期条目。
     def save(self, path: str | None = None) -> bool:
-        """落盘本地 KV 缓存 (审计 §6.3)。原子写: tmp + os.replace。跳过已过期条目。"""
         save_path = Path(path) if path else self._persist_path
         try:
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,8 +241,8 @@ class KVSharingManager:
             logger.error(f"P1-9 KV 缓存落盘失败: {e}")
             return False
 
+    # 启动恢复本地 KV 缓存 (审计 §6.3)。跳过已过期条目, 不覆盖已存在 cache_id。
     def load(self, path: str | None = None) -> int:
-        """启动恢复本地 KV 缓存 (审计 §6.3)。跳过已过期条目, 不覆盖已存在 cache_id。"""
         load_path = Path(path) if path else self._persist_path
         if not load_path.exists():
             logger.info(f"P1-9 KV 缓存恢复: 文件不存在 {load_path}, 跳过")
@@ -272,8 +268,8 @@ class KVSharingManager:
 
     # ── 本地缓存管理 ──
 
+    # 存储本地 KV 缓存。
     def store_local(self, entry: KVCacheEntry) -> bool:
-        """存储本地 KV 缓存。"""
         max_bytes = self.max_local_cache_mb * 1024 * 1024
         if entry.total_size_bytes > max_bytes:
             logger.warning(
@@ -295,8 +291,8 @@ class KVSharingManager:
         )
         return True
 
+    # 查询本地 KV 缓存。
     def lookup_local(self, model_name: str, prompt_hash: str) -> KVCacheEntry | None:
-        """查询本地 KV 缓存。"""
         cache_id = self._lookup_index.get((model_name, prompt_hash))
         if not cache_id:
             return None
@@ -316,8 +312,8 @@ class KVSharingManager:
         self._local_cache.move_to_end(entry.cache_id)
         return entry
 
+    # 按 cache_id 查本地 KV 缓存 (跨节点传输用)。
     def lookup_local_by_id(self, cache_id: str) -> KVCacheEntry | None:
-        """按 cache_id 查本地 KV 缓存 (跨节点传输用)。"""
         entry = self._local_cache.get(cache_id)
         if entry is None:
             return None
@@ -328,16 +324,16 @@ class KVSharingManager:
             return None
         return entry
 
+    # 按前缀匹配查询 KV 缓存（用于缓存复用）。
     def lookup_prefix(self, model_name: str, prefix: str) -> list[KVCacheEntry]:
-        """按前缀匹配查询 KV 缓存（用于缓存复用）。"""
         matches = []
         for entry in self._local_cache.values():
             if entry.model_name == model_name and entry.prompt_prefix.startswith(prefix) and not entry.is_expired:
                 matches.append(entry)
         return matches
 
+    # LRU 淘汰缓存 (单线程, 无需显式锁)。
     def _evict(self, needed_bytes: int) -> None:
-        """LRU 淘汰缓存 (单线程, 无需显式锁)。"""
         max_bytes = self.max_local_cache_mb * 1024 * 1024
         if needed_bytes > max_bytes:
             return
@@ -350,13 +346,13 @@ class KVSharingManager:
 
     # ── 远程缓存查询 ──
 
+    # 查询远程节点 KV 缓存。
     async def lookup_remote(
         self,
         model_name: str,
         prompt_hash: str,
         nodes: list[str],
     ) -> tuple[KVCacheEntry, str] | None:
-        """查询远程节点 KV 缓存。"""
         client = await self._get_http_client(self.max_remote_lookup_ms / 1000)
 
         for node_id in nodes:
@@ -389,18 +385,18 @@ class KVSharingManager:
 
         return None
 
+    # 从 source_node 拉取 KV 缓存并本地存储 (target = 本节点)。
+    #
+    # 推模型: POST source_node /api/kv/transfer → 源节点回传序列化 entry →
+    # 本节点 store_local。源节点路由只查本地回传, 不再二次回调 (避免递归)。
+    # source_node 须为纯主机名 (路由器拼 :11458), 非 host:port。
+    #
     async def transfer_from_remote(
         self,
         cache_id: str,
         source_node: str,
         target_node: str,
     ) -> bool:
-        """从 source_node 拉取 KV 缓存并本地存储 (target = 本节点)。
-
-        推模型: POST source_node /api/kv/transfer → 源节点回传序列化 entry →
-        本节点 store_local。源节点路由只查本地回传, 不再二次回调 (避免递归)。
-        source_node 须为纯主机名 (路由器拼 :11458), 非 host:port。
-        """
         try:
             client = await self._get_http_client(30.0)
             safe_source = sanitize_node_url_part(source_node)
@@ -436,8 +432,8 @@ class KVSharingManager:
             self._classify_remote_fail(source_node, None, e, "transfer")
             return False
 
+    # 生成 FMP 协议 KV 缓存同步消息。
     def sync_to_cluster(self, cache_id: str, model_name: str, source_node_id: str) -> KVCacheSyncMessage:
-        """生成 FMP 协议 KV 缓存同步消息。"""
         entry = self._local_cache.get(cache_id)
         if not entry:
             logger.warning(f"KV 缓存同步: cache_id={cache_id} 未找到本地缓存")
@@ -461,13 +457,13 @@ class KVSharingManager:
 
     # ── 缓存预热 ──
 
+    # 预加载高频 prompt 的 KV 缓存到多节点。
     async def warm_cache(
         self,
         model_name: str,
         prompts: list[str],
         nodes: list[str],
     ) -> dict[str, Any]:
-        """预加载高频 prompt 的 KV 缓存到多节点。"""
         results = {"success": 0, "failed": 0, "details": []}
         client = await self._get_http_client(60.0)
 
@@ -525,8 +521,8 @@ class KVSharingManager:
 
     # ── 缓存统计 ──
 
+    # 获取 KV 缓存统计。
     def get_stats(self) -> dict[str, Any]:
-        """获取 KV 缓存统计。"""
         total_shards = sum(len(e.shards) for e in self._local_cache.values())
         return {
             "local_entries": len(self._local_cache),
@@ -541,12 +537,12 @@ class KVSharingManager:
 
     # ── GAP-7 (#33) 张量级 KV 跨节点导出/导入 ──
 
+    # 源节点导出 KV 缓存 bundle (含张量) 供跨节点传输。
+    #
+    # 查本地缓存 → 经 transport 后端为各分片产出张量 → 序列化含 tensor 的 bundle。
+    # 返回 None = 本地无此 cache_id。
+    #
     async def export_bundle(self, cache_id: str, model_name: str) -> dict[str, Any] | None:
-        """源节点导出 KV 缓存 bundle (含张量) 供跨节点传输。
-
-        查本地缓存 → 经 transport 后端为各分片产出张量 → 序列化含 tensor 的 bundle。
-        返回 None = 本地无此 cache_id。
-        """
         entry = self.lookup_local_by_id(cache_id)
         if entry is None:
             logger.warning(f"GAP-7 KV 导出: cache_id={cache_id} 本地未找到")
@@ -575,12 +571,12 @@ class KVSharingManager:
         )
         return bundle
 
+    # 目标节点导入 KV 缓存 bundle (含张量) 并本地存储。
+    #
+    # 反序列化 → 经 transport 后端消费张量 (MLX 装本地引擎 / 合成 no-op) → store_local
+    # (LRU + max_local_cache_mb 硬预算门控)。返回 False = 预算超限或解析失败。
+    #
     async def import_bundle(self, bundle: dict[str, Any]) -> bool:
-        """目标节点导入 KV 缓存 bundle (含张量) 并本地存储。
-
-        反序列化 → 经 transport 后端消费张量 (MLX 装本地引擎 / 合成 no-op) → store_local
-        (LRU + max_local_cache_mb 硬预算门控)。返回 False = 预算超限或解析失败。
-        """
         try:
             entry = self._deserialize_entry(bundle)
         except Exception as e:
@@ -613,12 +609,12 @@ class KVSharingManager:
     KV_STREAM_MAGIC = b"FMUKVT01"
     KV_STREAM_VERSION = 1
 
+    # 源节点流式导出 KV 缓存 (含张量) — async generator 逐块产字节, 不物化整 bundle。
+    #
+    # 元数据头 JSON (无张量) 先 yield, 再逐分片经后端产张量后按块 yield 原始字节。
+    # 比旧 export_bundle (base64+JSON 全量物化) 峰值内存大幅下降, 真 8B 模型 (200-500MB) 可行。
+    #
     async def export_stream(self, cache_id: str, model_name: str):
-        """源节点流式导出 KV 缓存 (含张量) — async generator 逐块产字节, 不物化整 bundle。
-
-        元数据头 JSON (无张量) 先 yield, 再逐分片经后端产张量后按块 yield 原始字节。
-        比旧 export_bundle (base64+JSON 全量物化) 峰值内存大幅下降, 真 8B 模型 (200-500MB) 可行。
-        """
         entry = self.lookup_local_by_id(cache_id)
         if entry is None:
             logger.warning(f"P0-3 KV 流式导出: cache_id={cache_id} 本地未找到")
@@ -671,13 +667,13 @@ class KVSharingManager:
             f"size={entry.total_size_bytes}B backend={getattr(self._transport, 'name', '?')}"
         )
 
+    # 目标节点流式导入 — 消费 export_stream 产出的字节流并本地存储。
+    #
+    # header_and_meta: 已读入的 magic+长度+元数据 (调用方先读头部确定元数据长度)。
+    # tensor_body_aiter: 剩余张量字节 async iterator (逐块产), 按元数据 shard 顺序消费。
+    # 返回 True = 已存 (store_local 预算门控); False = 解析失败或预算超限。
+    #
     async def import_stream(self, header_and_meta: bytes, tensor_body_aiter):
-        """目标节点流式导入 — 消费 export_stream 产出的字节流并本地存储。
-
-        header_and_meta: 已读入的 magic+长度+元数据 (调用方先读头部确定元数据长度)。
-        tensor_body_aiter: 剩余张量字节 async iterator (逐块产), 按元数据 shard 顺序消费。
-        返回 True = 已存 (store_local 预算门控); False = 解析失败或预算超限。
-        """
         if not header_and_meta.startswith(self.KV_STREAM_MAGIC):
             logger.warning("P0-3 KV 流式导入: magic 头不匹配, 拒绝")
             return False
@@ -748,28 +744,28 @@ class KVSharingManager:
         )
         return True
 
+    # 取条目归属节点 id (分片 node_id 优先, 否则首分片, 否则空)。
     def _node_id_for_export(self, entry: KVCacheEntry) -> str:
-        """取条目归属节点 id (分片 node_id 优先, 否则首分片, 否则空)。"""
         for shard in entry.shards:
             if shard.node_id:
                 return shard.node_id
         return entry.shards[0].node_id if entry.shards else ""
 
+    # 重算条目总字节 (张量并入后)。
     def _recompute_entry_size(self, entry: KVCacheEntry) -> None:
-        """重算条目总字节 (张量并入后)。"""
         total = 0
         for shard in entry.shards:
             # size_bytes 已含张量 (export_bundle 并入), 此处汇总
             total += shard.size_bytes
         entry.total_size_bytes = total
 
+    # P2-4 (审计 §6.3): 导出张量后把条目增量字节补账进 _local_size_bytes。
+    #
+    # 张量并入 entry.total_size_bytes (经 _recompute_entry_size), 但 _local_size_bytes
+    # (LRU 预算跟踪器) 未同步 → store_local/evict 按旧小值减账, 实际占用超 max_local_cache_mb
+    # 无淘汰。此函数按 (新-旧) 差额补账; 条目不在本地缓存 (导出前已 pop) 则不调账。
+    #
     def _sync_local_size_delta(self, entry: KVCacheEntry, old_total: int) -> None:
-        """P2-4 (审计 §6.3): 导出张量后把条目增量字节补账进 _local_size_bytes。
-
-        张量并入 entry.total_size_bytes (经 _recompute_entry_size), 但 _local_size_bytes
-        (LRU 预算跟踪器) 未同步 → store_local/evict 按旧小值减账, 实际占用超 max_local_cache_mb
-        无淘汰。此函数按 (新-旧) 差额补账; 条目不在本地缓存 (导出前已 pop) 则不调账。
-        """
         delta = entry.total_size_bytes - old_total
         if delta == 0:
             return
@@ -781,12 +777,12 @@ class KVSharingManager:
                 f"_local_size_bytes={self._local_size_bytes}B"
             )
 
+    # 序列化 KV 缓存条目供跨节点传输。
+    #
+    # GAP-7 (#33): 张量负载随分片传输 — base64 编码 (Caveman 压缩后) 进 JSON。
+    # 无 tensor 的分片 (纯元数据) 不写 tensor 键, 向后兼容旧对端。
+    #
     def _serialize_entry(self, entry: KVCacheEntry) -> dict:
-        """序列化 KV 缓存条目供跨节点传输。
-
-        GAP-7 (#33): 张量负载随分片传输 — base64 编码 (Caveman 压缩后) 进 JSON。
-        无 tensor 的分片 (纯元数据) 不写 tensor 键, 向后兼容旧对端。
-        """
         shards_out = []
         for s in entry.shards:
             shard_d = {k: getattr(s, k) for k in ALLOWED_SHARD_KEYS if hasattr(s, k)}
@@ -834,33 +830,32 @@ class KVSharingManager:
         )
 
 
+# KV 缓存预热调度器 — 自动预热高频 prompt。
 class KVCacheWarmScheduler:
-    """KV 缓存预热调度器 — 自动预热高频 prompt。"""
-
     def __init__(self, manager: KVSharingManager):
         self.manager = manager
         self._hot_prompts: dict[str, int] = {}
         self._max_hot_prompts = 1000
         self._running = False
 
+    # 记录 prompt 使用频率。
     def record_prompt(self, prompt: str) -> None:
-        """记录 prompt 使用频率。"""
         key = prompt[:100]
         self._hot_prompts[key] = self._hot_prompts.get(key, 0) + 1
         if len(self._hot_prompts) > self._max_hot_prompts:
             sorted_items = sorted(self._hot_prompts.items(), key=lambda x: x[1])
             self._hot_prompts = dict(sorted_items[len(sorted_items) // 2 :])
 
+    # 获取高频 prompt 列表。
     def get_hot_prompts(self, threshold: int = 3, max_count: int = 10) -> list[str]:
-        """获取高频 prompt 列表。"""
         sorted_prompts = sorted(
             self._hot_prompts.items(),
             key=lambda x: -x[1],
         )
         return [p for p, c in sorted_prompts if c >= threshold][:max_count]
 
+    # 启动预热调度。
     async def start(self, interval: int = 300, nodes: list[str] | None = None) -> None:
-        """启动预热调度。"""
         self._running = True
         while self._running:
             await asyncio.sleep(interval)

@@ -1,4 +1,4 @@
-"""Fusion-Multi-Node CLI 入口 — 集群管理命令行工具。"""
+# Fusion-Multi-Node CLI 入口 — 集群管理命令行工具。
 
 from __future__ import annotations
 
@@ -39,11 +39,11 @@ def _get_config() -> ClusterConfig:
     return _config
 
 
-@click.group()
+# Fusion-Multi-Node — 分布式 Apple Silicon MLX 集群调度核心。
+@click.group(help="Fusion-Multi-Node — 分布式 Apple Silicon MLX 集群调度核心。")
 @click.option("--verbose", "-v", is_flag=True, help="详细输出")
 @click.version_option(version=__version__, prog_name=__app_name__)
 def cli(verbose: bool):
-    """Fusion-Multi-Node — 分布式 Apple Silicon MLX 集群调度核心。"""
     level = logging.DEBUG if verbose else logging.INFO
     setup_logger(level=level, verbose=verbose)
 
@@ -51,15 +51,16 @@ def cli(verbose: bool):
 # ── 节点管理 ──
 
 
-@cli.group()
+# 节点管理：发现、注册、状态查看。
+@cli.group(help="节点管理：发现、注册、状态查看。")
 def node():
-    """节点管理：发现、注册、状态查看。"""
+    pass
 
 
-@node.command("list")
+# 列出集群所有节点。
+@node.command("list", help="列出集群所有节点。")
 @click.option("--online", is_flag=True, help="仅显示在线节点")
 def list_nodes(online: bool):
-    """列出集群所有节点。"""
     asyncio.run(_async_list_nodes(online))
 
 
@@ -93,10 +94,10 @@ async def _async_list_nodes(online_only: bool):
     click.echo(f"总计: {len(nodes)} 节点")
 
 
-@node.command("info")
+# 查看节点详细信息。
+@node.command("info", help="查看节点详细信息。")
 @click.argument("node_id")
 def node_info(node_id: str):
-    """查看节点详细信息。"""
     master = _get_master()
     node = master.nodes.get(node_id)
     if not node:
@@ -119,6 +120,7 @@ def node_info(node_id: str):
     click.echo(f"  标签:        {', '.join(node.tags) if node.tags else '无'}")
 
 
+# 启动节点服务。
 @node.command("start")
 @click.option("--role", type=click.Choice(["master", "agent"]), required=True, help="节点角色")
 @click.option("--host", default="127.0.0.1", help="监听地址")
@@ -143,7 +145,6 @@ def node_start(
     no_mdns: bool,
     auto_discover: bool,
 ):
-    """启动节点服务。"""
     asyncio.run(
         _async_node_start(
             role,
@@ -271,10 +272,10 @@ async def _async_node_start(
         click.echo("⏹️  已停止")
 
 
-@node.command("discover")
+# 通过 mDNS 发现局域网内节点。
+@node.command("discover", help="通过 mDNS 发现局域网内节点。")
 @click.option("--timeout", default=5.0, help="发现超时(秒)")
 def node_discover(timeout: float):
-    """通过 mDNS 发现局域网内节点。"""
     asyncio.run(_async_node_discover(timeout))
 
 
@@ -305,16 +306,17 @@ async def _async_node_discover(timeout: float):
 # ── 集群管理 ──
 
 
-@cli.group()
+# 集群管理：启动、停止、状态。
+@cli.group(help="集群管理：启动、停止、状态。")
 def cluster():
-    """集群管理：启动、停止、状态。"""
+    pass
 
 
-@cluster.command("start")
+# 启动集群服务。
+@cluster.command("start", help="启动集群服务。")
 @click.option("--mode", type=click.Choice(["master", "agent", "both"]), default="master")
 @click.option("--transport", type=click.Choice(["http", "fmp"]), default="http")
 def cluster_start(mode: str, transport: str):
-    """启动集群服务。"""
     asyncio.run(_async_cluster_start(mode, transport))
 
 
@@ -372,9 +374,9 @@ async def _async_cluster_start(mode: str, transport: str = "http"):
         click.echo(f"✅ Node Agent 已启动: {_agent.config.node_id}")
 
 
-@cluster.command("stop")
+# 停止集群服务。
+@cluster.command("stop", help="停止集群服务。")
 def cluster_stop():
-    """停止集群服务。"""
     asyncio.run(_async_cluster_stop())
 
 
@@ -389,9 +391,9 @@ async def _async_cluster_stop():
     click.echo("⏹️  集群服务已停止")
 
 
-@cluster.command("status")
+# 查看集群状态。
+@cluster.command("status", help="查看集群状态。")
 def cluster_status():
-    """查看集群状态。"""
     asyncio.run(_async_cluster_status())
 
 
@@ -415,8 +417,8 @@ async def _async_cluster_status():
 # ── 节点审批 ──
 
 
+# 通过 HTTP 调用远程 Master（带 Bearer token）。
 async def _master_http(method: str, path: str, json_body: dict | None = None) -> dict:
-    """通过 HTTP 调用远程 Master（带 Bearer token）。"""
     import httpx
 
     from fusion_multi_node.utils.auth import load_or_create_token
@@ -436,27 +438,27 @@ async def _master_http(method: str, path: str, json_body: dict | None = None) ->
         return resp.json()
 
 
-@cluster.command("approve")
+# 审批通过待加入节点。
+@cluster.command("approve", help="审批通过待加入节点。")
 @click.argument("node_id")
 @click.option("--by", "approved_by", default="admin", help="审批人")
 def cluster_approve(node_id: str, approved_by: str):
-    """审批通过待加入节点。"""
     result = asyncio.run(_master_http("POST", "/api/nodes/approve", {"node_id": node_id, "approved_by": approved_by}))
     click.echo(f"✅ 节点 {result.get('node_id')} 审批通过 (by {result.get('approved_by')})")
 
 
-@cluster.command("reject")
+# 拒绝待加入节点。
+@cluster.command("reject", help="拒绝待加入节点。")
 @click.argument("node_id")
 @click.option("--reason", default="", help="拒绝原因")
 def cluster_reject(node_id: str, reason: str):
-    """拒绝待加入节点。"""
     result = asyncio.run(_master_http("POST", "/api/nodes/reject", {"node_id": node_id, "reason": reason}))
     click.echo(f"❌ 节点 {result.get('node_id')} 已拒绝")
 
 
-@cluster.command("pending")
+# 列出待审批节点。
+@cluster.command("pending", help="列出待审批节点。")
 def cluster_pending():
-    """列出待审批节点。"""
     result = asyncio.run(_master_http("GET", "/api/nodes/pending"))
     pending = result.get("pending", [])
     if not pending:
@@ -467,16 +469,19 @@ def cluster_pending():
         click.echo(f"  {p['node_id']:<20} {p.get('hostname', ''):<16} {p.get('ip_address', '')}")
 
 
-@cluster.command("drain")
+# #63/#69: 标记节点排水 (停止接新任务, 在途任务继续)。
+#
+# --wait: 轮询 drain-status 直到 ready=true 或超时。长任务 (timeout > 阈值) 活跃时
+# 不会变 ready, --wait 超时 (MVP refuse-long, 不做 checkpoint 迁移)。
+#
+@cluster.command(
+    "drain",
+    help="标记节点排水 (停止接新任务, 在途任务继续); --wait 轮询 drain-status 直到 ready 或超时。",
+)
 @click.argument("node_id")
 @click.option("--wait", is_flag=True, help="#69: 等待在途任务排空 (ready=true) 再返回")
 @click.option("--timeout", "wait_timeout", default=600, help="#69: --wait 超时秒 (默认 600)")
 def cluster_drain(node_id: str, wait: bool, wait_timeout: int):
-    """#63/#69: 标记节点排水 (停止接新任务, 在途任务继续)。
-
-    --wait: 轮询 drain-status 直到 ready=true 或超时。长任务 (timeout > 阈值) 活跃时
-    不会变 ready, --wait 超时 (MVP refuse-long, 不做 checkpoint 迁移)。
-    """
     asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/drain"))
     click.echo(f"✅ 节点 {node_id} 已排水 (停止接新任务)")
     if not wait:
@@ -484,8 +489,8 @@ def cluster_drain(node_id: str, wait: bool, wait_timeout: int):
     asyncio.run(_drain_wait(node_id, wait_timeout))
 
 
+# #69: 轮询 /api/nodes/{id}/drain-status 直到 ready 或超时。
 async def _drain_wait(node_id: str, wait_timeout: int):
-    """#69: 轮询 /api/nodes/{id}/drain-status 直到 ready 或超时。"""
     import time as _time
 
     deadline = _time.monotonic() + max(0, int(wait_timeout))
@@ -512,20 +517,20 @@ async def _drain_wait(node_id: str, wait_timeout: int):
     raise SystemExit(1)
 
 
-@cluster.command("undrain")
+# #63: 取消节点排水 (恢复接新任务)。
+@cluster.command("undrain", help="63: 取消节点排水 (恢复接新任务)。")
 @click.argument("node_id")
 def cluster_undrain(node_id: str):
-    """#63: 取消节点排水 (恢复接新任务)。"""
     asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/undrain"))
     click.echo(f"✅ 节点 {node_id} 已恢复接新任务")
 
 
-@cluster.command("supervisor")
+# #73: 转发 supervisor 操作到指定节点 (经 master → 对端 agent → 本机 fusion-sv)。
+@cluster.command("supervisor", help="73: 转发 supervisor 操作到指定节点 (经 master → 对端 agent → 本机 fusion-sv)。")
 @click.argument("op", type=click.Choice(["status", "drain", "rollout", "shutdown", "backup"]))
 @click.argument("node_id")
 @click.option("--svc", "-s", default="", help="supervisor 服务名 (可选)")
 def cluster_supervisor(op: str, node_id: str, svc: str):
-    """#73: 转发 supervisor 操作到指定节点 (经 master → 对端 agent → 本机 fusion-sv)。"""
     query = f"?svc={svc}" if svc else ""
     r = asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/supervisor/{op}{query}"))
     ok = r.get("ok")
@@ -542,16 +547,19 @@ def cluster_supervisor(op: str, node_id: str, svc: str):
         click.echo(out)
 
 
-@cluster.command("rollout-node")
+# #73: 节点滚动发布 — drain (排空) → supervisor rollout (重启服务) → undrain (恢复)。
+#
+# MVP 顺序执行, 不做跨节点并行编排。长任务阻塞 drain --wait 时中止 (不 rollout)。
+#
+@cluster.command(
+    "rollout-node",
+    help="节点滚动发布: drain → supervisor rollout → undrain (MVP 顺序执行)。",
+)
 @click.argument("node_id")
 @click.option("--svc", "-s", default="", help="supervisor 服务名 (可选)")
 @click.option("--wait/--no-wait", default=True, help="#73: drain 前先等在途排空 (默认等)")
 @click.option("--timeout", "wait_timeout", default=600, help="#73: drain --wait 超时秒 (默认 600)")
 def cluster_rollout_node(node_id: str, svc: str, wait: bool, wait_timeout: int):
-    """#73: 节点滚动发布 — drain (排空) → supervisor rollout (重启服务) → undrain (恢复)。
-
-    MVP 顺序执行, 不做跨节点并行编排。长任务阻塞 drain --wait 时中止 (不 rollout)。
-    """
     asyncio.run(_master_http("POST", f"/api/nodes/{node_id}/drain"))
     click.echo(f"✅ 节点 {node_id} 已排水")
     if wait:
@@ -573,19 +581,20 @@ def cluster_rollout_node(node_id: str, svc: str, wait: bool, wait_timeout: int):
 # ── 任务管理 ──
 
 
-@cli.group()
+# 任务管理：提交、查看、取消。
+@cli.group(help="任务管理：提交、查看、取消。")
 def task():
-    """任务管理：提交、查看、取消。"""
+    pass
 
 
-@task.command("submit")
+# 提交任务到集群。
+@task.command("submit", help="提交任务到集群。")
 @click.option("--name", "-n", required=True, help="任务名称")
 @click.option("--model", "-m", default="", help="模型名称")
 @click.option("--mode", type=click.Choice(["pipeline", "data"]), default="pipeline")
 @click.option("--prompt", "-p", default="", help="推理 prompt")
 @click.option("--timeout", "-t", default=300, help="超时秒数")
 def task_submit(name: str, model: str, mode: str, prompt: str, timeout: int):
-    """提交任务到集群。"""
     asyncio.run(_async_task_submit(name, model, mode, prompt, timeout))
 
 
@@ -610,9 +619,9 @@ async def _async_task_submit(name: str, model: str, mode: str, prompt: str, time
         click.echo("❌ 任务提交失败: 可用节点不足")
 
 
-@task.command("list")
+# 列出所有任务。
+@task.command("list", help="列出所有任务。")
 def task_list():
-    """列出所有任务。"""
     master = _get_master()
     tasks = list(master.tasks.values())
 
@@ -646,10 +655,10 @@ def task_list():
     click.echo(f"总计: {len(tasks)} 任务")
 
 
-@task.command("cancel")
+# 取消任务。
+@task.command("cancel", help="取消任务。")
 @click.argument("task_id")
 def task_cancel(task_id: str):
-    """取消任务。"""
     asyncio.run(_async_task_cancel(task_id))
 
 
@@ -669,14 +678,15 @@ async def _async_task_cancel(task_id: str):
 # ── 配置管理 ──
 
 
-@cli.group()
+# 配置管理。
+@cli.group(help="配置管理。")
 def config():
-    """配置管理。"""
+    pass
 
 
-@config.command("list")
+# 列出所有配置。
+@config.command("list", help="列出所有配置。")
 def config_list():
-    """列出所有配置。"""
     click.echo()
     click.echo("⚙️  Fusion-Multi-Node 配置")
     click.echo(f"  配置文件: {_get_config().config_path}")
@@ -684,10 +694,10 @@ def config_list():
     click.echo(json.dumps(_get_config()._data, indent=2, ensure_ascii=False))
 
 
-@config.command("get")
+# 获取配置项。
+@config.command("get", help="获取配置项。")
 @click.argument("key")
 def config_get(key: str):
-    """获取配置项。"""
     value = _get_config().get(key)
     if value is not None:
         click.echo(f"{key} = {json.dumps(value, ensure_ascii=False)}")
@@ -695,11 +705,11 @@ def config_get(key: str):
         click.echo(f"未知配置项: {key}")
 
 
-@config.command("set")
+# 设置配置项。
+@config.command("set", help="设置配置项。")
 @click.argument("key")
 @click.argument("value")
 def config_set(key: str, value: str):
-    """设置配置项。"""
     try:
         parsed = json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -725,14 +735,15 @@ def _get_master() -> ClusterMaster:
 # ── 网络拓扑命令 ──
 
 
-@cli.group()
+# 网络拓扑检测与链路优化。
+@cli.group(help="网络拓扑检测与链路优化。")
 def network():
-    """网络拓扑检测与链路优化。"""
+    pass
 
 
-@network.command("detect")
+# 检测本机网络拓扑和链路类型。
+@network.command("detect", help="检测本机网络拓扑和链路类型。")
 def network_detect():
-    """检测本机网络拓扑和链路类型。"""
     asyncio.run(_async_network_detect())
 
 
@@ -770,15 +781,16 @@ async def _async_network_detect():
 # ── Caveman 压缩命令 ──
 
 
-@cli.group()
+# Caveman Token 压缩管理。
+@cli.group(help="Caveman Token 压缩管理。")
 def caveman():
-    """Caveman Token 压缩管理。"""
+    pass
 
 
-@caveman.command("test")
+# 测试 Caveman 压缩效果。
+@caveman.command("test", help="测试 Caveman 压缩效果。")
 @click.argument("data", default="The quick brown fox jumps over the lazy dog. " * 10)
 def caveman_test(data: str):
-    """测试 Caveman 压缩效果。"""
     asyncio.run(_async_caveman_test(data))
 
 
@@ -807,14 +819,15 @@ async def _async_caveman_test(data: str):
 # ── KV 缓存命令 ──
 
 
-@cli.group()
+# KV 缓存共享管理。
+@cli.group(help="KV 缓存共享管理。")
 def kv():
-    """KV 缓存共享管理。"""
+    pass
 
 
-@kv.command("stats")
+# 查看 KV 缓存统计。
+@kv.command("stats", help="查看 KV 缓存统计。")
 def kv_stats():
-    """查看 KV 缓存统计。"""
     asyncio.run(_async_kv_stats())
 
 
@@ -826,11 +839,11 @@ async def _async_kv_stats():
     click.echo(f"  缓存条目: {stats.get('kv_cache_entries', 0)}")
 
 
-@kv.command("warm")
+# 预热 KV 缓存。
+@kv.command("warm", help="预热 KV 缓存。")
 @click.option("--prompt", "-p", multiple=True, help="预热 prompt")
 @click.option("--nodes", "-n", multiple=True, help="目标节点")
 def kv_warm(prompt: list, nodes: list):
-    """预热 KV 缓存。"""
     asyncio.run(_async_kv_warm(list(prompt), list(nodes)))
 
 
@@ -868,11 +881,13 @@ def _multi_node_dir() -> Path:
     return Path.home() / ".fusion" / "multi-node"
 
 
-@cli.group()
+# 数据备份/恢复 (config/tasks/kv/users/audit/tls/cluster_token)。
+@cli.group(help="数据备份/恢复 (config/tasks/kv/users/audit/tls/cluster_token)。")
 def backup():
-    """数据备份/恢复 (config/tasks/kv/users/audit/tls/cluster_token)。"""
+    pass
 
 
+# 打包 ~/.fusion/multi-node/ 全量状态 → tar.gz (原子 tmp+rename, 0600)。
 @backup.command("create")
 @click.option(
     "--out",
@@ -882,7 +897,6 @@ def backup():
     help="输出目录 (默认 ~/.fusion/multi-node/backups/)",
 )
 def backup_create(out: str):
-    """打包 ~/.fusion/multi-node/ 全量状态 → tar.gz (原子 tmp+rename, 0600)。"""
     src = _multi_node_dir()
     out_dir = Path(out) if out else src / "backups"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -917,11 +931,11 @@ def backup_create(out: str):
         click.echo("⚠️  备份含 .cluster_token 明文, 妥善保管 (0600 权限)")
 
 
-@backup.command("restore")
+# 从 tar.gz 恢复 — 覆盖 ~/.fusion/multi-node/ (建议先停服)。
+@backup.command("restore", help="从 tar.gz 恢复 — 覆盖 ~/.fusion/multi-node/ (建议先停服)。")
 @click.option("--in", "in_file", required=True, type=click.Path(exists=True, dir_okay=False), help="备份 tar.gz 路径")
 @click.option("--yes", "-y", is_flag=True, help="跳过确认")
 def backup_restore(in_file: str, yes: bool):
-    """从 tar.gz 恢复 — 覆盖 ~/.fusion/multi-node/ (建议先停服)。"""
     dest = _multi_node_dir()
     if not yes:
         click.echo(f"将解包覆盖: {dest}")

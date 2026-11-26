@@ -1,4 +1,4 @@
-"""Fusion-Multi-Node 单元测试。"""
+# Fusion-Multi-Node 单元测试。
 
 from __future__ import annotations
 

@@ -1,8 +1,7 @@
-"""#74 BearerAuthMiddleware JWT 分支测试。
-
-jwt_verifier 注入后: JWT 令牌 → claims 注入 scope; 无效/吊销 → 401 fail-closed;
-异常 → 401 fail-closed; fmu_ 令牌仍走旧路径; cluster_token 仍通过 (未注入 verifier 时默认)。
-"""
+# #74 BearerAuthMiddleware JWT 分支测试。
+#
+# jwt_verifier 注入后: JWT 令牌 → claims 注入 scope; 无效/吊销 → 401 fail-closed;
+# 异常 → 401 fail-closed; fmu_ 令牌仍走旧路径; cluster_token 仍通过 (未注入 verifier 时默认)。
 
 from __future__ import annotations
 

@@ -1,14 +1,13 @@
-"""#73 SupervisorBridge — 本机 fusion-sv CLI 包装单元测试。
-
-mock subprocess.run 覆盖:
-(a) status 输出 JSON 解析;
-(b) 非状态 op 纯文本;
-(c) FileNotFoundError → available=False (离线安全);
-(d) 未知 op 拒;
-(e) timeout;
-(f) rc!=0 失败;
-(g) ping → available True/False。
-"""
+# #73 SupervisorBridge — 本机 fusion-sv CLI 包装单元测试。
+#
+# mock subprocess.run 覆盖:
+# (a) status 输出 JSON 解析;
+# (b) 非状态 op 纯文本;
+# (c) FileNotFoundError → available=False (离线安全);
+# (d) 未知 op 拒;
+# (e) timeout;
+# (f) rc!=0 失败;
+# (g) ping → available True/False。
 
 from __future__ import annotations
 

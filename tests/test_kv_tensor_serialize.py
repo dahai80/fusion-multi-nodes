@@ -1,11 +1,10 @@
-"""GAP-7 (#33) S1 单元测试 — KVShard 张量字段 + 序列化 round-trip + 传输后端。
-
-覆盖:
-- KVShard.tensor 字段 round-trip (serialize → deserialize 字节完整)
-- 无张量分片向后兼容 (旧元数据 bundle 无 tensor 键 → tensor=None)
-- SyntheticKVTransport 确定性 (同种子同张量) + import no-op 返 True
-- get_kv_transport 工厂 env 选后端
-"""
+# GAP-7 (#33) S1 单元测试 — KVShard 张量字段 + 序列化 round-trip + 传输后端。
+#
+# 覆盖:
+# - KVShard.tensor 字段 round-trip (serialize → deserialize 字节完整)
+# - 无张量分片向后兼容 (旧元数据 bundle 无 tensor 键 → tensor=None)
+# - SyntheticKVTransport 确定性 (同种子同张量) + import no-op 返 True
+# - get_kv_transport 工厂 env 选后端
 
 from __future__ import annotations
 
@@ -189,9 +188,9 @@ class TestExportImportBundle:
         assert restored.shards[0].tensor is not None
         assert len(restored.shards[0].tensor) == 256
 
+    # P2-4 (审计 §6.3): export_bundle 张量并入后 _local_size_bytes 同步补账 —
+    # 旧实现仅改 entry.total_size_bytes 不调账 → LRU gate 按旧小值减账, 实际占用超 max_local_cache_mb。
     def test_p2_4_export_bundle_syncs_local_size_bytes(self):
-        """P2-4 (审计 §6.3): export_bundle 张量并入后 _local_size_bytes 同步补账 —
-        旧实现仅改 entry.total_size_bytes 不调账 → LRU gate 按旧小值减账, 实际占用超 max_local_cache_mb。"""
         import time
 
         # 用 total_size_bytes = shard size_bytes 和 (512), 导出张量 512B 并入后 → 1024。
@@ -233,8 +232,8 @@ class TestExportImportBundle:
         assert mgr._local_size_bytes == 1024, f"P2-4 漏账: _local_size_bytes={mgr._local_size_bytes} 期望 1024"
         assert entry.total_size_bytes == 1024
 
+    # P2-4: export_stream 流式导出同样补账 _local_size_bytes (与 export_bundle 一致)。
     def test_p2_4_export_stream_syncs_local_size_bytes(self):
-        """P2-4: export_stream 流式导出同样补账 _local_size_bytes (与 export_bundle 一致)。"""
         import time
 
         entry = KVCacheEntry(
@@ -277,8 +276,8 @@ class TestExportImportBundle:
         # _local_size_bytes 须同步到 768 (旧实现停在 512 = 漏账 256)。
         assert mgr._local_size_bytes == 768, f"P2-4 流式漏账: _local_size_bytes={mgr._local_size_bytes} 期望 768"
 
+    # P2-4: 重复 cache_id store_local 先回退旧条目字节, 不累积重复计数。
     def test_p2_4_store_local_dedup_no_double_count(self):
-        """P2-4: 重复 cache_id store_local 先回退旧条目字节, 不累积重复计数。"""
         mgr = KVSharingManager(cluster_token="tok", max_local_cache_mb=4096.0)
         mgr.store_local(_make_entry_with_tensor(None))  # total_size_bytes=1024
         assert mgr._local_size_bytes == 1024
@@ -287,9 +286,8 @@ class TestExportImportBundle:
         assert mgr._local_size_bytes == 1024, f"重复存储累积重复计数: {mgr._local_size_bytes}"
 
 
+# P1-20 (审计 §6.5): MLXKVTransport.import_tensor 区分降级 (404→True) vs 真失败 (其他→False)。
 class TestMLXKVTransportP1:
-    """P1-20 (审计 §6.5): MLXKVTransport.import_tensor 区分降级 (404→True) vs 真失败 (其他→False)。"""
-
     def _make_mlx(self, resp_status, body=None, exc=None):
         t = MLXKVTransport(base_url="http://localhost:11432")
 

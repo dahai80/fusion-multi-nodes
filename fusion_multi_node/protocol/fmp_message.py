@@ -1,14 +1,13 @@
-"""FMP 三层协议消息定义 + AES-GCM 加密。
-
-三层结构:
-- LinkLayer: 链路层（路由、hop_count、源/目标）
-- BusinessLayer: 业务层（payload 类型、序列化数据）
-- ControlLayer: 控制层（心跳、ACK、流控）
-
-加密封装:
-- AES-GCM 全报文加密
-- 支持预共享密钥模式
-"""
+# FMP 三层协议消息定义 + AES-GCM 加密。
+#
+# 三层结构:
+# - LinkLayer: 链路层（路由、hop_count、源/目标）
+# - BusinessLayer: 业务层（payload 类型、序列化数据）
+# - ControlLayer: 控制层（心跳、ACK、流控）
+#
+# 加密封装:
+# - AES-GCM 全报文加密
+# - 支持预共享密钥模式
 
 from __future__ import annotations
 
@@ -62,10 +61,9 @@ class ControlType(Enum):
     DISCONNECT = "disconnect"
 
 
+# 链路层 — 路由与跳数控制。
 @dataclass
 class FMPLinkLayer:
-    """链路层 — 路由与跳数控制。"""
-
     source_id: str
     target_id: str
     hop_count: int = 0
@@ -101,10 +99,9 @@ class FMPLinkLayer:
         )
 
 
+# 业务层 — payload 类型与序列化数据。
 @dataclass
 class FMPBusinessLayer:
-    """业务层 — payload 类型与序列化数据。"""
-
     payload_type: PayloadType
     payload: bytes
     round_id: str = ""
@@ -157,10 +154,9 @@ class FMPBusinessLayer:
         )
 
 
+# 控制层 — 心跳、ACK、流控。
 @dataclass
 class FMPControlLayer:
-    """控制层 — 心跳、ACK、流控。"""
-
     control_type: ControlType
     sequence: int = 0
     timestamp: float = 0.0
@@ -187,10 +183,9 @@ class FMPControlLayer:
         )
 
 
+# FMP 完整消息 — 三层封装。
 @dataclass
 class FMPMessage:
-    """FMP 完整消息 — 三层封装。"""
-
     message_id: str
     link: FMPLinkLayer
     business: FMPBusinessLayer
@@ -241,11 +236,11 @@ class FMPMessage:
             encrypted=d.get("encrypted", False),
         )
 
+    # 序列化为二进制帧: [MAGIC][VERSION][FLAGS][PAYLOAD_LEN][RESERVED][PAYLOAD]
+    #
+    # FLAGS: bit0=encrypted, bit1=msgpack(1)/json(0)
+    #
     def serialize(self, use_msgpack: bool = False) -> bytes:
-        """序列化为二进制帧: [MAGIC][VERSION][FLAGS][PAYLOAD_LEN][RESERVED][PAYLOAD]
-
-        FLAGS: bit0=encrypted, bit1=msgpack(1)/json(0)
-        """
         payload_dict = self.to_dict()
         flags = 0x01 if self.encrypted else 0x00
 
@@ -271,9 +266,9 @@ class FMPMessage:
         )
         return header + payload_bytes
 
+    # 从二进制帧反序列化。
     @classmethod
     def deserialize(cls, data: bytes) -> FMPMessage:
-        """从二进制帧反序列化。"""
         if len(data) < FMP_HEADER_SIZE:
             raise ValueError(f"数据过短: {len(data)} < {FMP_HEADER_SIZE}")
 
@@ -336,9 +331,8 @@ class KVCacheSyncMessage:
         )
 
 
+# AES-GCM 加密器。
 class FMPCrypto:
-    """AES-GCM 加密器。"""
-
     def __init__(self, key: bytes | None = None):
         if key and len(key) != 32:
             raise ValueError("AES-256-GCM 需要 32 字节密钥")

@@ -1,18 +1,17 @@
-"""#79 测试批次编排协议测试。
-
-验证:
-(a) POST /api/test/batches 派发多个 test job → batch_id + assignments。
-(b) GET /api/test/batches/{id} 状态派生 (pending/running/completed/partial/failed)。
-(c) GET /api/test/batches/{id}/report 聚合 summary (total/passed/failed/running/pending)。
-(d) NodeInfo.drivers 字段经注册 + /api/nodes 暴露。
-(e) select_nodes driver 匹配 — required_capability 命中 drivers。
-(f) test_exec_disabled 默认关 — agent 拒执行。
-(g) 404 未知 batch。
-(h) 持久化 — batch 元数据 snapshot/restore。
-
-走 ASGITransport (无真 TCP), Bearer 鉴权 TEST_TOKEN。master._dispatch_to_node mock
-避免真实 HTTP 派发, 让 _dispatch_data 自然 finalize (状态派生走真实路径)。
-"""
+# #79 测试批次编排协议测试。
+#
+# 验证:
+# (a) POST /api/test/batches 派发多个 test job → batch_id + assignments。
+# (b) GET /api/test/batches/{id} 状态派生 (pending/running/completed/partial/failed)。
+# (c) GET /api/test/batches/{id}/report 聚合 summary (total/passed/failed/running/pending)。
+# (d) NodeInfo.drivers 字段经注册 + /api/nodes 暴露。
+# (e) select_nodes driver 匹配 — required_capability 命中 drivers。
+# (f) test_exec_disabled 默认关 — agent 拒执行。
+# (g) 404 未知 batch。
+# (h) 持久化 — batch 元数据 snapshot/restore。
+#
+# 走 ASGITransport (无真 TCP), Bearer 鉴权 TEST_TOKEN。master._dispatch_to_node mock
+# 避免真实 HTTP 派发, 让 _dispatch_data 自然 finalize (状态派生走真实路径)。
 
 from __future__ import annotations
 
@@ -71,8 +70,8 @@ async def env(tmp_path, monkeypatch):
         await m.stop()
 
 
+# Mock _dispatch_to_node 返指定结果, _dispatch_data 自然 finalize。
 def _mock_dispatch(master: ClusterMaster, exit_code=0, error=""):
-    """Mock _dispatch_to_node 返指定结果, _dispatch_data 自然 finalize。"""
 
     async def _fake(client, task, nid, nodes_snap, token, **kw):
         if error:

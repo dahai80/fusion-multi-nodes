@@ -1,4 +1,4 @@
-"""utils 模块测试。"""
+# utils 模块测试。
 
 import logging
 from logging.handlers import RotatingFileHandler
@@ -62,8 +62,8 @@ class TestRotatingFileHandler:
         assert len(logger.handlers) == 1
         assert not any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
 
+    # P1-27: 命令行直起 (无 LOG_FILE env) → stderr 提示未落盘, 仍 1 handler 不阻断。
     def test_p1_27_no_env_warns_stderr(self, monkeypatch, capsys):
-        """P1-27: 命令行直起 (无 LOG_FILE env) → stderr 提示未落盘, 仍 1 handler 不阻断。"""
         monkeypatch.delenv("FUSION_MULTINODE_LOG_FILE", raising=False)
         logger = setup_logger("test_p1_27_hint")
         captured = capsys.readouterr()

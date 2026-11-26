@@ -1,15 +1,14 @@
-"""#74 OPTIONAL fusion-identity 集成 — 运维显式 opt-in 时启用, 离线默认不变。
-
-fusion-identity 是 Fusion 生态的租户/鉴权服务 (签发 JWT + per-tenant 配额 + 用量)。
-本模块是它的 OPTIONAL 客户端:
-
-- 运维设置 FUSION_IDENTITY_URL → enabled=True, JWT 令牌经 /verify 校验, per-tenant 配额
-  从 identity 拉取, 任务完成上报用量。identity 为权威 (opt-in 后 fail-closed: 不可达即拒)。
-- 未设置 → get_identity_provider() 返 None, 所有行为退回本地 config + fmu_ store (离线默认)。
-
-设计: 不退役 fmu_ store (UserStore)。JWT 与 fmu_ 共存 — JWT 令牌走本路径, fmu_ 走旧路径。
-100% 本地/离线规则不破: identity 是 opt-in, 默认零配置离线。
-"""
+# #74 OPTIONAL fusion-identity 集成 — 运维显式 opt-in 时启用, 离线默认不变。
+#
+# fusion-identity 是 Fusion 生态的租户/鉴权服务 (签发 JWT + per-tenant 配额 + 用量)。
+# 本模块是它的 OPTIONAL 客户端:
+#
+# - 运维设置 FUSION_IDENTITY_URL → enabled=True, JWT 令牌经 /verify 校验, per-tenant 配额
+# 从 identity 拉取, 任务完成上报用量。identity 为权威 (opt-in 后 fail-closed: 不可达即拒)。
+# - 未设置 → get_identity_provider() 返 None, 所有行为退回本地 config + fmu_ store (离线默认)。
+#
+# 设计: 不退役 fmu_ store (UserStore)。JWT 与 fmu_ 共存 — JWT 令牌走本路径, fmu_ 走旧路径。
+# 100% 本地/离线规则不破: identity 是 opt-in, 默认零配置离线。
 
 from __future__ import annotations
 
@@ -23,17 +22,16 @@ _provider: IdentityProvider | None = None
 _provider_lock = threading.Lock()
 
 
+# 粗判 JWT — 三段点分 (header.payload.signature)。不校验签名 (校验交 identity /verify)。
 def _looks_like_jwt(token: str) -> bool:
-    """粗判 JWT — 三段点分 (header.payload.signature)。不校验签名 (校验交 identity /verify)。"""
     return token.count(".") == 2 and not token.startswith("fmu_")
 
 
+# fusion-identity 可选客户端。
+#
+# enabled = bool(base_url)。env: FUSION_IDENTITY_URL, FUSION_IDENTITY_SERVICE_TOKEN。
+#
 class IdentityProvider:
-    """fusion-identity 可选客户端。
-
-    enabled = bool(base_url)。env: FUSION_IDENTITY_URL, FUSION_IDENTITY_SERVICE_TOKEN。
-    """
-
     def __init__(self, base_url: str = "", service_token: str = "", timeout: float = 3.0):
         self._base_url = base_url.rstrip("/")
         self._service_token = service_token
@@ -50,12 +48,12 @@ class IdentityProvider:
             h["Authorization"] = f"Bearer {self._service_token}"
         return h
 
+    # POST /api/v1/auth/verify 校验 JWT → claims {tid, role, scopes, quota, tenant_status, revoked}。
+    #
+    # 返回 None = 令牌无效/吊销/非 200。enabled 但网络错误 → raise (fail-closed,
+    # 运维已 opt-in, identity 是权威, 不可达即拒, 不静默放行)。
+    #
     def verify_jwt(self, token: str) -> dict | None:
-        """POST /api/v1/auth/verify 校验 JWT → claims {tid, role, scopes, quota, tenant_status, revoked}。
-
-        返回 None = 令牌无效/吊销/非 200。enabled 但网络错误 → raise (fail-closed,
-        运维已 opt-in, identity 是权威, 不可达即拒, 不静默放行)。
-        """
         if not self.enabled:
             return None
         import httpx
@@ -80,11 +78,11 @@ class IdentityProvider:
             return None
         return claims
 
+    # 取 per-tenant 并发配额。优先 verify 缓存 claims.quota.concurrent, 回退 admin 接口。
+    #
+    # None → 调用方退回本地全局配额。enabled 关 → None。
+    #
     def get_tenant_quota(self, tid: str) -> int | None:
-        """取 per-tenant 并发配额。优先 verify 缓存 claims.quota.concurrent, 回退 admin 接口。
-
-        None → 调用方退回本地全局配额。enabled 关 → None。
-        """
         if not self.enabled:
             return None
         if tid in self._quota_cache:
@@ -109,10 +107,10 @@ class IdentityProvider:
             return q
         return None
 
+    # POST /api/v1/tenants/{tid}/usage 上报用量。best-effort, 失败仅日志, 不阻塞调度。
     def report_usage(
         self, tid: str, metric: str, value: int | float, model: str | None = None, user_id: str | None = None
     ) -> None:
-        """POST /api/v1/tenants/{tid}/usage 上报用量。best-effort, 失败仅日志, 不阻塞调度。"""
         if not self.enabled:
             return
         import httpx
@@ -132,11 +130,11 @@ class IdentityProvider:
             logger.warning(f"#74 identity 上报用量非 2xx: {resp.status_code} tid={tid}")
 
 
+# 单例 — env FUSION_IDENTITY_URL 未设 → None (离线默认)。
+#
+# 运维显式 opt-in 后, 全进程共享同一实例 (含配额缓存)。
+#
 def get_identity_provider() -> IdentityProvider | None:
-    """单例 — env FUSION_IDENTITY_URL 未设 → None (离线默认)。
-
-    运维显式 opt-in 后, 全进程共享同一实例 (含配额缓存)。
-    """
     global _provider
     if _provider is not None:
         return _provider
@@ -151,8 +149,8 @@ def get_identity_provider() -> IdentityProvider | None:
     return _provider
 
 
+# 测试重置单例。
 def reset_identity_provider() -> None:
-    """测试重置单例。"""
     global _provider
     with _provider_lock:
         _provider = None

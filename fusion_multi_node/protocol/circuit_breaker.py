@@ -1,15 +1,14 @@
-"""Circuit Breaker 熔断器。
-
-防止故障节点拖垮整个集群:
-- CLOSED: 正常状态，请求放行
-- OPEN: 熔断状态，请求直接拒绝
-- HALF_OPEN: 半开状态，放行探测请求
-
-参数:
-- failure_threshold: 连续失败次数阈值（默认 5）
-- recovery_timeout: 熔断恢复超时（默认 30s）
-- half_open_max: 半开状态最大放行数（默认 1）
-"""
+# Circuit Breaker 熔断器。
+#
+# 防止故障节点拖垮整个集群:
+# - CLOSED: 正常状态，请求放行
+# - OPEN: 熔断状态，请求直接拒绝
+# - HALF_OPEN: 半开状态，放行探测请求
+#
+# 参数:
+# - failure_threshold: 连续失败次数阈值（默认 5）
+# - recovery_timeout: 熔断恢复超时（默认 30s）
+# - half_open_max: 半开状态最大放行数（默认 1）
 
 from __future__ import annotations
 
@@ -26,9 +25,8 @@ class CircuitState(Enum):
     HALF_OPEN = "half_open"
 
 
+# 熔断器 — 保护集群免受故障节点拖垮。
 class CircuitBreaker:
-    """熔断器 — 保护集群免受故障节点拖垮。"""
-
     def __init__(
         self,
         name: str = "default",
@@ -49,9 +47,9 @@ class CircuitBreaker:
         self._total_calls = 0
         self._total_failures = 0
 
+    # 当前状态（可能触发状态转换）。
     @property
     def state(self) -> CircuitState:
-        """当前状态（可能触发状态转换）。"""
         if self._state == CircuitState.OPEN and time.time() - self._last_failure_time >= self.recovery_timeout:
             self._state = CircuitState.HALF_OPEN
             self._half_open_count = 0
@@ -66,8 +64,8 @@ class CircuitBreaker:
     def is_closed(self) -> bool:
         return self.state == CircuitState.CLOSED
 
+    # 是否允许请求通过。
     def allow_request(self) -> bool:
-        """是否允许请求通过。"""
         self._total_calls += 1
         current = self.state
 
@@ -81,8 +79,8 @@ class CircuitBreaker:
         else:
             return False
 
+    # 记录成功。
     def record_success(self) -> None:
-        """记录成功。"""
         self._success_count += 1
         if self._state == CircuitState.HALF_OPEN:
             self._state = CircuitState.CLOSED
@@ -91,8 +89,8 @@ class CircuitBreaker:
         elif self._state == CircuitState.CLOSED:
             self._failure_count = 0
 
+    # 记录失败。
     def record_failure(self) -> None:
-        """记录失败。"""
         self._failure_count += 1
         self._total_failures += 1
         self._last_failure_time = time.time()
@@ -105,8 +103,8 @@ class CircuitBreaker:
                 self._state = CircuitState.OPEN
                 logger.warning(f"熔断器 [{self.name}] CLOSED → OPEN (连续 {self._failure_count} 次失败)")
 
+    # 手动重置熔断器。
     def reset(self) -> None:
-        """手动重置熔断器。"""
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._success_count = 0

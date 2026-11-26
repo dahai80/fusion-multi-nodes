@@ -1,10 +1,9 @@
-"""ECDH 密钥交换 + TLS 自签名证书工具。
-
-提供：
-- ECDH 密钥交换: 节点间协商 AES-256 会话密钥
-- TLS 自签名证书: 节点间加密通信
-- 证书指纹 pinning: 集群内节点信任验证
-"""
+# ECDH 密钥交换 + TLS 自签名证书工具。
+#
+# 提供：
+# - ECDH 密钥交换: 节点间协商 AES-256 会话密钥
+# - TLS 自签名证书: 节点间加密通信
+# - 证书指纹 pinning: 集群内节点信任验证
 
 from __future__ import annotations
 
@@ -18,9 +17,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# ECDH 密钥交换 — 协商 AES-256 会话密钥。
 class ECDHKeyExchange:
-    """ECDH 密钥交换 — 协商 AES-256 会话密钥。"""
-
     def __init__(self):
         self._private_key: bytes | None = None
         self._public_key: bytes | None = None
@@ -62,9 +60,8 @@ class ECDHKeyExchange:
         return self._public_key
 
 
+# TLS 自签名证书管理 — 生成节点间通信证书 + 指纹 pinning 信任。
 class TLSCertManager:
-    """TLS 自签名证书管理 — 生成节点间通信证书 + 指纹 pinning 信任。"""
-
     def __init__(self, cert_dir: str | None = None):
         self._cert_dir = Path(cert_dir) if cert_dir else Path.home() / ".fusion" / "multi-node" / "tls"
         self._cert_path = self._cert_dir / "node.crt"
@@ -137,8 +134,8 @@ class TLSCertManager:
         logger.info(f"TLS 自签名证书已生成: {self._cert_dir}")
         return str(self._cert_path), str(self._key_path)
 
+    # 获取本节点证书 SHA-256 指纹。
     def get_cert_fingerprint(self) -> str:
-        """获取本节点证书 SHA-256 指纹。"""
         if self._cert_fingerprint:
             return self._cert_fingerprint
         cert_path, _ = self.ensure_certificates()
@@ -155,14 +152,14 @@ class TLSCertManager:
             logger.error(f"获取证书指纹失败: {e}")
             return ""
 
+    # 添加受信任的节点证书指纹。
     def pin_fingerprint(self, fingerprint: str) -> None:
-        """添加受信任的节点证书指纹。"""
         self._pinned_fingerprints.add(fingerprint)
         self._client_ssl_context = None
         logger.info(f"证书指纹已 pin: {fingerprint[:16]}...")
 
+    # 验证对端证书是否在 pinned 指纹列表中。
     def _verify_pinned_cert(self, cert_der: bytes) -> bool:
-        """验证对端证书是否在 pinned 指纹列表中。"""
         if not self._pinned_fingerprints:
             logger.warning("无 pinned 指纹，跳过证书验证")
             return True

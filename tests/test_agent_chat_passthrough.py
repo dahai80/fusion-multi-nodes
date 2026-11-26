@@ -1,12 +1,11 @@
-"""GAP-8 Phase F3 — agent /api/v1/chat/completions 透传路由单测。
-
-覆盖:
-- 非流式 → FusionMLXBackend.chat (假后端) → 200 原生 OpenAI 格式。
-- 流式 → 透传 fusion-mlx SSE 字节流 (注入 FakeMLX transport)。
-- 非法 model (路径穿越) → 400。
-- 无效 token → 401 (BearerAuthMiddleware)。
-- worker 角色缺 TASK_EXECUTE → 403 (权限强制)。
-"""
+# GAP-8 Phase F3 — agent /api/v1/chat/completions 透传路由单测。
+#
+# 覆盖:
+# - 非流式 → FusionMLXBackend.chat (假后端) → 200 原生 OpenAI 格式。
+# - 流式 → 透传 fusion-mlx SSE 字节流 (注入 FakeMLX transport)。
+# - 非法 model (路径穿越) → 400。
+# - 无效 token → 401 (BearerAuthMiddleware)。
+# - worker 角色缺 TASK_EXECUTE → 403 (权限强制)。
 
 from __future__ import annotations
 
@@ -24,9 +23,8 @@ TEST_TOKEN = "test-cluster-token"
 AUTH_HEADERS = {"Authorization": f"Bearer {TEST_TOKEN}"}
 
 
+# 继承 FusionMLXBackend 过 isinstance; 重写 chat 免真 HTTP。
 class FakeMLXBackend(FusionMLXBackend):
-    """继承 FusionMLXBackend 过 isinstance; 重写 chat 免真 HTTP。"""
-
     def __init__(self, node_id: str = "agent-x"):
         super().__init__(base_url="http://fake-mlx", api_key="")
         self._node_id = node_id
@@ -67,12 +65,11 @@ def _client(server: AgentServer) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=server.app), base_url="http://test")
 
 
+# agent /api/v1/chat/completions 透传路由单测。
 class TestAgentChatPassthrough:
-    """agent /api/v1/chat/completions 透传路由单测。"""
-
+    # 非流式 → 200 原生 OpenAI 格式, 经 FusionMLXBackend.chat。
     @pytest.mark.asyncio
     async def test_nonstream_chat(self):
-        """非流式 → 200 原生 OpenAI 格式, 经 FusionMLXBackend.chat。"""
         server, backend = _make_server()
         async with _client(server) as client:
             resp = await client.post(
@@ -90,9 +87,9 @@ class TestAgentChatPassthrough:
         assert backend.chat_calls, "backend.chat 未被调用"
         assert backend.chat_calls[0]["model"] == "test-model"
 
+    # 流式 → 透传 fusion-mlx SSE 字节流 (注入 FakeMLX transport)。
     @pytest.mark.asyncio
     async def test_stream_sse(self):
-        """流式 → 透传 fusion-mlx SSE 字节流 (注入 FakeMLX transport)。"""
         backend = FakeMLXBackend()
         sse_body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
 
@@ -130,9 +127,9 @@ class TestAgentChatPassthrough:
         finally:
             await fake_client.aclose()
 
+    # 非法 model (含 / 路径穿越) → 400。
     @pytest.mark.asyncio
     async def test_invalid_model_400(self):
-        """非法 model (含 / 路径穿越) → 400。"""
         server, backend = _make_server()
         async with _client(server) as client:
             resp = await client.post(
@@ -147,9 +144,9 @@ class TestAgentChatPassthrough:
         assert "非法 model" in resp.text
         assert not backend.chat_calls, "非法 model 不应触达后端"
 
+    # 无 token → 401 (BearerAuthMiddleware)。
     @pytest.mark.asyncio
     async def test_no_token_401(self):
-        """无 token → 401 (BearerAuthMiddleware)。"""
         server, _ = _make_server()
         async with _client(server) as client:
             resp = await client.post(
@@ -158,9 +155,9 @@ class TestAgentChatPassthrough:
             )
         assert resp.status_code == 401, resp.text
 
+    # 空 model → 400。
     @pytest.mark.asyncio
     async def test_empty_model_400(self):
-        """空 model → 400。"""
         server, _ = _make_server()
         async with _client(server) as client:
             resp = await client.post(

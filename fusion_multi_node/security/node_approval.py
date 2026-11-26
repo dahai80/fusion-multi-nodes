@@ -1,4 +1,4 @@
-"""M6-03 新节点接入审批 — 防止未授权节点自动加入集群。"""
+# M6-03 新节点接入审批 — 防止未授权节点自动加入集群。
 
 from __future__ import annotations
 
@@ -39,9 +39,8 @@ class ApprovalRequest:
             self.requested_at = time.time()
 
 
+# 节点接入审批管理器。
 class NodeApprovalManager:
-    """节点接入审批管理器。"""
-
     def __init__(
         self,
         auto_approve_patterns: list[str] | None = None,

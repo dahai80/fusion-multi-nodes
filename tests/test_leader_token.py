@@ -1,15 +1,14 @@
-"""#77 per-leader token 过期写入拒绝测试 (opt-in env)。
-
-验证:
-(a) enforce OFF (默认): 即使发过期 X-Leader-Token 也不拒 (离线默认不变)。
-(b) enforce ON + HA leader: 正确 token → 提交成功; 过期 token → 409 LeaderChanged。
-(c) enforce ON + 单 Master: 永不拒 (enforce 仅 HA 生效)。
-(d) enforce ON + HA + 缺 header → 放行 (灰度兼容)。
-(e) /api/leader/credentials 返回的 token 与 leader_token() 一致。
-(f) active-active: enforce 永关, 不拒。
-
-走 ASGITransport (无真 TCP), Bearer 鉴权携带 TEST_TOKEN。
-"""
+# #77 per-leader token 过期写入拒绝测试 (opt-in env)。
+#
+# 验证:
+# (a) enforce OFF (默认): 即使发过期 X-Leader-Token 也不拒 (离线默认不变)。
+# (b) enforce ON + HA leader: 正确 token → 提交成功; 过期 token → 409 LeaderChanged。
+# (c) enforce ON + 单 Master: 永不拒 (enforce 仅 HA 生效)。
+# (d) enforce ON + HA + 缺 header → 放行 (灰度兼容)。
+# (e) /api/leader/credentials 返回的 token 与 leader_token() 一致。
+# (f) active-active: enforce 永关, 不拒。
+#
+# 走 ASGITransport (无真 TCP), Bearer 鉴权携带 TEST_TOKEN。
 
 from __future__ import annotations
 
@@ -62,9 +61,9 @@ async def _register_node(master: ClusterMaster, node_id="n1"):
     )
 
 
+# HA standby leader, enforce ON (env)。
 @pytest.fixture
 async def ha_leader(tmp_path, monkeypatch):
-    """HA standby leader, enforce ON (env)。"""
     monkeypatch.setenv("FUSION_LEADER_TOKEN_ENFORCE", "1")
     m = _make_master(tmp_path)
     m.setup_election(node_id="master-1", priority=10, known_nodes=[{"node_id": "master-2", "priority": 1}])
@@ -82,8 +81,8 @@ async def ha_leader(tmp_path, monkeypatch):
 
 
 class TestLeaderTokenEnforce:
+    # (a) 默认 enforce OFF: 过期 token 也不拒。
     async def test_enforce_off_accepts_stale_token(self, tmp_path):
-        """(a) 默认 enforce OFF: 过期 token 也不拒。"""
         m = _make_master(tmp_path)
         m.setup_election(node_id="master-1", priority=10, known_nodes=[{"node_id": "master-2", "priority": 1}])
         m._is_leader = True
@@ -101,8 +100,8 @@ class TestLeaderTokenEnforce:
             await client.aclose()
             await m.stop()
 
+    # (b) enforce ON + HA: 正确 token → 非 409。
     async def test_ha_correct_token_accepted(self, ha_leader):
-        """(b) enforce ON + HA: 正确 token → 非 409。"""
         m = ha_leader["m"]
         client = ha_leader["client"]
         assert m.leader_token_enforce() is True
@@ -111,22 +110,22 @@ class TestLeaderTokenEnforce:
         r = await client.post("/api/tasks/submit", json=SUBMIT_BODY, headers=hdrs)
         assert r.status_code != 409
 
+    # (b) enforce ON + HA: 过期 token → 409 LeaderChanged。
     async def test_ha_stale_token_rejected_409(self, ha_leader):
-        """(b) enforce ON + HA: 过期 token → 409 LeaderChanged。"""
         client = ha_leader["client"]
         hdrs = {**AUTH_HEADERS, "X-Leader-Token": "wrong-token-0000000000000000"}
         r = await client.post("/api/tasks/submit", json=SUBMIT_BODY, headers=hdrs)
         assert r.status_code == 409
         assert "LeaderChanged" in r.json()["detail"]
 
+    # (d) enforce ON + 缺 header → 放行 (灰度兼容)。
     async def test_ha_missing_header_accepted(self, ha_leader):
-        """(d) enforce ON + 缺 header → 放行 (灰度兼容)。"""
         client = ha_leader["client"]
         r = await client.post("/api/tasks/submit", json=SUBMIT_BODY, headers=AUTH_HEADERS)
         assert r.status_code != 409
 
+    # (c) enforce ON env + 单 Master (无 _election): 永不拒。
     async def test_single_master_enforce_never_rejects(self, tmp_path, monkeypatch):
-        """(c) enforce ON env + 单 Master (无 _election): 永不拒。"""
         monkeypatch.setenv("FUSION_LEADER_TOKEN_ENFORCE", "1")
         m = _make_master(tmp_path)
         s = _make_server(m)
@@ -141,8 +140,8 @@ class TestLeaderTokenEnforce:
             await client.aclose()
             await m.stop()
 
+    # (f) active-active: enforce 永关 (无 _election)。
     async def test_active_active_enforce_off(self, tmp_path, monkeypatch):
-        """(f) active-active: enforce 永关 (无 _election)。"""
         monkeypatch.setenv("FUSION_LEADER_TOKEN_ENFORCE", "1")
         m = _make_master(tmp_path)
         m._ha_mode = "active-active"
@@ -158,8 +157,8 @@ class TestLeaderTokenEnforce:
             await client.aclose()
             await m.stop()
 
+    # (e) /api/leader/credentials 返回 token 与 leader_token() 一致。
     async def test_leader_credentials_matches_leader_token(self, ha_leader):
-        """(e) /api/leader/credentials 返回 token 与 leader_token() 一致。"""
         m = ha_leader["m"]
         client = ha_leader["client"]
         r = await client.get("/api/leader/credentials", headers=AUTH_HEADERS)
@@ -170,8 +169,8 @@ class TestLeaderTokenEnforce:
         assert body["leader_id"] == m.current_leader_id()
         assert body["enforce"] is True
 
+    # cancel 路由亦接 per-leader token 拒绝。
     async def test_cancel_stale_token_rejected_409(self, tmp_path, monkeypatch):
-        """cancel 路由亦接 per-leader token 拒绝。"""
         monkeypatch.setenv("FUSION_LEADER_TOKEN_ENFORCE", "1")
         m = _make_master(tmp_path)
         m.setup_election(node_id="master-1", priority=10, known_nodes=[{"node_id": "master-2", "priority": 1}])
@@ -201,8 +200,8 @@ class TestLeaderTokenEnforce:
             await client.aclose()
             await m.stop()
 
+    # v1 submit 路由亦接 per-leader token 拒绝。
     async def test_v1_submit_stale_token_rejected_409(self, ha_leader):
-        """v1 submit 路由亦接 per-leader token 拒绝。"""
         client = ha_leader["client"]
         hdrs = {**AUTH_HEADERS, "X-Leader-Token": "wrong-token-0000000000000000"}
         r = await client.post("/api/v1/tasks/submit", json=SUBMIT_BODY, headers=hdrs)

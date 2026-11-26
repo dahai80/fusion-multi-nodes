@@ -1,13 +1,12 @@
-"""Caveman Token Compression — 跨节点张量传输压缩。
-
-分布式推理中，跨节点传输的中间激活和 KV 缓存占用大量带宽。
-Caveman 通过轻量无损压缩算法，降低 40-60% 传输量。
-
-算法：
-1. Token 频率统计：对传输的 token 序列做频率分析
-2. 字典压缩：高频 token 用短编码替换
-3. 差分编码：连续相似的 token 只传差值
-"""
+# Caveman Token Compression — 跨节点张量传输压缩。
+#
+# 分布式推理中，跨节点传输的中间激活和 KV 缓存占用大量带宽。
+# Caveman 通过轻量无损压缩算法，降低 40-60% 传输量。
+#
+# 算法：
+# 1. Token 频率统计：对传输的 token 序列做频率分析
+# 2. 字典压缩：高频 token 用短编码替换
+# 3. 差分编码：连续相似的 token 只传差值
 
 from __future__ import annotations
 
@@ -18,10 +17,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# 压缩统计。
 @dataclass
 class CompressStats:
-    """压缩统计。"""
-
     original_bytes: int = 0
     compressed_bytes: int = 0
     ratio: float = 0.0
@@ -29,12 +27,11 @@ class CompressStats:
     time_ms: float = 0.0
 
 
+# Caveman Token 压缩器 — 轻量无损压缩。
+#
+# 支持三种压缩策略，根据数据特征自动选择最优方案。
+#
 class CavemanCompressor:
-    """Caveman Token 压缩器 — 轻量无损压缩。
-
-    支持三种压缩策略，根据数据特征自动选择最优方案。
-    """
-
     # 高频 token 编码表（前 256 个高频 token 用 1 字节编码）
     SHORT_CODE_SIZE = 256
 
@@ -46,8 +43,8 @@ class CavemanCompressor:
         self._reverse_dict: dict[bytes, int] = {}
         self._stats = CompressStats()
 
+    # 根据 token 频率构建字典。
     def build_dictionary(self, tokens: list[int]) -> None:
-        """根据 token 频率构建字典。"""
         self._dictionary.clear()
         self._reverse_dict.clear()
         freq = Counter(tokens)
@@ -58,16 +55,16 @@ class CavemanCompressor:
             self._dictionary[token] = code
             self._reverse_dict[code] = token
 
+    # 压缩数据。
+    #
+    # Args:
+    # data: 原始字节数据
+    # method: 压缩方法 (auto | zlib | diff | dict)
+    #
+    # Returns:
+    # (压缩后数据, 统计信息)
+    #
     def compress(self, data: bytes, method: str = "auto") -> tuple[bytes, CompressStats]:
-        """压缩数据。
-
-        Args:
-            data: 原始字节数据
-            method: 压缩方法 (auto | zlib | diff | dict)
-
-        Returns:
-            (压缩后数据, 统计信息)
-        """
         import time
 
         start = time.time()
@@ -89,8 +86,8 @@ class CavemanCompressor:
 
         return compressed, self._stats
 
+    # 解压数据。
     def decompress(self, data: bytes, method: str) -> bytes:
-        """解压数据。"""
         if method == "zlib":
             return zlib.decompress(data)
         elif method == "diff":
@@ -99,16 +96,16 @@ class CavemanCompressor:
             return self._dict_decompress(data)
         return data
 
+    # 自动选择最优压缩方法。
     def _select_method(self, data: bytes) -> str:
-        """自动选择最优压缩方法。"""
         if len(data) < 64:
             return "dict"  # 小数据用字典压缩
         if self._has_repeated_pattern(data):
             return "diff"  # 有重复模式用差分
         return "zlib"  # 通用用 zlib
 
+    # 执行压缩。
     def _compress(self, data: bytes, method: str) -> bytes:
-        """执行压缩。"""
         if method == "zlib":
             return zlib.compress(data, level=3)
         elif method == "diff":
@@ -117,13 +114,13 @@ class CavemanCompressor:
             return self._dict_compress(data)
         return data
 
+    # 字典压缩：4 字节 token 命中字典用 2 字节码替换, 透传字节带控制前缀。
+    #
+    # 记录格式 (无变长歧义, AR审计硬伤4 修):
+    # - 0x01 + 2字节码: 字典命中, 解压时反查得 4 字节 token
+    # - 0x02 + 1字节: 原始透传字节 (含非 4 字节对齐尾部 + 非命中 token 的字节)
+    #
     def _dict_compress(self, data: bytes) -> bytes:
-        """字典压缩：4 字节 token 命中字典用 2 字节码替换, 透传字节带控制前缀。
-
-        记录格式 (无变长歧义, AR审计硬伤4 修):
-        - 0x01 + 2字节码: 字典命中, 解压时反查得 4 字节 token
-        - 0x02 + 1字节: 原始透传字节 (含非 4 字节对齐尾部 + 非命中 token 的字节)
-        """
         if not self._dictionary:
             return data
 
@@ -145,8 +142,8 @@ class CavemanCompressor:
 
         return bytes(result)
 
+    # 字典解压 — 按控制字节读取记录, 无误命中。
     def _dict_decompress(self, data: bytes) -> bytes:
-        """字典解压 — 按控制字节读取记录, 无误命中。"""
         if not self._reverse_dict:
             return data
 
@@ -180,8 +177,8 @@ class CavemanCompressor:
 
         return bytes(result)
 
+    # 差分压缩：连续值只存差值。
     def _diff_compress(self, data: bytes) -> bytes:
-        """差分压缩：连续值只存差值。"""
         if len(data) < 2:
             return data
 
@@ -196,8 +193,8 @@ class CavemanCompressor:
         # 对差值再 zlib 压缩
         return zlib.compress(bytes(result), level=1)
 
+    # 差分解压。
     def _diff_decompress(self, data: bytes) -> bytes:
-        """差分解压。"""
         decompressed = zlib.decompress(data)
         if len(decompressed) < 1:
             return decompressed
@@ -210,8 +207,8 @@ class CavemanCompressor:
 
         return bytes(result)
 
+    # 检测是否有重复模式。
     def _has_repeated_pattern(self, data: bytes) -> bool:
-        """检测是否有重复模式。"""
         if len(data) < 8:
             return False
         # 检查 4 字节窗口的重复率
@@ -232,15 +229,14 @@ class CavemanCompressor:
         self._stats = CompressStats()
 
 
+# Caveman 压缩管理器 — 管理跨节点传输的压缩策略。
+#
+# 根据网络类型（Thunderbolt / Ethernet）自动选择压缩级别：
+# - Thunderbolt 5 (40Gbps+): 轻量压缩或不压缩
+# - Ethernet 1Gbps: 标准压缩
+# - Ethernet 100Mbps: 强力压缩
+#
 class CavemanManager:
-    """Caveman 压缩管理器 — 管理跨节点传输的压缩策略。
-
-    根据网络类型（Thunderbolt / Ethernet）自动选择压缩级别：
-    - Thunderbolt 5 (40Gbps+): 轻量压缩或不压缩
-    - Ethernet 1Gbps: 标准压缩
-    - Ethernet 100Mbps: 强力压缩
-    """
-
     COMPRESSION_LEVELS = {
         "thunderbolt_5": {"method": "dict", "target_ratio": 0.9},
         "thunderbolt_4": {"method": "dict", "target_ratio": 0.8},
@@ -255,34 +251,34 @@ class CavemanManager:
         self.total_original = 0
         self.total_compressed = 0
 
+    # 根据链路类型获取压缩配置。
     def get_compression_config(self, link_type: str) -> dict[str, Any]:
-        """根据链路类型获取压缩配置。"""
         return self.COMPRESSION_LEVELS.get(link_type, self.COMPRESSION_LEVELS["unknown"])
 
+    # 压缩张量数据。
     async def compress_tensor(
         self,
         data: bytes,
         link_type: str = "unknown",
     ) -> tuple[bytes, str, CompressStats]:
-        """压缩张量数据。"""
         config = self.get_compression_config(link_type)
         compressed, stats = self.compressor.compress(data, method=config["method"])
         self.total_original += stats.original_bytes
         self.total_compressed += stats.compressed_bytes
         return compressed, config["method"], stats
 
+    # 解压张量数据。
     async def decompress_tensor(self, data: bytes, method: str) -> bytes:
-        """解压张量数据。"""
         return self.compressor.decompress(data, method)
 
+    # 获取整体压缩率。
     def get_compression_ratio(self) -> float:
-        """获取整体压缩率。"""
         if self.total_original == 0:
             return 1.0
         return self.total_compressed / self.total_original
 
+    # 获取压缩统计。
     def get_stats(self) -> dict[str, Any]:
-        """获取压缩统计。"""
         return {
             "total_original_bytes": self.total_original,
             "total_compressed_bytes": self.total_compressed,

@@ -1,9 +1,8 @@
-"""M6-04 传输数据脱敏 — 在节点间传输前自动擦除敏感数据。
-
-- 正则匹配模式脱敏（手机号/身份证/邮箱/密钥等）
-- 自定义规则
-- JSON 深度遍历
-"""
+# M6-04 传输数据脱敏 — 在节点间传输前自动擦除敏感数据。
+#
+# - 正则匹配模式脱敏（手机号/身份证/邮箱/密钥等）
+# - 自定义规则
+# - JSON 深度遍历
 
 from __future__ import annotations
 
@@ -16,10 +15,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# 脱敏规则。
 @dataclass
 class ScrubRule:
-    """脱敏规则。"""
-
     name: str
     pattern: str
     replacement: str = "***"
@@ -100,9 +98,8 @@ DEFAULT_RULES: list[ScrubRule] = [
 ]
 
 
+# 数据脱敏器 — 在传输前自动擦除敏感信息。
 class DataScrubber:
-    """数据脱敏器 — 在传输前自动擦除敏感信息。"""
-
     def __init__(
         self,
         rules: list[ScrubRule] | None = None,
@@ -129,8 +126,8 @@ class DataScrubber:
         self._recompile()
         logger.info(f"移除脱敏规则: {name}")
 
+    # 脱敏纯文本，返回 (脱敏后文本, 命中规则列表)。
     def scrub_text(self, text: str) -> tuple[str, list[str]]:
-        """脱敏纯文本，返回 (脱敏后文本, 命中规则列表)。"""
         hits: list[str] = []
         result = text
         for rule, pattern in self._compiled:
@@ -141,8 +138,8 @@ class DataScrubber:
             logger.debug(f"脱敏命中: {hits}")
         return result, hits
 
+    # 深度遍历字典并脱敏所有字符串值。
     def scrub_dict(self, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        """深度遍历字典并脱敏所有字符串值。"""
         all_hits: list[str] = []
         return self._scrub_dict_recursive(data, all_hits), all_hits
 
@@ -157,8 +154,8 @@ class DataScrubber:
             return [self._scrub_dict_recursive(item, hits) for item in data]
         return data
 
+    # 脱敏任意值（自动判断类型）。
     def scrub_value(self, value: Any) -> tuple[Any, list[str]]:
-        """脱敏任意值（自动判断类型）。"""
         if isinstance(value, str):
             return self.scrub_text(value)
         elif isinstance(value, dict):

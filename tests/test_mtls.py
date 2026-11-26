@@ -1,11 +1,10 @@
-"""P1-G mTLS 传输层测试 — 真实 TCP 端口双向证书认证。
-
-验收: 节点带证书互连, 无证书拒绝, 非集群 CA 签名拒绝。
-mTLS 关: 集群内 httpx/http 互连受证书保护, 无证书节点握手即拒 (到不了 ASGI)。
-
-真实端口: 起 AgentServer 真 uvicorn (localhost:0 系统分配端口), 非 ASGITransport。
-清理: 测试结束删临时 CA 目录 (过程数据规则 — 只留最终输出件+日志)。
-"""
+# P1-G mTLS 传输层测试 — 真实 TCP 端口双向证书认证。
+#
+# 验收: 节点带证书互连, 无证书拒绝, 非集群 CA 签名拒绝。
+# mTLS 关: 集群内 httpx/http 互连受证书保护, 无证书节点握手即拒 (到不了 ASGI)。
+#
+# 真实端口: 起 AgentServer 真 uvicorn (localhost:0 系统分配端口), 非 ASGITransport。
+# 清理: 测试结束删临时 CA 目录 (过程数据规则 — 只留最终输出件+日志)。
 
 from __future__ import annotations
 
@@ -28,12 +27,12 @@ def _free_port() -> int:
     return port
 
 
+# 生成集群 CA + master/worker 两节点叶证书, 返回 env 映射。
+#
+# P2-1: provision_node 传 ip="127.0.0.1" → 叶证书 SAN 含 IPAddress, 使
+# client_ssl_context check_hostname=True 下连 127.0.0.1 可校验对端身份。
+#
 def _provision_cluster(tmpdir: Path) -> dict[str, str]:
-    """生成集群 CA + master/worker 两节点叶证书, 返回 env 映射。
-
-    P2-1: provision_node 传 ip="127.0.0.1" → 叶证书 SAN 含 IPAddress, 使
-    client_ssl_context check_hostname=True 下连 127.0.0.1 可校验对端身份。
-    """
     ca_dir = tmpdir / "ca"
     ca_cert, ca_key = mtls_mod.provision_cluster(str(ca_dir))
     nodes = {}
@@ -44,8 +43,8 @@ def _provision_cluster(tmpdir: Path) -> dict[str, str]:
     return {"ca_cert": ca_cert, "ca_key": ca_key, "nodes": nodes}
 
 
+# 设 mTLS env 开关 + 指定节点的证书路径。
 def _set_mtls_env(monkeypatch, provisioned: dict[str, str], node_id: str) -> None:
-    """设 mTLS env 开关 + 指定节点的证书路径。"""
     monkeypatch.setenv("FUSION_MTLS_ENABLED", "1")
     monkeypatch.setenv("FUSION_MTLS_CA_CERT", provisioned["ca_cert"])
     n = provisioned["nodes"][node_id]
@@ -90,12 +89,11 @@ async def _start_agent_server(server: AgentServer, host: str, port: int) -> asyn
     return task
 
 
+# mTLS 双向认证 — 真实端口握手验证。
 class TestMtlsTransport:
-    """mTLS 双向认证 — 真实端口握手验证。"""
-
+    # provision_cluster + provision_node 生成 CA + 叶证书, 节点 CN/role 写入证书 O。
     @pytest.mark.asyncio
     async def test_provision_cluster_generates_ca_and_leaves(self, tmp_path):
-        """provision_cluster + provision_node 生成 CA + 叶证书, 节点 CN/role 写入证书 O。"""
         ca_cert, ca_key = mtls_mod.provision_cluster(str(tmp_path / "ca"))
         assert Path(ca_cert).exists()
         assert Path(ca_key).exists()
@@ -108,10 +106,10 @@ class TestMtlsTransport:
         assert cn == "node-x"
         assert org == "worker"
 
+    # P2-1: provision_node 传 ip → 叶证书 SAN 含 DNSName+IPAddress;
+    # client_ssl_context check_hostname=True 开 (校验对端身份)。无 ip 仅 DNSName SAN。
     @pytest.mark.asyncio
     async def test_p2_1_node_cert_has_san_and_hostname_check(self, tmp_path, monkeypatch):
-        """P2-1: provision_node 传 ip → 叶证书 SAN 含 DNSName+IPAddress;
-        client_ssl_context check_hostname=True 开 (校验对端身份)。无 ip 仅 DNSName SAN。"""
         import importlib
         import ipaddress as ipmod
 
@@ -143,9 +141,9 @@ class TestMtlsTransport:
         _clear_mtls_env(monkeypatch)
         importlib.reload(mtls_mod)
 
+    # 带集群 CA 签名证书的客户端可连; 无证书客户端 TLS 握手失败 (到不了 ASGI)。
     @pytest.mark.asyncio
     async def test_cert_client_connects_no_cert_rejected(self, tmp_path, monkeypatch):
-        """带集群 CA 签名证书的客户端可连; 无证书客户端 TLS 握手失败 (到不了 ASGI)。"""
         prov = _provision_cluster(tmp_path)
         # agent 用 worker-1 证书启动 (要求对端客户端证书)
         _set_mtls_env(monkeypatch, prov, "worker-1")
@@ -188,9 +186,9 @@ class TestMtlsTransport:
             _clear_mtls_env(monkeypatch)
             importlib.reload(mtls_mod)
 
+    # 对端证书由别的 CA 签名 → 校验失败 (client 不信任)。
     @pytest.mark.asyncio
     async def test_non_cluster_ca_cert_rejected(self, tmp_path, monkeypatch):
-        """对端证书由别的 CA 签名 → 校验失败 (client 不信任)。"""
         prov = _provision_cluster(tmp_path)
         _set_mtls_env(monkeypatch, prov, "worker-1")
         import importlib
@@ -233,9 +231,9 @@ class TestMtlsTransport:
             _clear_mtls_env(monkeypatch)
             importlib.reload(mtls_mod)
 
+    # mTLS 关 → scheme=http, client_kwargs={} (不破坏现有 http 行为)。
     @pytest.mark.asyncio
     async def test_mtls_disabled_defaults_http(self, monkeypatch):
-        """mTLS 关 → scheme=http, client_kwargs={} (不破坏现有 http 行为)。"""
         _clear_mtls_env(monkeypatch)
         assert mtls_mod.scheme() == "http"
         assert mtls_mod.client_kwargs() == {}
@@ -243,16 +241,15 @@ class TestMtlsTransport:
         assert mtls_mod.client_ssl_context() is None
 
 
+# 细粒度权限 — ASGITransport, 强制模式 (enforce=True)。
+#
+# 验收: master 角色可 execute+cancel; worker 可 execute 不可 cancel;
+# 缺 X-Node-Id → 403; 越界 → 403。
+#
 class TestFineGrainedPermission:
-    """细粒度权限 — ASGITransport, 强制模式 (enforce=True)。
-
-    验收: master 角色可 execute+cancel; worker 可 execute 不可 cancel;
-    缺 X-Node-Id → 403; 越界 → 403。
-    """
-
+    # master 头 → /api/execute 200, /api/tasks/cancel 404 (无任务但过权限, 非 403)。
     @pytest.mark.asyncio
     async def test_master_can_execute_and_cancel(self):
-        """master 头 → /api/execute 200, /api/tasks/cancel 404 (无任务但过权限, 非 403)。"""
         from httpx import ASGITransport, AsyncClient
 
         from fusion_multi_node.agent import AgentConfig, NodeAgent
@@ -285,9 +282,9 @@ class TestFineGrainedPermission:
             )
             assert resp.status_code == 200, resp.text
 
+    # worker 头 → /api/tasks/cancel 403 (TASK_CANCEL 不在 WORKER 权限集)。
     @pytest.mark.asyncio
     async def test_worker_cannot_cancel(self):
-        """worker 头 → /api/tasks/cancel 403 (TASK_CANCEL 不在 WORKER 权限集)。"""
         from httpx import ASGITransport, AsyncClient
 
         from fusion_multi_node.agent import AgentConfig, NodeAgent
@@ -305,9 +302,9 @@ class TestFineGrainedPermission:
             resp = await client.post("/api/tasks/cancel", json={"task_id": "x"}, headers=hdr)
             assert resp.status_code == 403, resp.text
 
+    # worker 头 → /api/execute 200 (TASK_EXECUTE 在 WORKER 权限集)。
     @pytest.mark.asyncio
     async def test_worker_can_execute(self):
-        """worker 头 → /api/execute 200 (TASK_EXECUTE 在 WORKER 权限集)。"""
         from httpx import ASGITransport, AsyncClient
 
         from fusion_multi_node.agent import AgentConfig, NodeAgent
@@ -340,9 +337,9 @@ class TestFineGrainedPermission:
             )
             assert resp.status_code == 200, resp.text
 
+    # 强制模式缺 X-Node-Id → 403。
     @pytest.mark.asyncio
     async def test_enforce_missing_node_id_403(self):
-        """强制模式缺 X-Node-Id → 403。"""
         from httpx import ASGITransport, AsyncClient
 
         from fusion_multi_node.agent import AgentConfig, NodeAgent
@@ -363,9 +360,9 @@ class TestFineGrainedPermission:
             )
             assert resp.status_code == 403, resp.text
 
+    # 兼容模式 (enforce=False) 无 X-Node-Id → 放行 (现有测试/CLI 无头)。
     @pytest.mark.asyncio
     async def test_compatible_no_header_allows(self):
-        """兼容模式 (enforce=False) 无 X-Node-Id → 放行 (现有测试/CLI 无头)。"""
         from httpx import ASGITransport, AsyncClient
 
         from fusion_multi_node.agent import AgentConfig, NodeAgent

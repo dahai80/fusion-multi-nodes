@@ -1,4 +1,4 @@
-"""FMP 协议模块测试。"""
+# FMP 协议模块测试。
 
 import time
 

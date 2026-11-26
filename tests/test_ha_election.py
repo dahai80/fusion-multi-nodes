@@ -1,13 +1,12 @@
-"""HA 双 Master 选举 + 任务同步测试。
-
-验证:
-(a) 两个 master 经 HTTP ASGI 路由完成投票往返。
-(b) leader 任务同步到达 standby 本地存储 (receive_synced_tasks 落盘)。
-(c) standby 拒绝 assign_task (非 leader 不调度)。
-(d) 单 Master 模式 (无选举配置) 不受影响 — _is_leader 默认 True, assign_task 正常。
-
-走 ASGITransport + PortRoutingTransport (无真 TCP), Bearer 鉴权携带 TEST_TOKEN。
-"""
+# HA 双 Master 选举 + 任务同步测试。
+#
+# 验证:
+# (a) 两个 master 经 HTTP ASGI 路由完成投票往返。
+# (b) leader 任务同步到达 standby 本地存储 (receive_synced_tasks 落盘)。
+# (c) standby 拒绝 assign_task (非 leader 不调度)。
+# (d) 单 Master 模式 (无选举配置) 不受影响 — _is_leader 默认 True, assign_task 正常。
+#
+# 走 ASGITransport + PortRoutingTransport (无真 TCP), Bearer 鉴权携带 TEST_TOKEN。
 
 import time
 
@@ -32,9 +31,8 @@ M1_PORT = 11452
 M2_PORT = 11453
 
 
+# 按 URL 端口路由到对应 master ASGI app。
 class PortRoutingTransport(AsyncBaseTransport):
-    """按 URL 端口路由到对应 master ASGI app。"""
-
     def __init__(self, port_to_app: dict[int, object]):
         self._port_to_app = port_to_app
         self._clients: dict[int, AsyncClient] = {
@@ -72,8 +70,8 @@ def _make_server(master: ClusterMaster) -> MasterServer:
     return server
 
 
+# 经 register_node 注册 (同步 load_router 指标, 供 select_nodes 可见)。
 async def _register_node(master: ClusterMaster, node_id="n1"):
-    """经 register_node 注册 (同步 load_router 指标, 供 select_nodes 可见)。"""
     await master.register_node(
         NodeInfo(
             node_id=node_id,
@@ -100,9 +98,9 @@ def _task(tid="t-ha", status=TaskStatus.PENDING) -> ClusterTask:
     )
 
 
+# 起两个 master + 两个 server, 经 PortRoutingTransport 互连。
 @pytest.fixture
 async def ha_pair(tmp_path, monkeypatch):
-    """起两个 master + 两个 server, 经 PortRoutingTransport 互连。"""
     monkeypatch.setattr(
         "fusion_multi_node.master.cluster_master.is_safe_peer_host",
         lambda host: True,
@@ -147,9 +145,9 @@ async def ha_pair(tmp_path, monkeypatch):
 
 
 class TestHAVoteRoundTrip:
+    # (a) m1 (高优先级) 向 m2 (低优先级) 发起拉票 HTTP, m2 返回 vote_granted。
     @pytest.mark.asyncio
     async def test_vote_http_round_trip(self, ha_pair):
-        """(a) m1 (高优先级) 向 m2 (低优先级) 发起拉票 HTTP, m2 返回 vote_granted。"""
         m1 = ha_pair["m1"]
         # m1 高优先级向 m2 拉票: m2 priority=1, 候选人 priority=10 → 满足 >= 条件
         vote_req = VoteRequest(
@@ -161,9 +159,9 @@ class TestHAVoteRoundTrip:
         assert resp.voter_id == "master-2"
         assert resp.vote_granted is True
 
+    # 无地址对端 (裸字符串 peer) 拉票跳过, 返回 vote_granted=False。
     @pytest.mark.asyncio
     async def test_vote_no_address_peer_skipped(self, tmp_path):
-        """无地址对端 (裸字符串 peer) 拉票跳过, 返回 vote_granted=False。"""
         m = _make_master(tmp_path)
         m.setup_election(node_id="master-1", priority=10, known_nodes=[{"node_id": "peer-x"}])
         vote_req = VoteRequest(term=1, candidate_id="master-1", candidate_priority=10)
@@ -173,9 +171,9 @@ class TestHAVoteRoundTrip:
 
 
 class TestHATaskSync:
+    # (b) leader (m1) 落盘任务 → _persist_tasks 推送到 standby (m2) → m2 本地存储含该任务。
     @pytest.mark.asyncio
     async def test_leader_sync_reaches_standby_store(self, ha_pair, tmp_path):
-        """(b) leader (m1) 落盘任务 → _persist_tasks 推送到 standby (m2) → m2 本地存储含该任务。"""
         m1 = ha_pair["m1"]
         m2 = ha_pair["m2"]
         # m1 为 leader, m2 为 standby
@@ -192,9 +190,9 @@ class TestHATaskSync:
         assert "t-sync" in m2.tasks
         assert m2.tasks["t-sync"].status == TaskStatus.PENDING
 
+    # receive_synced_tasks 幂等: 重复推送同任务不重复计数, 终态不覆盖。
     @pytest.mark.asyncio
     async def test_receive_synced_tasks_idempotent(self, tmp_path):
-        """receive_synced_tasks 幂等: 重复推送同任务不重复计数, 终态不覆盖。"""
         m = _make_master(tmp_path)
         task_dicts = [
             {
@@ -213,9 +211,9 @@ class TestHATaskSync:
         assert len(m.tasks) == 1
         await m.stop()
 
+    # standby 已有终态任务不被 leader 旧快照覆盖。
     @pytest.mark.asyncio
     async def test_sync_does_not_overwrite_terminal(self, tmp_path):
-        """standby 已有终态任务不被 leader 旧快照覆盖。"""
         m = _make_master(tmp_path)
         # standby 已有 COMPLETED 任务
         async with m._tasks_lock:
@@ -237,18 +235,18 @@ class TestHATaskSync:
 
 
 class TestHAStandbyGuard:
+    # (c) standby (非 leader) assign_task 返回 False。
     @pytest.mark.asyncio
     async def test_standby_refuses_assign_task(self, ha_pair):
-        """(c) standby (非 leader) assign_task 返回 False。"""
         m2 = ha_pair["m2"]
         m2._is_leader = False
         await _register_node(m2, "n1")
         ok = await m2.assign_task(_task("t-refuse"))
         assert ok is False
 
+    # standby 提交任务路由返回 503 standby mode。
     @pytest.mark.asyncio
     async def test_standby_submit_route_503(self, ha_pair):
-        """standby 提交任务路由返回 503 standby mode。"""
         s2 = ha_pair["s2"]
         m2 = ha_pair["m2"]
         m2._is_leader = False
@@ -262,9 +260,9 @@ class TestHAStandbyGuard:
             assert resp.status_code == 503
             assert "standby" in resp.json()["detail"]
 
+    # leader assign_task 正常 (不被 standby 守卫拦截)。
     @pytest.mark.asyncio
     async def test_leader_assign_task_works(self, ha_pair):
-        """leader assign_task 正常 (不被 standby 守卫拦截)。"""
         m1 = ha_pair["m1"]
         m1._is_leader = True
         await _register_node(m1, "n1")
@@ -274,9 +272,9 @@ class TestHAStandbyGuard:
         ok = await m1.assign_task(task)
         assert ok is True
 
+    # P1-17: standby 且 leader 未定 (选举空窗) → assign_task 拒绝派发 (返 False)。
     @pytest.mark.asyncio
     async def test_standby_leader_unknown_rejects_assign(self, ha_pair):
-        """P1-17: standby 且 leader 未定 (选举空窗) → assign_task 拒绝派发 (返 False)。"""
         m2 = ha_pair["m2"]
         m2._is_leader = False
         # _leader_id 默认 None → leader_known False (选举空窗)
@@ -289,9 +287,9 @@ class TestHAStandbyGuard:
 
 
 class TestSingleMasterUnaffected:
+    # (d) 单 Master 模式 (无选举) _is_leader=True, assign_task 正常。
     @pytest.mark.asyncio
     async def test_single_master_assign_task(self, tmp_path):
-        """(d) 单 Master 模式 (无选举) _is_leader=True, assign_task 正常。"""
         m = _make_master(tmp_path)
         assert m._election is None
         assert m._is_leader is True
@@ -302,18 +300,18 @@ class TestSingleMasterUnaffected:
         assert ok is True
         await m.stop()
 
+    # 单 Master 模式收到拉票请求返回 vote_granted=False。
     @pytest.mark.asyncio
     async def test_single_master_vote_rejected(self, tmp_path):
-        """单 Master 模式收到拉票请求返回 vote_granted=False。"""
         m = _make_master(tmp_path)
         req = VoteRequest(term=1, candidate_id="other", candidate_priority=5)
         resp = await m.handle_vote_request(req)
         assert resp.vote_granted is False
         await m.stop()
 
+    # 单 Master 模式 _sync_tasks_to_standbys_locked 返回空 (无选举)。
     @pytest.mark.asyncio
     async def test_single_master_sync_no_targets(self, tmp_path):
-        """单 Master 模式 _sync_tasks_to_standbys_locked 返回空 (无选举)。"""
         m = _make_master(tmp_path)
         async with m._tasks_lock:
             m.tasks["t1"] = _task("t1")
@@ -321,9 +319,9 @@ class TestSingleMasterUnaffected:
         assert targets == []
         await m.stop()
 
+    # 单 Master 模式 /api/ha/sync-tasks 仍可接收 (无选举, receive_synced_tasks 直接合并)。
     @pytest.mark.asyncio
     async def test_single_master_sync_tasks_endpoint(self, tmp_path):
-        """单 Master 模式 /api/ha/sync-tasks 仍可接收 (无选举, receive_synced_tasks 直接合并)。"""
         m = _make_master(tmp_path)
         s = _make_server(m)
         transport = ASGITransport(app=s.app)
@@ -339,12 +337,11 @@ class TestSingleMasterUnaffected:
         await m.stop()
 
 
+# GAP-1 (Phase C): leader 全状态同步 (nodes/kv/banned) 到 standby, failover 即调度。
 class TestHAStateSync:
-    """GAP-1 (Phase C): leader 全状态同步 (nodes/kv/banned) 到 standby, failover 即调度。"""
-
+    # leader 推 nodes/kv/banned → standby 合并, 持有完整拓扑。
     @pytest.mark.asyncio
     async def test_leader_state_sync_reaches_standby(self, ha_pair):
-        """leader 推 nodes/kv/banned → standby 合并, 持有完整拓扑。"""
         m1 = ha_pair["m1"]
         m2 = ha_pair["m2"]
         m1._is_leader = True
@@ -375,9 +372,9 @@ class TestHAStateSync:
         assert m2.kv_cache["kv-1"].model_name == "qwen-1b"
         assert m2.is_node_banned("n-bad")
 
+    # receive_synced_state 幂等: 重复推送同状态不重复增长。
     @pytest.mark.asyncio
     async def test_receive_synced_state_idempotent(self, tmp_path):
-        """receive_synced_state 幂等: 重复推送同状态不重复增长。"""
         m = _make_master(tmp_path)
         state = {
             "nodes": [
@@ -415,9 +412,9 @@ class TestHAStateSync:
         assert len(m.kv_cache) == 1
         await m.stop()
 
+    # failover 场景: standby 收到状态后, promote 为 leader 可立即调度 (有节点)。
     @pytest.mark.asyncio
     async def test_state_sync_preserves_standby_topology_on_failover(self, ha_pair):
-        """failover 场景: standby 收到状态后, promote 为 leader 可立即调度 (有节点)。"""
         m1 = ha_pair["m1"]
         m2 = ha_pair["m2"]
         m1._is_leader = True
@@ -436,9 +433,9 @@ class TestHAStateSync:
         ok = await m2.assign_task(task)
         assert ok is True
 
+    # /api/ha/sync-state 端点接收并合并全状态。
     @pytest.mark.asyncio
     async def test_state_sync_endpoint_round_trip(self, ha_pair):
-        """/api/ha/sync-state 端点接收并合并全状态。"""
         s2 = ha_pair["s2"]
         m2 = ha_pair["m2"]
         m2._is_leader = False
@@ -465,17 +462,17 @@ class TestHAStateSync:
             assert resp.json()["counts"]["nodes"] == 1
         assert "n-ep" in m2.nodes
 
+    # 单 Master 模式 _build_state_sync_targets 返回空 (无选举)。
     @pytest.mark.asyncio
     async def test_single_master_state_sync_no_targets(self, tmp_path):
-        """单 Master 模式 _build_state_sync_targets 返回空 (无选举)。"""
         m = _make_master(tmp_path)
         targets = await m._build_state_sync_targets()
         assert targets == []
         await m.stop()
 
+    # 非法 status 字符串回退 OFFLINE, 不抛异常。
     @pytest.mark.asyncio
     async def test_state_sync_bad_node_status_falls_back(self, tmp_path):
-        """非法 status 字符串回退 OFFLINE, 不抛异常。"""
         m = _make_master(tmp_path)
         state = {
             "nodes": [{"node_id": "n-x", "status": "totally-bogus"}],
@@ -489,9 +486,9 @@ class TestHAStateSync:
 
 
 class TestHAVoteEndpoint:
+    # 单 Master /api/ha/vote 返回 vote_granted=False (无选举)。
     @pytest.mark.asyncio
     async def test_vote_endpoint_single_master_rejects(self, tmp_path):
-        """单 Master /api/ha/vote 返回 vote_granted=False (无选举)。"""
         m = _make_master(tmp_path)
         s = _make_server(m)
         transport = ASGITransport(app=s.app)
@@ -506,9 +503,9 @@ class TestHAVoteEndpoint:
             assert data["vote_granted"] is False
         await m.stop()
 
+    # 配置选举的 master /api/ha/vote 透传到选举管理器。
     @pytest.mark.asyncio
     async def test_vote_endpoint_with_election(self, tmp_path):
-        """配置选举的 master /api/ha/vote 透传到选举管理器。"""
         m = _make_master(tmp_path)
         m.setup_election(node_id="master-1", priority=3)
         s = _make_server(m)
@@ -525,9 +522,9 @@ class TestHAVoteEndpoint:
             assert data["voter_id"] == "master-1"
         await m.stop()
 
+    # /api/ha/vote 非法 payload 返回 422 (P1-10: pydantic 校验接管)。
     @pytest.mark.asyncio
     async def test_vote_endpoint_bad_payload(self, tmp_path):
-        """/api/ha/vote 非法 payload 返回 422 (P1-10: pydantic 校验接管)。"""
         m = _make_master(tmp_path)
         s = _make_server(m)
         transport = ASGITransport(app=s.app)

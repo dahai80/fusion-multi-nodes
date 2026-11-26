@@ -1,4 +1,4 @@
-"""#69 cluster drain: drain-status 契约 + 排空判定 + 长任务阻塞。"""
+# #69 cluster drain: drain-status 契约 + 排空判定 + 长任务阻塞。
 
 import pytest
 from httpx import ASGITransport, AsyncClient

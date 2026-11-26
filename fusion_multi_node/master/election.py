@@ -1,12 +1,11 @@
-"""M3-03 Master 选举机制 — 优先级 + 心跳超时的分布式选举协议。
-
-当 Master 节点故障时，集群中多个 Standby 节点通过选举协议确定新 Master。
-选举策略:
-- 优先级: 每个候选人有优先级值，高优先级优先
-- 心跳超时: 基于超时检测触发选举
-- 投票: 候选人向已知节点拉票，多数票获胜
-- 分裂预防: 优先级相同按 node_id 字典序打破
-"""
+# M3-03 Master 选举机制 — 优先级 + 心跳超时的分布式选举协议。
+#
+# 当 Master 节点故障时，集群中多个 Standby 节点通过选举协议确定新 Master。
+# 选举策略:
+# - 优先级: 每个候选人有优先级值，高优先级优先
+# - 心跳超时: 基于超时检测触发选举
+# - 投票: 候选人向已知节点拉票，多数票获胜
+# - 分裂预防: 优先级相同按 node_id 字典序打破
 
 from __future__ import annotations
 
@@ -59,9 +58,8 @@ class VoteResponse:
     voter_id: str = ""
 
 
+# Master 选举管理器。
 class MasterElection:
-    """Master 选举管理器。"""
-
     def __init__(
         self,
         node_id: str,
@@ -113,12 +111,12 @@ class MasterElection:
         lo, hi = self._election_timeout_range
         return lo + random.random() * (hi - lo)
 
+    # 登记已知候选节点。接受 str (仅 node_id, 向后兼容) 或 ElectionCandidate (带 ip/port)。
+    #
+    # 传 str 时仅入 _known_nodes 集 (无地址, 不可达, 用于多数计数);
+    # 传 ElectionCandidate 时同时入 candidates 字典 (供 get_candidate 解析对端 HTTP 地址)。
+    #
     def add_known_node(self, node_or_candidate: str | ElectionCandidate) -> None:
-        """登记已知候选节点。接受 str (仅 node_id, 向后兼容) 或 ElectionCandidate (带 ip/port)。
-
-        传 str 时仅入 _known_nodes 集 (无地址, 不可达, 用于多数计数);
-        传 ElectionCandidate 时同时入 candidates 字典 (供 get_candidate 解析对端 HTTP 地址)。
-        """
         if isinstance(node_or_candidate, ElectionCandidate):
             cand = node_or_candidate
             self._known_nodes.add(cand.node_id)
@@ -126,13 +124,13 @@ class MasterElection:
         else:
             self._known_nodes.add(node_or_candidate)
 
+    # 查询候选节点 (含 ip/port)。无地址返回 None。
     def get_candidate(self, node_id: str) -> ElectionCandidate | None:
-        """查询候选节点 (含 ip/port)。无地址返回 None。"""
         return self.candidates.get(node_id)
 
+    # P1-17: leader 是否已确定。选举空窗期 (_leader_id None) → False, 客户端应得 503 而非误派。
     @property
     def leader_known(self) -> bool:
-        """P1-17: leader 是否已确定。选举空窗期 (_leader_id None) → False, 客户端应得 503 而非误派。"""
         return self._leader_id is not None
 
     def remove_known_node(self, node_id: str) -> None:
@@ -192,13 +190,13 @@ class MasterElection:
         except asyncio.CancelledError:
             pass
 
+    # P2-6 (审计 §5.10): 锁外向所有已知 follower 推 heartbeat (best-effort)。
+    #
+    # C1 修复: 调 send_heartbeat 回调 (HTTP POST /api/ha/heartbeat)。
+    # 回调内自解析对端地址 + best-effort 吞异常, 这里只负责遍历已知节点。
+    # peers 由 _election_loop 锁内快照传入, HTTP 不持 _lock (旧实现持锁内 await N 对端)。
+    #
     async def _broadcast_heartbeat(self, peers: list[str]) -> None:
-        """P2-6 (审计 §5.10): 锁外向所有已知 follower 推 heartbeat (best-effort)。
-
-        C1 修复: 调 send_heartbeat 回调 (HTTP POST /api/ha/heartbeat)。
-        回调内自解析对端地址 + best-effort 吞异常, 这里只负责遍历已知节点。
-        peers 由 _election_loop 锁内快照传入, HTTP 不持 _lock (旧实现持锁内 await N 对端)。
-        """
         if not self._send_heartbeat:
             return
         for peer_id in peers:
@@ -341,8 +339,8 @@ class MasterElection:
             else:
                 self._on_demoted()
 
+    # C2: 启动时读盘恢复 term/voted_for。无 state_path 或读失败 → 落 0/None (容错)。
     def _load_state(self) -> None:
-        """C2: 启动时读盘恢复 term/voted_for。无 state_path 或读失败 → 落 0/None (容错)。"""
         if not self._state_path or not self._state_path.exists():
             return
         try:
@@ -359,8 +357,8 @@ class MasterElection:
         except Exception as e:
             logger.warning(f"C2 选举状态恢复失败 ({self._state_path}): {e}")
 
+    # C2: term/voted_for 落盘 (原子写)。每次投票/term 变更后调, 防重启 split brain。
     def _save_state(self) -> None:
-        """C2: term/voted_for 落盘 (原子写)。每次投票/term 变更后调, 防重启 split brain。"""
         if not self._state_path:
             return
         try:
@@ -381,11 +379,11 @@ class MasterElection:
         except Exception as e:
             logger.warning(f"C2 选举状态落盘失败: {e}")
 
+    # P2-6 (审计 §5.10): term/voted_for/fencing_token 异步落盘 (锁外调) — 快照字段后 to_thread 调
+    # _save_state, fsync 不持 _lock 亦不阻塞事件循环。无 state_path (纯内存) 则 no-op。
+    # 供 handle_vote_request/receive_heartbeat/_start_election/_handle_vote_response/_become_leader 锁外落盘。
+    #
     async def _persist_state_async(self) -> None:
-        """P2-6 (审计 §5.10): term/voted_for/fencing_token 异步落盘 (锁外调) — 快照字段后 to_thread 调
-        _save_state, fsync 不持 _lock 亦不阻塞事件循环。无 state_path (纯内存) 则 no-op。
-        供 handle_vote_request/receive_heartbeat/_start_election/_handle_vote_response/_become_leader 锁外落盘。
-        """
         if not self._state_path:
             return
         term = self.current_term
@@ -393,8 +391,8 @@ class MasterElection:
         fencing = self.fencing_token
         await asyncio.to_thread(self._save_state_snapshot, term, voted, fencing)
 
+    # P2-6: 按快照值落盘 (锁外 to_thread 调, 避读 self 竞态)。#72: 含 fencing_token。
     def _save_state_snapshot(self, term: int, voted: str | None, fencing: int = 0) -> None:
-        """P2-6: 按快照值落盘 (锁外 to_thread 调, 避读 self 竞态)。#72: 含 fencing_token。"""
         if not self._state_path:
             return
         try:
@@ -411,9 +409,9 @@ class MasterElection:
         except Exception as e:
             logger.warning(f"C2 选举状态落盘失败: {e}")
 
+    # #72: 当前 fencing token (供 ClusterMaster 派发头注入, agent 据此拒过期 master)。
     @property
     def current_fencing_token(self) -> int:
-        """#72: 当前 fencing token (供 ClusterMaster 派发头注入, agent 据此拒过期 master)。"""
         return self.fencing_token
 
     def get_state(self) -> dict[str, Any]:
