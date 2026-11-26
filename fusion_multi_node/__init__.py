@@ -33,5 +33,5 @@
 # 100% 本地/LAN, 无云。**v0.14.0 纪元/confirm 持久化** (rule_epoch.json 原子落盘, start 恢复;
 # leader `_build_state_sync_payload` 纳入 epoch+confirm, standby 取 max epoch 防回退) — 修重启归零 / HA failover 从 0。
 
-__version__ = "0.20.12"
+__version__ = "0.20.13"
 __app_name__ = "Fusion-Multi-Node"
