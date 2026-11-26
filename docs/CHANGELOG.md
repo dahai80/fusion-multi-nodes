@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.11
+version: 0.20.12
 updated: 2026-11-09
 owner: "@dahai"
 source_of_truth:
@@ -20,6 +20,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.12] - 2026-11-26 — No-docstring convention enforcement (#118, #120)
+
+### Changed
+- **Docstring sweep** (PR #121) — 953 docstrings across 138 files converted
+  to `#` comments above the definition (zero information loss); module
+  docstrings moved to top-of-file comments. Generated `fmp_proto_pb2.py`
+  and vendored code excluded. AST check confirms 0 docstrings remain.
+- **`cli.py`** — click group/command help texts preserved via `help=`
+  kwargs (docstrings fed `--help` output); 8 docstring-only bodies got
+  explicit `pass`. `config.py`: `ConfigValidationError` same.
+- **`tests/test_task_persistence.py`** — fsync-loop-timing test widened its
+  scheduling window (timer 200ms / slow write 500ms / bound 300ms); the old
+  70ms bound flaked under full-suite load with no code regression.
 
 ## [0.20.11] - 2026-11-16 — CI efficiency retrofit (#115)
 
