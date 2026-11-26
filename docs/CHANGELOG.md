@@ -7,7 +7,7 @@ doc_type: changelog
 title: {zh: "fusion-multi-node 完整更新日志", en: "fusion-multi-node Full Changelog"}
 audience: engineer
 status: draft
-version: 0.20.12
+version: 0.20.13
 updated: 2026-11-09
 owner: "@dahai"
 source_of_truth:
@@ -20,6 +20,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.20.13] - 2026-11-26 — No-docstring CI gate (refs #120, fusion#9)
+
+### Added
+- **`ci/check_docstrings.py`** (PR #123) — stdlib-only AST gate over all
+  tracked `.py` files (git ls-files): exits 1 with file:line locations for
+  any module/class/function docstring. Generated `fmp_proto_pb2.py`
+  excluded (protoc regen would reintroduce its one-line module docstring).
+  AST-based, not a raw `"""` scan — string literals legitimately use
+  triple quotes.
+- **CI wiring** — gate runs in the `lint-test` job before the test steps.
 
 ## [0.20.12] - 2026-11-26 — No-docstring convention enforcement (#118, #120)
 
